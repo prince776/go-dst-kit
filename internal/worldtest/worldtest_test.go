@@ -105,3 +105,23 @@ func TestFSContract(t *testing.T) {
 		})
 	}
 }
+
+// Verifies: [behaves-like-net]
+// Fails if: the simulated network differs from the OS network in any
+// checked way.
+func TestNetContract(t *testing.T) {
+	for _, c := range worldtest.NetChecks {
+		t.Run(c.Name+"/real", func(t *testing.T) {
+			if err := runReal(c.Fn); err != nil {
+				t.Fatal(err)
+			}
+		})
+		t.Run(c.Name+"/sim", func(t *testing.T) {
+			for seed := uint64(1); seed <= 20; seed++ {
+				if r := simworld.Run(simworld.Options{Seed: seed}, c.Fn); r.Err != nil {
+					t.Fatalf("seed %d: %v", seed, r.Err)
+				}
+			}
+		})
+	}
+}

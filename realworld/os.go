@@ -113,3 +113,8 @@ func (osNet) DialContext(ctx context.Context, network, address string) (net.Conn
 	var d net.Dialer
 	return d.DialContext(ctx, network, address)
 }
+
+var (
+	_ dst.FS  = (*osFS)(nil)
+	_ dst.Net = osNet{}
+)

@@ -188,3 +188,24 @@ func (c *simCtx) cancel(err, cause error) {
 		f()
 	}
 }
+
+// AfterDone arranges for f to run once ctx is done, and returns a function
+// that cancels that (reporting whether it did). For a simulated context, f
+// runs synchronously in whoever cancels it; otherwise this is
+// context.AfterFunc (f runs in its own goroutine).
+func AfterDone(ctx context.Context, f func()) (stop func() bool) {
+	d := ctx.Done()
+	if d == nil {
+		return func() bool { return false }
+	}
+	if c, ok := ctx.(*simCtx); ok {
+		return c.AfterFunc(f)
+	}
+	if c, ok := ctx.Value(simCtxKey{}).(*simCtx); ok && c.inner.Done() == d {
+		return c.AfterFunc(f)
+	}
+	if sched.CurrentTask() != nil {
+		panic(fmt.Sprintf("dst: a simulated World can't watch a %T; derive contexts with dst.WithCancel, WithTimeout or WithDeadline", ctx))
+	}
+	return context.AfterFunc(ctx, f)
+}

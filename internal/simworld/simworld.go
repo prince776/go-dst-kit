@@ -22,6 +22,7 @@ import (
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/internal/sched"
 	"github.com/prince776/go-dst-kit/internal/simfs"
+	"github.com/prince776/go-dst-kit/internal/simnet"
 	"github.com/prince776/go-dst-kit/internal/worldhook"
 )
 
@@ -35,11 +36,15 @@ type Options struct {
 	Logf     func(format string, args ...any)
 	MaxTime  time.Duration
 	MaxSteps uint64
+	// Net configures the network. Zero latencies get defaults (50µs + a
+	// 1ms mean tail).
+	Net simnet.Options
 }
 
 // Sim is one simulated run.
 type Sim struct {
 	S        *sched.Scheduler
+	Net      *simnet.Network
 	machines map[string]*Machine
 	order    []*Machine
 }
@@ -51,6 +56,7 @@ type Machine struct {
 	M     *sched.Machine
 	World *dst.World
 	Disk  *simfs.FS
+	Host  *simnet.Host
 	// Start is the machine's main function, run on Restart.
 	Start func(w *dst.World)
 	sim   *Sim
@@ -63,11 +69,16 @@ type MachineOptions struct {
 
 // New starts a simulation.
 func New(opts Options) *Sim {
-	return &Sim{
+	if opts.Net.MinLatency == 0 && opts.Net.MeanLatency == 0 {
+		opts.Net.MinLatency, opts.Net.MeanLatency = 50*time.Microsecond, time.Millisecond
+	}
+	s := &Sim{
 		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
 			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps}),
 		machines: map[string]*Machine{},
 	}
+	s.Net = simnet.New(s.S, Epoch, opts.Net)
+	return s
 }
 
 // Machine returns the named machine, creating it (with default options)
@@ -87,7 +98,8 @@ func (s *Sim) AddMachine(name string, opts MachineOptions) *Machine {
 	sm := s.S.NewMachine(name)
 	m := &Machine{Name: name, M: sm, sim: s}
 	m.Disk = simfs.New(s.S, sm, opts.Disk)
-	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: Epoch, FS: m.Disk}).(*dst.World)
+	m.Host = s.Net.Attach(sm)
+	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: Epoch, FS: m.Disk, Net: m.Host}).(*dst.World)
 	s.machines[name] = m
 	s.order = append(s.order, m)
 	return m
@@ -148,3 +160,8 @@ func (s *Sim) Run(main func(w *dst.World)) Result {
 
 // Run is New(opts).Run(main).
 func Run(opts Options, main func(w *dst.World)) Result { return New(opts).Run(main) }
+
+var (
+	_ dst.FS  = (*simfs.FS)(nil)
+	_ dst.Net = (*simnet.Host)(nil)
+)

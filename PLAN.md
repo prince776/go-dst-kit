@@ -12,8 +12,8 @@ each one.
 | 1 | Spike | done (reviewed; removed after M2) |
 | 2 | World core: scheduler, channels, select, time, sync, context, rand; real + sim | **done** |
 | 3 | Machines, disk, crash/restart | **done** |
-| 4 | Network streams, HTTP adapter, gRPC adapter (own module) | next |
-| 5 | Runner (`dsttest`) | |
+| 4 | Network streams, HTTP adapter, gRPC adapter (own module) | **done** |
+| 5 | Runner (`dsttest`) | next |
 | 6 | Oracles (`check`) | |
 | 7 | `dstlint` | |
 | 8 | Examples: workerpool, wal, dedupe, lease, gcounter, twophase | |
@@ -59,6 +59,18 @@ each one.
 - **Run limits** (`MaxTime`, `MaxSteps`) and incarnation-scoped timers, so
   a crashed machine's ticker can't keep a deadlocked run alive forever.
 
+- **Network model (M4).** TCP-like streams: in order, exactly once;
+  partitions stall (TCP retransmits) and Heal delivers what was held; a
+  crashed machine is silent and its restart answers with a reset; resets
+  travel in order and discard unread data (RFC 7230 §6.6). No datagrams
+  yet (optional in the proposal).
+- **HTTP adapter**: one connection per request in simulation (no pooling);
+  handler panics fail the run (net/http would log them). Use request
+  contexts, not `http.Client.Timeout` (real timers), in simulated code.
+- **gRPC adapter** in its own module (`dstgrpc`, grpc-go v1.84.0, the newest
+  that supports Go 1.25). One connection per call; status details aren't
+  carried; interceptors via dstgrpc options (grpc-go's are opaque).
+
 ## Findings
 
 - **Uniform random scheduling makes "one goroutine delayed for many steps"
@@ -69,6 +81,15 @@ each one.
   (280 vs 255ns) and Mutex (14ns) are at parity. Later, if needed: typed
   `Select2`/`Select3` helpers with a native select inside.
 - **Sim speed**: ~3.5µs per channel round trip (4 baton handoffs).
+- **The simulator caught a bug in my own gRPC adapter (M4)**: the server
+  closed connections while the client's last frame was in flight, which
+  resets the connection and can destroy the response. Fixed with a linger
+  (wait for the client to close). It also showed the network model was
+  too kind (a reset couldn't destroy unread data) and slightly wrong (a
+  reset could overtake earlier data); both fixed.
+- **Real gRPC races on deadline**: a server's context ends with
+  `DeadlineExceeded` or `Canceled` depending on whether the client's reset
+  arrives first. The law is that the deadline reaches the server.
 
 ## Verification status (M2)
 
@@ -82,6 +103,10 @@ each one.
 | crash-is-legal, sync-is-durable | 2000 random op sequences × 3 seeds × 2 modes against an independent model of the crash rules |
 | crash-explores | every legal crash state reached (both modes); sanity: a kinder disk and a Sync that forgets data both fail |
 | crash-restart, power-loss-is-a-crash, dead-timers-stop, runs-end | simworld tests: 30 seeds of crash/restart/power loss with every acked record surviving |
+| behaves-like-net | 5-check net contract suite against the OS network and simnet |
+| stream-is-exact, partition-stalls, crash-is-silent, reset-discards-unread | simnet tests, each with its negative case (e.g. a read across a partition times out) |
+| handlers-run-unchanged, client-honours-context, handler-panic-fails-run | same handlers and client on net/http and in simulation; deadline and cancel end requests; negative: no deadline waits for the slow server |
+| services-run-unchanged, interceptors-run, deadline-propagates | grpc-go's health service, unary + streaming + metadata + status + interceptors, on real grpc-go and in simulation; partitioned call ends with DeadlineExceeded |
 
 All tests pass with `-race`.
 
