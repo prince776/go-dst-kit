@@ -8,9 +8,9 @@ import "fmt"
 // channel takes a value straight from a sender, and close wakes everyone.
 //
 // Verified:
-//   - [chan-matches-go] For small programs, the set of outcomes the
-//     scheduler can produce (across seeds) equals the set an independent
-//     model of Go's channel and select semantics allows.
+//   - [chan-matches-go] Channel programs produce exactly the outcomes Go's
+//     semantics allow. Checked on small programs: the outcomes across seeds
+//     equal those an independent model of channels and select allows.
 type Chan[T any] struct {
 	s      *Scheduler
 	id     int

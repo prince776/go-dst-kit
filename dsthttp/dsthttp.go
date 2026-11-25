@@ -16,9 +16,8 @@
 // Verified:
 //   - [handlers-run-unchanged] The same handlers and client calls work in
 //     both Worlds (status, headers, bodies, keep-alive, methods).
-//   - [client-honours-context] A request ends with the context's error once
-//     its deadline passes or it is cancelled, even if the server never
-//     answers.
+//   - [client-honours-context] A request ends with the context's error when
+//     the context ends. That holds even if the server never answers.
 //   - [handler-panic-fails-run] A panic in a handler fails the simulated
 //     run (unlike net/http, which logs it), except http.ErrAbortHandler.
 //

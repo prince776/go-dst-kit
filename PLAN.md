@@ -17,7 +17,7 @@ each one.
 | 6 | Oracles (`check`) | **done** |
 | 7 | `dstlint` | **done** |
 | 8 | Examples (own module): wal, dedupe, lease, gcounter, twophase, workerpool | **done** |
-| 9 | Docs, CI, sys view | docs + CI **done**; sys view next |
+| 9 | Docs, CI, sys view | **done** (65 laws, all linked and passing) |
 
 ## Decisions made while building (for Prince's review)
 

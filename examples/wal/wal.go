@@ -13,9 +13,9 @@
 // Verified:
 //   - [acked-is-durable] Every record Append returned for survives any
 //     crash, in order.
-//   - [recovery-is-a-prefix] After a crash, Open returns exactly the
-//     records appended before it, minus at most the unacknowledged ones at
-//     the end: never garbage, never a gap.
+//   - [recovery-is-a-prefix] After a crash, Open returns a prefix of the
+//     appended records. It may lack only unacknowledged ones at the end:
+//     never garbage, never a gap.
 //   - [real-and-simulated] The same code runs on the real filesystem.
 //
 // Depends on: dst

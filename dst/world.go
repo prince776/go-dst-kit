@@ -30,9 +30,10 @@
 // Verified:
 //   - [same-code-both-worlds] The contract suite passes unchanged against
 //     the real World and the simulated one.
-//   - [select-picks-ready] Select runs exactly one case: a ready one if any
-//     (chosen at random among ready ones), Default if none is ready and
-//     there is one, else it waits for the first to become ready.
+//   - [select-picks-ready] Select runs exactly one case, preferring ready
+//     ones. A ready case is chosen at random among the ready ones; with
+//     none ready it runs Default if there is one, else waits for the first
+//     to become ready.
 //   - [timers-follow-world-clock] Timers, tickers, Sleep and context
 //     deadlines fire by the World's clock, in deadline order.
 //

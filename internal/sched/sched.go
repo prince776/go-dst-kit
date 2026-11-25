@@ -12,9 +12,9 @@
 //   - [one-at-a-time] At most one task runs at any moment.
 //   - [seed-replays] The same seed and program give the same sequence of
 //     scheduling decisions and the same fingerprint.
-//   - [deadlock-reported] When no task can run and no timer is pending
-//     before the run's goal is met, the run fails with every live task and
-//     what it waits for.
+//   - [deadlock-reported] A run where nothing can run or wake fails, listing
+//     each live task and what it waits for. That is: no task runnable, no
+//     timer pending, and the run's goal not met.
 //   - [leak-reported] A task that keeps the baton longer than the watchdog
 //     (blocked outside the World) fails the run, naming the task.
 //   - [panic-reported] A panic in a task fails the run with the task's name

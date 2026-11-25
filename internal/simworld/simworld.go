@@ -4,7 +4,7 @@
 //
 // Verified:
 //   - [crash-restart] Restart reruns the machine's Start function on the
-//     disk the crash left: synced data and names are there, the rest is
+//     disk the crash left. Synced data and names are there; the rest is
 //     whatever the disk's crash rules allow.
 //   - [power-loss-is-a-crash] Power loss inside an I/O call crashes the
 //     machine; the call never returns.

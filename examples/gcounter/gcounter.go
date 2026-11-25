@@ -13,8 +13,8 @@
 //
 // Verified:
 //   - [converges] Once faults stop, every node reports the same value.
-//   - [counts-exactly] That value is at least the acknowledged increments
-//     and at most the attempted ones, under crashes, partitions, resets
+//   - [counts-exactly] The value lies between the acknowledged and the
+//     attempted increments. That holds under crashes, partitions, resets
 //     and power loss.
 //
 // Depends on: dst

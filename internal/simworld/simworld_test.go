@@ -88,6 +88,10 @@ func TestCrashRestart(t *testing.T) {
 
 // Timers die with the incarnation that set them, so a crashed machine's
 // ticker doesn't keep the run alive (a real deadlock is still reported).
+//
+// Verifies: [dead-timers-stop]
+// Fails if: a crashed machine's ticker keeps firing, or the deadlock it
+// hid goes unreported.
 func TestDeadMachineTimersStop(t *testing.T) {
 	sim := simworld.New(simworld.Options{Seed: 1, MaxTime: time.Hour})
 	a := sim.Machine("a")
@@ -105,6 +109,10 @@ func TestDeadMachineTimersStop(t *testing.T) {
 }
 
 // A run that never finishes is cut off with an error, not run forever.
+//
+// Verifies: [runs-end]
+// Fails if: a run past MaxTime or MaxSteps keeps going or ends without an
+// error.
 func TestLimits(t *testing.T) {
 	spin := func(w *dst.World) {
 		for {

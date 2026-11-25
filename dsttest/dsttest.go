@@ -45,10 +45,10 @@
 //     happened in any seed.
 //   - [finds-planted-bugs] Known-bad systems (a WAL without fsync, a pool
 //     that deadlocks) fail within the default number of seeds.
-//   - [workload-finishes] A workload goroutine (h.Go), or one it started,
-//     still running at the end of the recovery phase fails the seed,
-//     naming what it waits for;
-//     Final checks run only after the workload is done.
+//   - [workload-finishes] Workload goroutines still running when recovery
+//     ends fail the seed. That covers h.Go goroutines and those they
+//     started; the report names what each waits for, and Final checks run
+//     only after the workload is done.
 //
 // Depends on: dst, internal/simworld
 package dsttest
