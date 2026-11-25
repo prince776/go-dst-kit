@@ -17,7 +17,7 @@ each one.
 | 6 | Oracles (`check`) | **done** |
 | 7 | `dstlint` | **done** |
 | 8 | Examples (own module): wal, dedupe, lease, gcounter, twophase, workerpool | **done** |
-| 9 | Docs, CI, sys view | next |
+| 9 | Docs, CI, sys view | docs + CI **done**; sys view next |
 
 ## Decisions made while building (for Prince's review)
 
@@ -148,6 +148,12 @@ each one.
   is reported with its parent and what it waits for
   ("workerpool.Map.func1 (started by workload2): send on chan#3").
   Background loops started from setup (`h.World().Go`) are exempt.
+- **The nightly-sized sweep (20,000 seeds per example) passes** for all
+  six. Its first run found that dedupe's 5s recovery phase was too short:
+  a correct producer on a slow-network seed (30ms/hop) hit one 300ms
+  timeout with its backoff already at the 1s cap, and didn't finish. Not
+  a system bug; the recovery phase is now 10s, and `StuckError` says that
+  a goroutine waiting on a timeout may just be slow.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.

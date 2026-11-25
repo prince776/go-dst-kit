@@ -68,10 +68,13 @@ func harness(bugs dedupe.Bugs) func(h *dsttest.Harness) {
 }
 
 var opts = dsttest.Options{
-	Seeds:         200,
-	Faults:        dsttest.AllFaults,
-	FaultPhase:    5 * time.Second,
-	RecoveryPhase: 5 * time.Second,
+	Seeds:      200,
+	Faults:     dsttest.AllFaults,
+	FaultPhase: 5 * time.Second,
+	// Retries back off up to ~2s, and on a slow network an attempt can
+	// time out even without faults: give the workload room to finish.
+	// (A 20,000-seed sweep found a 5s recovery phase too short.)
+	RecoveryPhase: 10 * time.Second,
 }
 
 // Verifies: [exactly-once], [eventually-delivered]

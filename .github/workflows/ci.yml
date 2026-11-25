@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *" # nightly: the long sweep
+
+jobs:
+  library:
+    strategy:
+      matrix:
+        go: ["1.25.x", "stable"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: test -z "$(gofmt -l $(git ls-files '*.go' | grep -v testdata))"
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  modules:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [dstgrpc, dstlint, examples]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+      - working-directory: ${{ matrix.module }}
+        run: go vet ./... && go test -race ./...
+
+  lint-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: dstlint/go.mod
+      - working-directory: dstlint
+        run: go build -o "$RUNNER_TEMP/dstlint" ./cmd/dstlint
+      - working-directory: examples
+        run: '"$RUNNER_TEMP/dstlint" ./...'
+
+  nightly-sweep:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: examples/go.mod
+      - working-directory: examples
+        run: go test -timeout 2h ./... -dst.seeds=20000

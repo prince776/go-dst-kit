@@ -567,7 +567,7 @@ func (e *InvariantError) Unwrap() error { return e.Err }
 type StuckError struct{ Goroutines []string }
 
 func (e *StuckError) Error() string {
-	return "workload goroutines never finished (deadlock, leak or lost liveness):\n  " + strings.Join(e.Goroutines, "\n  ")
+	return "workload goroutines never finished (deadlock, leak or lost liveness; one waiting on a timeout may just be slow: replay with -dst.v, or lengthen RecoveryPhase):\n  " + strings.Join(e.Goroutines, "\n  ")
 }
 
 // FinalError is a failed Final check.
