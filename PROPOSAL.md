@@ -148,3 +148,55 @@ go further.
    mutation tool) when their milestone comes, each re-reviewed?
 5. **Package names**: `dst`, `dst/realworld`, `dsttest`, `check`.
 6. **Milestones and order** as above, starting with the spike.
+
+## Prince's answers (2026-11-25)
+
+1. Shape: **yes**. The state-machine style is a complete re-architecture; too much to ask.
+2. World channels (`dst.Chan`, `dst.Select`): **yes**.
+3. Network: asked why no HTTP/gRPC. Revised proposal (pending): streams as the
+   base; an HTTP adapter (handlers and `http.Client` unchanged, only the server
+   loop replaced) as a planned milestone; a gRPC adapter at the generated
+   service interfaces later.
+4. Carry-overs and copying v0's verified pieces: **yes**.
+5. Package names: not answered yet; the spike uses the proposed ones.
+6. Start with the spike: **yes**.
+7. Mutants: carry over v0's design (hand-written, one per law, KILLED/ALIVE/BUILD/BAD).
+   Possible PAP improvement (not started): `sys check` requires a killed
+   mutant per Verified law.
+
+## Prince's answers, round 2 (2026-11-25)
+
+- **No mutants.** Too much friction. Law tests must still be able to fail when
+  the law breaks, but through the test's own design: negative assertions,
+  independent models, state checks sharp enough that a broken law breaks
+  the test. (Replacement rules below.)
+- **Network:** streams as the base, **HTTP and gRPC adapters built now**, not later.
+- **API:** `dst.Select` with callbacks is fine ("simple and intuitive").
+
+### Verification without mutants (proposed)
+
+1. Every law test has a **positive part** (the law holds on real behaviour)
+   and a **negative part in the same test** (the test's check rejects a
+   case where the law is broken): a known-bad program, a corrupted state,
+   or a deliberately wrong fake. Example from the spike: the watchdog test
+   runs code that blocks on a raw channel and requires the report.
+2. Where possible, check against an **independent model in both directions**
+   (nothing illegal happens; everything legal happens), so a broken
+   implementation can't pass.
+3. Each law test's doc comment says what it catches, e.g.
+   `// Fails if: a crashed machine's goroutine runs again.`
+4. Mutation testing becomes an occasional review aid (an agent tries to
+   break the code), never a maintained file or a CI gate.
+
+### Network and adapters (revised milestone 4)
+
+- `w.Net()`: net.Conn-compatible streams; datagrams optional.
+- **HTTP** (`dsthttp`, stdlib only): your `http.Handler`s and `http.Client`
+  run unchanged; `dsthttp.Serve(w, ln, handler)` replaces `ListenAndServe`;
+  `&http.Client{Transport: dsthttp.Transport(w)}` on the client side.
+- **gRPC** (`dstgrpc`): your generated code runs unchanged. `dstgrpc.Server`
+  implements `grpc.ServiceRegistrar` (so `pb.RegisterFooServer(s, impl)`
+  works) and `dstgrpc.Dial(w, addr)` implements `grpc.ClientConnInterface`
+  (so `pb.NewFooClient(conn)` works), unary and streaming, interceptors,
+  status codes, deadlines on the World clock. It depends on grpc-go, so it
+  lives in its **own module** to keep the core dependency-free.
