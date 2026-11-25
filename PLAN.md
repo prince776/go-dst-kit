@@ -13,8 +13,8 @@ each one.
 | 2 | World core: scheduler, channels, select, time, sync, context, rand; real + sim | **done** |
 | 3 | Machines, disk, crash/restart | **done** |
 | 4 | Network streams, HTTP adapter, gRPC adapter (own module) | **done** |
-| 5 | Runner (`dsttest`) | next |
-| 6 | Oracles (`check`) | |
+| 5 | Runner (`dsttest`) | **done** |
+| 6 | Oracles (`check`) | next |
 | 7 | `dstlint` | |
 | 8 | Examples: workerpool, wal, dedupe, lease, gcounter, twophase | |
 | 9 | Docs, CI, sys view | |
@@ -71,6 +71,17 @@ each one.
   that supports Go 1.25). One connection per call; status details aren't
   carried; interceptors via dstgrpc options (grpc-go's are opaque).
 
+- **Runner (M5).** `dsttest.Run(t, opts, setup)`: machines are crashable
+  and partitionable; workload goroutines (`h.Go`) run on a "test" machine
+  that never fails and **must finish by the end of the run**. Without that,
+  a deadlock among workload goroutines went unnoticed (the controller kept
+  sleeping through its phases), so stuck workload is now a failure that
+  names what each goroutine waits for. Background loops use
+  `h.World().Go`. Swarm draws every knob regardless of which fault classes
+  are on, so a seed keeps its meaning when classes are toggled.
+  Determinism is checked on the first 5 seeds and on every failing seed
+  (each check doubles a seed's cost).
+
 ## Findings
 
 - **Uniform random scheduling makes "one goroutine delayed for many steps"
@@ -106,6 +117,7 @@ each one.
 | behaves-like-net | 5-check net contract suite against the OS network and simnet |
 | stream-is-exact, partition-stalls, crash-is-silent, reset-discards-unread | simnet tests, each with its negative case (e.g. a read across a partition times out) |
 | handlers-run-unchanged, client-honours-context, handler-panic-fails-run | same handlers and client on net/http and in simulation; deadline and cancel end requests; negative: no deadline waits for the slow server |
+| failures-replay, finds-planted-bugs, nondeterminism-reported, always-checked, recovery-phase, expected-coverage, workload-finishes | dsttest tests: a log that acks before fsync is caught (and the correct one isn't), a re-enqueueing pool deadlocks, map-order leaks are reported, invariants fail at the breaking step, the report prints the replay command |
 | services-run-unchanged, interceptors-run, deadline-propagates | grpc-go's health service, unary + streaming + metadata + status + interceptors, on real grpc-go and in simulation; partitioned call ends with DeadlineExceeded |
 
 All tests pass with `-race`.

@@ -39,6 +39,8 @@ type Options struct {
 	// Net configures the network. Zero latencies get defaults (50µs + a
 	// 1ms mean tail).
 	Net simnet.Options
+	// AfterStep runs after every scheduling step (see sched.Options).
+	AfterStep func() error
 }
 
 // Sim is one simulated run.
@@ -74,7 +76,7 @@ func New(opts Options) *Sim {
 	}
 	s := &Sim{
 		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
-			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps}),
+			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep}),
 		machines: map[string]*Machine{},
 	}
 	s.Net = simnet.New(s.S, Epoch, opts.Net)
@@ -143,8 +145,10 @@ type Result struct {
 // Run runs main as the first goroutine of machine "main" until it returns
 // (like a Go program's main), a goroutine panics, or the run deadlocks,
 // then ends every remaining goroutine.
-func (s *Sim) Run(main func(w *dst.World)) Result {
-	m := s.Machine("main")
+func (s *Sim) Run(main func(w *dst.World)) Result { return s.RunOn(s.Machine("main"), main) }
+
+// RunOn is Run with main on machine m.
+func (s *Sim) RunOn(m *Machine, main func(w *dst.World)) Result {
 	t := s.S.Spawn(m.M, "main", func() { main(m.World) })
 	err := s.S.Run(t.Done)
 	s.S.Shutdown()

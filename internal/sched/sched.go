@@ -53,6 +53,10 @@ type Options struct {
 	// a goal never reached) with an error. Zero means no limit.
 	MaxTime  time.Duration
 	MaxSteps uint64
+	// AfterStep, if set, runs on the scheduler after every task step and
+	// timer (for invariants). It must not use the World; returning an
+	// error fails the run.
+	AfterStep func() error
 }
 
 // Scheduler runs tasks one at a time in an order decided by the seed.
@@ -464,6 +468,7 @@ func (s *Scheduler) Run(done func() bool) error {
 			}
 			wd.Stop()
 			s.cur = nil
+			s.afterStep()
 			continue
 		}
 		if s.events.Len() > 0 {
@@ -480,11 +485,20 @@ func (s *Scheduler) Run(done func() bool) error {
 			fn := e.fn
 			e.fn = nil
 			fn()
+			s.afterStep()
 			continue
 		}
 		s.Fail(s.deadlock())
 	}
 	return s.failure
+}
+
+func (s *Scheduler) afterStep() {
+	if s.opts.AfterStep != nil && s.failure == nil {
+		if err := s.opts.AfterStep(); err != nil {
+			s.Fail(err)
+		}
+	}
 }
 
 func (s *Scheduler) deadlock() error {
@@ -565,3 +579,11 @@ func (s *Scheduler) Choose(n int) int { return s.rng.IntN(n) }
 
 // Perm returns a seeded permutation of [0, n).
 func (s *Scheduler) Perm(n int) []int { return s.rng.Perm(n) }
+
+// Blocked describes what a parked task waits for ("" if not parked).
+func (t *Task) Blocked() string {
+	if t.state != parked {
+		return ""
+	}
+	return t.blocked
+}
