@@ -116,6 +116,9 @@ type Task struct {
 	ID      int
 	Name    string
 	Machine *Machine
+	// Parent is the task that spawned this one (nil if spawned from
+	// outside any task).
+	Parent  *Task
 	s       *Scheduler
 	wake    chan struct{}
 	state   state
@@ -220,7 +223,7 @@ func (s *Scheduler) Err() error { return s.failure }
 // Spawn starts fn as a new task on machine m. It runs when the seed picks
 // it; Spawn itself doesn't yield.
 func (s *Scheduler) Spawn(m *Machine, name string, fn func()) *Task {
-	t := &Task{ID: len(s.tasks), Name: name, Machine: m, s: s, wake: make(chan struct{}), state: runnable}
+	t := &Task{ID: len(s.tasks), Name: name, Machine: m, Parent: s.cur, s: s, wake: make(chan struct{}), state: runnable}
 	s.tasks = append(s.tasks, t)
 	s.runnable = append(s.runnable, t)
 	s.Logf("spawn %s", t)
@@ -586,4 +589,17 @@ func (t *Task) Blocked() string {
 		return ""
 	}
 	return t.blocked
+}
+
+// Tasks returns every task spawned so far, in spawn order.
+func (s *Scheduler) Tasks() []*Task { return s.tasks }
+
+// DescendsFrom reports whether t is a or was spawned, transitively, by a.
+func (t *Task) DescendsFrom(a *Task) bool {
+	for ; t != nil; t = t.Parent {
+		if t == a {
+			return true
+		}
+	}
+	return false
 }

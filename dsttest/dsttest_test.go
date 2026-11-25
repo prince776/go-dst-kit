@@ -253,3 +253,25 @@ func TestRunReportsReplay(t *testing.T) {
 		t.Fatalf("errors %v, logs %v", rec.errs, rec.logs)
 	}
 }
+
+// Verifies: [workload-finishes]
+// Fails if: a goroutine leaked by a workload goroutine goes unreported, or
+// a background goroutine started from setup is.
+func TestLeakedGoroutineReported(t *testing.T) {
+	leak := func(h *dsttest.Harness) {
+		h.World().Go(func() { // background: allowed to run forever
+			for {
+				h.World().Sleep(time.Millisecond)
+			}
+		})
+		h.Go(func(w *dst.World) {
+			ch := dst.MakeChan[int](w, 0)
+			w.GoNamed("leaker", func() { ch.Send(1) }) // nobody receives
+		})
+	}
+	r := dsttest.RunSeed(1, dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, leak, nil)
+	var se *dsttest.StuckError
+	if !errors.As(r.Err, &se) || len(se.Goroutines) != 1 || !strings.Contains(se.Goroutines[0], "leaker (started by workload1)") {
+		t.Fatalf("got %v", r.Err)
+	}
+}

@@ -45,8 +45,9 @@
 //     happened in any seed.
 //   - [finds-planted-bugs] Known-bad systems (a WAL without fsync, a pool
 //     that deadlocks) fail within the default number of seeds.
-//   - [workload-finishes] A workload goroutine (h.Go) still running at the
-//     end of the recovery phase fails the seed, naming what it waits for;
+//   - [workload-finishes] A workload goroutine (h.Go), or one it started,
+//     still running at the end of the recovery phase fails the seed,
+//     naming what it waits for;
 //     Final checks run only after the workload is done.
 //
 // Depends on: dst, internal/simworld
@@ -238,9 +239,10 @@ func (h *Harness) Machines() []*Machine { return h.machines }
 // where workload goroutines run.
 func (h *Harness) World() *dst.World { return h.test.World }
 
-// Go starts a workload goroutine on the test machine. Workload goroutines
-// must return by the end of the recovery phase: one still running then
-// fails the seed, with what it waits for, and the Final checks run only
+// Go starts a workload goroutine on the test machine. Workload goroutines,
+// and every goroutine they start, must return by the end of the recovery
+// phase: one still running then fails the seed, with what it waits for (a
+// deadlock, or a leaked goroutine), and the Final checks run only
 // once the workload is done. That catches deadlocks and operations that
 // never complete. Start goroutines meant to run forever with h.World().Go
 // instead. A workload that would outlast the run should stop starting
@@ -429,9 +431,19 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		// The workload had the recovery phase to finish; Final checks then
 		// look at a quiet end state.
 		var stuck []string
-		for _, t := range h.workload {
-			if !t.Done() {
-				stuck = append(stuck, fmt.Sprintf("%s: %s", t.Name, t.Blocked()))
+		for _, t := range h.sim.S.Tasks() {
+			if t.Done() {
+				continue
+			}
+			for _, wl := range h.workload {
+				if t.DescendsFrom(wl) {
+					name := t.Name
+					if t != wl {
+						name = fmt.Sprintf("%s (started by %s)", t.Name, wl.Name)
+					}
+					stuck = append(stuck, fmt.Sprintf("%s: %s", name, t.Blocked()))
+					break
+				}
 			}
 		}
 		if len(stuck) > 0 {
@@ -541,7 +553,7 @@ func (e *InvariantError) Unwrap() error { return e.Err }
 type StuckError struct{ Goroutines []string }
 
 func (e *StuckError) Error() string {
-	return "workload goroutines never finished (deadlock or lost liveness):\n  " + strings.Join(e.Goroutines, "\n  ")
+	return "workload goroutines never finished (deadlock, leak or lost liveness):\n  " + strings.Join(e.Goroutines, "\n  ")
 }
 
 // FinalError is a failed Final check.

@@ -16,8 +16,8 @@ each one.
 | 5 | Runner (`dsttest`) | **done** |
 | 6 | Oracles (`check`) | **done** |
 | 7 | `dstlint` | **done** |
-| 8 | Examples: wal, dedupe, lease (Prince's order), then workerpool, gcounter, twophase | next |
-| 9 | Docs, CI, sys view | |
+| 8 | Examples (own module): wal, dedupe, lease, gcounter, twophase, workerpool | **done** |
+| 9 | Docs, CI, sys view | next |
 
 ## Decisions made while building (for Prince's review)
 
@@ -129,6 +129,25 @@ each one.
   timeouts can outlast the recovery phase and is (rightly) reported as
   stuck. The documented pattern is to stop starting operations once
   `h.Phase()` leaves `Faulty`.
+- **Examples scoreboard (M8)**, each correct version clean over its
+  seeds and every planted bug caught for the right reason:
+
+  | Example | Seeds, faults | Planted bugs caught |
+  |---|---|---|
+  | wal | 300, crash+disk | NoFsync, NoDirSync, NoTruncateTornTail |
+  | dedupe | 200, all | InMemorySeen, SeparateSeenFile |
+  | lease | 300, crash+partition+net | ClockFromReply, NoStepDown, ServerForgets |
+  | gcounter | 200, all | MergeSum, NoFsyncBeforeRename |
+  | twophase | 300, all | DecideAlone, SendBeforeLog, NoPrepareLog |
+  | workerpool | 300, none (scheduling only) | AddInWorker, ReturnOnError (leak), CloseEarly |
+
+  All pass with -race; dstlint reports nothing on them (and flags a
+  planted time.Now).
+- **Leak detection (M8)**: tasks now record their parent, and goroutines
+  started by workload goroutines must finish too, so a leaked goroutine
+  is reported with its parent and what it waits for
+  ("workerpool.Map.func1 (started by workload2): send on chan#3").
+  Background loops started from setup (`h.World().Go`) are exempt.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
