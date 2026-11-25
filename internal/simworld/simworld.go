@@ -1,6 +1,19 @@
 // Package simworld builds simulated Worlds on the scheduler: one per
-// machine, sharing a clock and a seed. The runner (dsttest) is the public
-// way to use it.
+// machine, sharing a clock and a seed, each machine with its own disk.
+// The runner (dsttest) is the public way to use it.
+//
+// Verified:
+//   - [crash-restart] Restart reruns the machine's Start function on the
+//     disk the crash left: synced data and names are there, the rest is
+//     whatever the disk's crash rules allow.
+//   - [power-loss-is-a-crash] Power loss inside an I/O call crashes the
+//     machine; the call never returns.
+//   - [dead-timers-stop] Timers and tickers die with the incarnation that
+//     created them.
+//   - [runs-end] A run that exceeds its time or step limit fails instead
+//     of running forever.
+//
+// Depends on: dst, internal/sched, internal/simfs
 package simworld
 
 import (
@@ -8,6 +21,7 @@ import (
 
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/internal/sched"
+	"github.com/prince776/go-dst-kit/internal/simfs"
 	"github.com/prince776/go-dst-kit/internal/worldhook"
 )
 
@@ -19,6 +33,8 @@ type Options struct {
 	Seed     uint64
 	Watchdog time.Duration
 	Logf     func(format string, args ...any)
+	MaxTime  time.Duration
+	MaxSteps uint64
 }
 
 // Sim is one simulated run.
@@ -28,34 +44,79 @@ type Sim struct {
 	order    []*Machine
 }
 
-// Machine is one simulated process: its goroutines, and (later) its disk
-// and network address.
+// Machine is one simulated process: its goroutines, its disk (which
+// outlives crashes) and its network address.
 type Machine struct {
 	Name  string
 	M     *sched.Machine
 	World *dst.World
+	Disk  *simfs.FS
+	// Start is the machine's main function, run on Restart.
+	Start func(w *dst.World)
+	sim   *Sim
+}
+
+// MachineOptions configure a machine.
+type MachineOptions struct {
+	Disk simfs.Options
 }
 
 // New starts a simulation.
 func New(opts Options) *Sim {
 	return &Sim{
-		S:        sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf}),
+		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
+			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps}),
 		machines: map[string]*Machine{},
 	}
 }
 
-// Machine returns the named machine, creating it on first use.
+// Machine returns the named machine, creating it (with default options)
+// on first use.
 func (s *Sim) Machine(name string) *Machine {
 	if m, ok := s.machines[name]; ok {
 		return m
 	}
+	return s.AddMachine(name, MachineOptions{})
+}
+
+// AddMachine creates a machine.
+func (s *Sim) AddMachine(name string, opts MachineOptions) *Machine {
+	if _, ok := s.machines[name]; ok {
+		panic("simworld: duplicate machine " + name)
+	}
 	sm := s.S.NewMachine(name)
-	m := &Machine{Name: name, M: sm}
-	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: Epoch}).(*dst.World)
+	m := &Machine{Name: name, M: sm, sim: s}
+	m.Disk = simfs.New(s.S, sm, opts.Disk)
+	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: Epoch, FS: m.Disk}).(*dst.World)
 	s.machines[name] = m
 	s.order = append(s.order, m)
 	return m
 }
+
+// Machines lists the machines in creation order.
+func (s *Sim) Machines() []*Machine { return s.order }
+
+// Boot runs the machine's Start function in a new goroutine.
+func (m *Machine) Boot() {
+	if m.Start == nil {
+		panic("simworld: machine " + m.Name + " has no Start function")
+	}
+	m.sim.S.Spawn(m.M, m.Name+".main", func() { m.Start(m.World) })
+}
+
+// Crash kills the machine: its goroutines stop for good and its disk loses
+// what a power failure may lose. If called from the machine itself, it
+// doesn't return.
+func (m *Machine) Crash() { m.sim.S.Crash(m.M) }
+
+// Restart brings a crashed machine back and boots it.
+func (m *Machine) Restart() {
+	m.sim.S.Restart(m.M)
+	m.Boot()
+}
+
+// Dead reports whether the machine is crashed.
+func (m *Machine) Dead() bool { return m.M.Dead() }
 
 // Result is the outcome of a run.
 type Result struct {

@@ -49,6 +49,10 @@ type Options struct {
 	// Logf, if set, receives a line for every scheduling event (verbose
 	// replay). It must not touch the World.
 	Logf func(format string, args ...any)
+	// MaxTime and MaxSteps end a run that goes on too long (a livelock, or
+	// a goal never reached) with an error. Zero means no limit.
+	MaxTime  time.Duration
+	MaxSteps uint64
 }
 
 // Scheduler runs tasks one at a time in an order decided by the seed.
@@ -85,6 +89,10 @@ type Machine struct {
 
 // Dead reports whether the machine is crashed (and not yet restarted).
 func (m *Machine) Dead() bool { return m.dead }
+
+// Alive reports whether incarnation inc of the machine is still running:
+// timers and callbacks created by an earlier incarnation must not fire.
+func (m *Machine) Alive(inc int) bool { return !m.dead && m.Incarnation == inc }
 
 // OnCrash registers fn to run when the machine crashes (e.g. its disk loses
 // unsynced data). Hooks run in registration order.
@@ -429,6 +437,10 @@ func (s *Scheduler) Run(done func() bool) error {
 	wd := time.NewTimer(time.Hour)
 	defer wd.Stop()
 	for s.failure == nil && !done() {
+		if s.opts.MaxSteps > 0 && s.steps >= s.opts.MaxSteps {
+			s.Fail(&LimitError{fmt.Sprintf("the run didn't finish within %d steps (t=%v)", s.opts.MaxSteps, s.now)})
+			break
+		}
 		if n := len(s.runnable); n > 0 {
 			i := s.rng.IntN(n)
 			t := s.runnable[i]
@@ -459,6 +471,10 @@ func (s *Scheduler) Run(done func() bool) error {
 			if e.fn == nil {
 				continue
 			}
+			if s.opts.MaxTime > 0 && e.at > s.opts.MaxTime {
+				s.Fail(&LimitError{fmt.Sprintf("the run didn't finish within %v of simulated time", s.opts.MaxTime)})
+				break
+			}
 			s.now = e.at
 			s.Trace(uint64(e.at))
 			fn := e.fn
@@ -481,6 +497,11 @@ func (s *Scheduler) deadlock() error {
 	}
 	return &DeadlockError{msg: b.String()}
 }
+
+// LimitError reports a run that went on past its time or step limit.
+type LimitError struct{ msg string }
+
+func (e *LimitError) Error() string { return e.msg }
 
 // DeadlockError reports a deadlock.
 type DeadlockError struct{ msg string }

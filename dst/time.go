@@ -40,12 +40,14 @@ func (w *World) AfterFunc(d time.Duration, fn func()) *Timer {
 func (w *World) After(d time.Duration) Chan[time.Time] { return w.NewTimer(d).C }
 
 func (t *Timer) arm(d time.Duration) {
-	s := t.w.s
+	s, m := t.w.s, t.w.m
+	inc := m.Incarnation
 	t.ev = s.At(s.Now()+d, func() {
+		if !m.Alive(inc) {
+			return // the machine that set this timer crashed
+		}
 		if t.fn != nil {
-			if !t.w.m.Dead() {
-				s.Spawn(t.w.m, "AfterFunc "+funcName(t.fn), t.fn)
-			}
+			s.Spawn(m, "AfterFunc "+funcName(t.fn), t.fn)
 			return
 		}
 		t.C.sim.TrySend(t.w.Now())
@@ -102,8 +104,12 @@ func (w *World) NewTicker(d time.Duration) *Ticker {
 }
 
 func (t *Ticker) arm() {
-	s := t.w.s
+	s, m := t.w.s, t.w.m
+	inc := m.Incarnation
 	t.ev = s.At(s.Now()+t.d, func() {
+		if !m.Alive(inc) {
+			return // the machine that started this ticker crashed
+		}
 		t.C.sim.TrySend(t.w.Now())
 		t.arm()
 	})

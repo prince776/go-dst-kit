@@ -11,8 +11,8 @@ each one.
 |---|---|---|
 | 1 | Spike | done (reviewed; removed after M2) |
 | 2 | World core: scheduler, channels, select, time, sync, context, rand; real + sim | **done** |
-| 3 | Machines, disk, crash/restart | next |
-| 4 | Network streams, HTTP adapter, gRPC adapter (own module) | |
+| 3 | Machines, disk, crash/restart | **done** |
+| 4 | Network streams, HTTP adapter, gRPC adapter (own module) | next |
 | 5 | Runner (`dsttest`) | |
 | 6 | Oracles (`check`) | |
 | 7 | `dstlint` | |
@@ -45,6 +45,20 @@ each one.
 - **Crash runs no deferred functions** (a process losing power doesn't);
   the goroutines are released after the run.
 
+- **Disk crash model (M3).** Directory changes are one ordered journal
+  (a prefix survives; a directory Sync commits it up to that directory's
+  last change; rename is atomic), as on journaling filesystems. Harsh mode
+  (default): each file's writes survive independently and a file Sync
+  covers only its data. Ordered mode: one queue, any Sync commits
+  everything before it (ext4 data=ordered's journal commit). Harsh mode
+  is deliberately not maximally harsh for directories (POSIX would allow
+  independent directories); keeping one journal makes cross-directory
+  rename atomic, which every real filesystem guarantees.
+- **`File.ReadDir` returns a seeded-random order in simulation** (the OS
+  order is unspecified; `os.ReadDir` sorts). Found by the contract suite.
+- **Run limits** (`MaxTime`, `MaxSteps`) and incarnation-scoped timers, so
+  a crashed machine's ticker can't keep a deadlocked run alive forever.
+
 ## Findings
 
 - **Uniform random scheduling makes "one goroutine delayed for many steps"
@@ -64,6 +78,10 @@ each one.
 | same-code-both-worlds, real-is-plain-go, select-picks-ready, timers-follow-world-clock | 22-check contract suite against both Worlds (sim: 50 seeds each) |
 | seed-replays | 20 seeds × whole suite, identical under GOMAXPROCS 1 and 8; negative: map-order leak changes the fingerprint |
 | deadlock-reported, panic-reported, leak-reported, crash-is-final, nothing-leaks, one-at-a-time | direct tests, each with its negative case |
+| behaves-like-os | 13-check FS contract suite against os.Root and the simulated disk |
+| crash-is-legal, sync-is-durable | 2000 random op sequences × 3 seeds × 2 modes against an independent model of the crash rules |
+| crash-explores | every legal crash state reached (both modes); sanity: a kinder disk and a Sync that forgets data both fail |
+| crash-restart, power-loss-is-a-crash, dead-timers-stop, runs-end | simworld tests: 30 seeds of crash/restart/power loss with every acked record surviving |
 
 All tests pass with `-race`.
 

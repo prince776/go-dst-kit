@@ -75,3 +75,33 @@ func TestSuiteCanFail(t *testing.T) {
 		t.Fatal("an out-of-order receive was not reported in the real World")
 	}
 }
+
+// Verifies: [behaves-like-os]
+// Fails if: the simulated disk differs from the operating system's
+// filesystem in any checked way (or the real World's FS isn't os).
+func TestFSContract(t *testing.T) {
+	for _, c := range worldtest.FSChecks {
+		t.Run(c.Name+"/real", func(t *testing.T) {
+			done := make(chan error)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						done <- fmt.Errorf("%v", r)
+					}
+				}()
+				c.Fn(realworld.New(realworld.Options{Dir: t.TempDir()}))
+				done <- nil
+			}()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+		t.Run(c.Name+"/sim", func(t *testing.T) {
+			for seed := uint64(1); seed <= 5; seed++ {
+				if r := simworld.Run(simworld.Options{Seed: seed}, c.Fn); r.Err != nil {
+					t.Fatalf("seed %d: %v", seed, r.Err)
+				}
+			}
+		})
+	}
+}
