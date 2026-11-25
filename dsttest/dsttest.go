@@ -46,7 +46,8 @@
 //   - [finds-planted-bugs] Known-bad systems (a WAL without fsync, a pool
 //     that deadlocks) fail within the default number of seeds.
 //   - [workload-finishes] A workload goroutine (h.Go) still running at the
-//     end of the run fails the seed, naming what it waits for.
+//     end of the recovery phase fails the seed, naming what it waits for;
+//     Final checks run only after the workload is done.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -238,9 +239,9 @@ func (h *Harness) Machines() []*Machine { return h.machines }
 func (h *Harness) World() *dst.World { return h.test.World }
 
 // Go starts a workload goroutine on the test machine. Workload goroutines
-// must return by the end of the run (after the recovery phase and the
-// Final checks): one still blocked then fails the seed, with what it waits
-// for. That catches deadlocks and operations that never complete. Start
+// must return by the end of the recovery phase: one still running then
+// fails the seed, with what it waits for, and the Final checks run only
+// once the workload is done. That catches deadlocks and operations that never complete. Start
 // goroutines meant to run forever with h.World().Go instead.
 func (h *Harness) Go(fn func(w *dst.World)) {
 	w := h.test.World
@@ -410,17 +411,14 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		h.nemesis(w)
 		h.phase = Recovery
 		h.Heal()
+		h.sim.Net.StopFaults()
 		for _, m := range h.machines {
+			m.m.Disk.StopFaults() // no more power loss inside I/O
 			m.Restart()
 		}
 		w.Sleep(opts.RecoveryPhase)
-		h.phase = Checking
-		for _, f := range h.final {
-			if err := f.fn(w); err != nil {
-				h.Fail(&FinalError{Name: f.name, Err: err})
-				return
-			}
-		}
+		// The workload had the recovery phase to finish; Final checks then
+		// look at a quiet end state.
 		var stuck []string
 		for _, t := range h.workload {
 			if !t.Done() {
@@ -429,6 +427,14 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		}
 		if len(stuck) > 0 {
 			h.Fail(&StuckError{Goroutines: stuck})
+			return
+		}
+		h.phase = Checking
+		for _, f := range h.final {
+			if err := f.fn(w); err != nil {
+				h.Fail(&FinalError{Name: f.name, Err: err})
+				return
+			}
 		}
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,

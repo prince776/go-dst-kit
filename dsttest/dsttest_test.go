@@ -177,8 +177,16 @@ func TestAlwaysChecked(t *testing.T) {
 func TestRecoveryPhase(t *testing.T) {
 	rep := dsttest.Sweep(dsttest.Options{Seeds: 30, Faults: dsttest.AllFaults, FaultPhase: 5 * time.Second, RecoveryPhase: 2 * time.Second}, func(h *dsttest.Harness) {
 		for _, n := range []string{"a", "b", "c"} {
+			// Synced writes in a loop: power loss inside I/O must also stop
+			// for the recovery phase (it once didn't).
 			h.Machine(n, func(w *dst.World) {
+				f, err := w.FS().OpenFile("f", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+				if err != nil {
+					panic(err)
+				}
 				for {
+					f.Write([]byte("x"))
+					f.Sync()
 					w.Sleep(time.Millisecond)
 				}
 			})

@@ -584,3 +584,7 @@ var _ net.Conn = (*endpoint)(nil)
 
 // ErrTimeout reports whether err is a deadline timeout.
 func ErrTimeout(err error) bool { return errors.Is(err, os.ErrDeadlineExceeded) }
+
+// StopFaults turns off random connection resets (the runner's recovery
+// phase).
+func (n *Network) StopFaults() { n.opts.ResetProb = 0 }

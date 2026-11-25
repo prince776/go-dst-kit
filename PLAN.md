@@ -113,6 +113,14 @@ each one.
   (wait for the client to close). It also showed the network model was
   too kind (a reset couldn't destroy unread data) and slightly wrong (a
   reset could overtake earlier data); both fixed.
+- **Writing the examples found three bugs in my own code (M8)**: the WAL
+  test harness created a directory without syncing its parent (the log
+  vanished with it); the runner ran Final checks before checking that the
+  workload had finished (an in-flight retry looked like a lost message);
+  and the runner left power loss inside I/O on during the recovery phase,
+  so a machine could crash after the last restart and stay down. All
+  fixed, the last one with a strengthened test shown to fail without the
+  fix.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.

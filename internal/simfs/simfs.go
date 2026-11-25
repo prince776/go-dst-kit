@@ -801,3 +801,7 @@ func (h *file) Close() error {
 	h.closed = true
 	return nil
 }
+
+// StopFaults turns off power loss inside I/O calls (the runner's recovery
+// phase). Crashes the runner still causes keep their usual effect.
+func (f *FS) StopFaults() { f.opts.IOCrashProb = 0 }
