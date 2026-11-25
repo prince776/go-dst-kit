@@ -15,8 +15,8 @@ each one.
 | 4 | Network streams, HTTP adapter, gRPC adapter (own module) | **done** |
 | 5 | Runner (`dsttest`) | **done** |
 | 6 | Oracles (`check`) | **done** |
-| 7 | `dstlint` | next |
-| 8 | Examples: workerpool, wal, dedupe, lease, gcounter, twophase | |
+| 7 | `dstlint` | **done** |
+| 8 | Examples: wal, dedupe, lease (Prince's order), then workerpool, gcounter, twophase | next |
 | 9 | Docs, CI, sys view | |
 
 ## Decisions made while building (for Prince's review)
@@ -89,6 +89,14 @@ each one.
   `ErrInconclusive` so a test can choose to tolerate it. v0's `Coverage`
   is replaced by `h.Sometimes`/`h.Expect`.
 
+- **`dstlint` (M7)** is its own module (needs golang.org/x/tools v0.40.0).
+  Packages opt in with `//dst:simulated`; `//dst:ok reason` excuses a line.
+  It flags go/select/channel ops/make(chan)/range over chan, time, waiting
+  sync types, context timers, global math/rand and crypto/rand, os file
+  functions, net, net/http entry points and grpc constructors, each with
+  its World replacement. It can't see map-order dependence; the
+  determinism check catches that at run time.
+
 ## Findings
 
 - **Uniform random scheduling makes "one goroutine delayed for many steps"
@@ -127,6 +135,7 @@ each one.
 | failures-replay, finds-planted-bugs, nondeterminism-reported, always-checked, recovery-phase, expected-coverage, workload-finishes | dsttest tests: a log that acks before fsync is caught (and the correct one isn't), a re-enqueueing pool deadlocks, map-order leaks are reported, invariants fail at the breaking step, the report prints the replay command |
 | matches-brute-force, accepts-real-executions, partitions-independently, budget-is-deterministic, kv-semantics | ported from v0 with their tests (20k random histories vs brute force) |
 | first-ending-wins, unfinished-is-unknown, failed-is-absent, times-are-the-worlds | History tests (now World-timed and safe for concurrent use) |
+| flags-escapes, respects-opt-in, respects-ok | analysistest: every expected report and nothing else, in an opted-in and a plain package |
 | services-run-unchanged, interceptors-run, deadline-propagates | grpc-go's health service, unary + streaming + metadata + status + interceptors, on real grpc-go and in simulation; partitioned call ends with DeadlineExceeded |
 
 All tests pass with `-race`.
