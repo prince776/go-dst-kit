@@ -194,7 +194,7 @@ type Machine struct {
 // Machine adds a machine running start (again after each restart), and
 // boots it. Its network address is its name ("db1:8080").
 func (h *Harness) Machine(name string, start func(w *dst.World)) *Machine {
-	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: h.swarm.Disk})
+	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: h.swarm.disk()})
 	sm.Disk.OnCrashLoss = func(_ int, torn bool) {
 		h.Sometimes("disk lost unsynced writes")
 		if torn {
@@ -322,14 +322,29 @@ type Swarm struct {
 	PartitionEvery time.Duration // mean time between partitions (0: none)
 	PartitionFor   time.Duration // mean partition length
 	OneWay         bool          // partitions may be one way
-	Disk           simfs.Options
-	Net            simnet.Options
+
+	DiskOrdered   bool          // writes reach the platter in order (else per-file, harsher)
+	TornWriteProb float64       // chance the first lost write is torn rather than lost whole
+	IOCrashProb   float64       // chance of power loss inside each disk I/O call
+	SyncLatency   time.Duration // how long an fsync takes
+
+	MinLatency  time.Duration // network latency floor
+	MeanLatency time.Duration // mean of the latency tail
+	ResetProb   float64       // chance a segment resets its connection
+}
+
+func (s Swarm) disk() simfs.Options {
+	return simfs.Options{Ordered: s.DiskOrdered, TornWriteProb: s.TornWriteProb, IOCrashProb: s.IOCrashProb, SyncLatency: s.SyncLatency}
+}
+
+func (s Swarm) net() simnet.Options {
+	return simnet.Options{MinLatency: s.MinLatency, MeanLatency: s.MeanLatency, ResetProb: s.ResetProb}
 }
 
 func (s Swarm) String() string {
 	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
-		s.Disk.Ordered, s.Disk.TornWriteProb, s.Disk.IOCrashProb, s.Net.MinLatency, s.Net.MeanLatency, s.Net.ResetProb)
+		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb)
 }
 
 // sometimes returns v with probability 2/3 (swarm testing: whole fault
@@ -344,10 +359,9 @@ func sometimes[T any](r *rand.Rand, v T) T {
 
 func newSwarm(seed uint64, f Faults) Swarm {
 	r := rand.New(rand.NewPCG(seed, 0x5a4f5a4f))
-	s := Swarm{
-		Net:  simnet.Options{MinLatency: 50 * time.Microsecond, MeanLatency: time.Duration(100+r.IntN(2000)) * time.Microsecond},
-		Disk: simfs.Options{SyncLatency: time.Duration(r.IntN(2000)) * time.Microsecond},
-	}
+	s := Swarm{MinLatency: 50 * time.Microsecond}
+	s.MeanLatency = time.Duration(100+r.IntN(2000)) * time.Microsecond
+	s.SyncLatency = time.Duration(r.IntN(2000)) * time.Microsecond
 	// Every draw happens whatever Faults says, so a seed means the same
 	// mix when fault classes are switched on or off.
 	crashEvery := sometimes(r, time.Duration(500+r.IntN(4000))*time.Millisecond)
@@ -360,7 +374,7 @@ func newSwarm(seed uint64, f Faults) Swarm {
 	ioCrash := sometimes(r, float64(r.IntN(20))/10000)
 	reset := sometimes(r, float64(r.IntN(20))/10000)
 	spike := r.IntN(4) == 0
-	s.Disk.Ordered = ordered
+	s.DiskOrdered = ordered
 	if f.Crash {
 		s.CrashEvery, s.Downtime = crashEvery, downtime
 	}
@@ -368,12 +382,12 @@ func newSwarm(seed uint64, f Faults) Swarm {
 		s.PartitionEvery, s.PartitionFor, s.OneWay = partEvery, partFor, oneWay
 	}
 	if f.Disk {
-		s.Disk.TornWriteProb, s.Disk.IOCrashProb = torn, ioCrash
+		s.TornWriteProb, s.IOCrashProb = torn, ioCrash
 	}
 	if f.Network {
-		s.Net.ResetProb = reset
+		s.ResetProb = reset
 		if spike {
-			s.Net.MeanLatency *= 20
+			s.MeanLatency *= 20
 		}
 	}
 	return s
@@ -405,7 +419,7 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		Logf:     logf,
 		MaxTime:  opts.FaultPhase + opts.RecoveryPhase + time.Hour,
 		MaxSteps: opts.MaxSteps,
-		Net:      swarm.Net,
+		Net:      swarm.net(),
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
