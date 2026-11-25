@@ -121,6 +121,14 @@ each one.
   so a machine could crash after the last restart and stay down. All
   fixed, the last one with a strengthened test shown to fail without the
   fix.
+- **The determinism check caught my own example**: twophase's coordinator
+  ranged over a map of deltas, so map order decided which participant was
+  asked to prepare first. Every seed was flagged on its first run. Fixed
+  with a fixed order (and sorted in-doubt transactions).
+- **Workloads must fit the run**: a fixed-count workload with long
+  timeouts can outlast the recovery phase and is (rightly) reported as
+  stuck. The documented pattern is to stop starting operations once
+  `h.Phase()` leaves `Faulty`.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.

@@ -241,8 +241,17 @@ func (h *Harness) World() *dst.World { return h.test.World }
 // Go starts a workload goroutine on the test machine. Workload goroutines
 // must return by the end of the recovery phase: one still running then
 // fails the seed, with what it waits for, and the Final checks run only
-// once the workload is done. That catches deadlocks and operations that never complete. Start
-// goroutines meant to run forever with h.World().Go instead.
+// once the workload is done. That catches deadlocks and operations that
+// never complete. Start goroutines meant to run forever with h.World().Go
+// instead. A workload that would outlast the run should stop starting
+// operations once h.Phase() leaves Faulty:
+//
+//	for range 100 {
+//		if h.Phase() != dsttest.Faulty {
+//			return
+//		}
+//		op(w)
+//	}
 func (h *Harness) Go(fn func(w *dst.World)) {
 	w := h.test.World
 	s := h.sim.S
