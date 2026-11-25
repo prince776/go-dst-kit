@@ -14,8 +14,8 @@ each one.
 | 3 | Machines, disk, crash/restart | **done** |
 | 4 | Network streams, HTTP adapter, gRPC adapter (own module) | **done** |
 | 5 | Runner (`dsttest`) | **done** |
-| 6 | Oracles (`check`) | next |
-| 7 | `dstlint` | |
+| 6 | Oracles (`check`) | **done** |
+| 7 | `dstlint` | next |
 | 8 | Examples: workerpool, wal, dedupe, lease, gcounter, twophase | |
 | 9 | Docs, CI, sys view | |
 
@@ -82,6 +82,13 @@ each one.
   Determinism is checked on the first 5 seeds and on every failing seed
   (each check doubles a seed's cost).
 
+- **`check` (M6)** is v0's checker and KV model unchanged; `History` is new:
+  timed by a World's clock, safe for concurrent use (real World clients),
+  and returns a `Call` handle (`Return`/`Fail`/`Abandon`). `Result.Err()`
+  turns a verdict into an error for `h.Final`; inconclusive wraps
+  `ErrInconclusive` so a test can choose to tolerate it. v0's `Coverage`
+  is replaced by `h.Sometimes`/`h.Expect`.
+
 ## Findings
 
 - **Uniform random scheduling makes "one goroutine delayed for many steps"
@@ -118,6 +125,8 @@ each one.
 | stream-is-exact, partition-stalls, crash-is-silent, reset-discards-unread | simnet tests, each with its negative case (e.g. a read across a partition times out) |
 | handlers-run-unchanged, client-honours-context, handler-panic-fails-run | same handlers and client on net/http and in simulation; deadline and cancel end requests; negative: no deadline waits for the slow server |
 | failures-replay, finds-planted-bugs, nondeterminism-reported, always-checked, recovery-phase, expected-coverage, workload-finishes | dsttest tests: a log that acks before fsync is caught (and the correct one isn't), a re-enqueueing pool deadlocks, map-order leaks are reported, invariants fail at the breaking step, the report prints the replay command |
+| matches-brute-force, accepts-real-executions, partitions-independently, budget-is-deterministic, kv-semantics | ported from v0 with their tests (20k random histories vs brute force) |
+| first-ending-wins, unfinished-is-unknown, failed-is-absent, times-are-the-worlds | History tests (now World-timed and safe for concurrent use) |
 | services-run-unchanged, interceptors-run, deadline-propagates | grpc-go's health service, unary + streaming + metadata + status + interceptors, on real grpc-go and in simulation; partitioned call ends with DeadlineExceeded |
 
 All tests pass with `-race`.
