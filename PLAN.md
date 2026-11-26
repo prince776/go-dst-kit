@@ -476,6 +476,19 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   reached (its `Sometimes` precondition) vs triggered; repeated trials
   for stateful strategies. Not CI: run on demand to judge an exploration
   change.
+  *Status: done 2026-11-26.* `dsttest`: `Report.Results`, per-seed wall
+  time, `-dst.keepgoing`, `-dst.json`; `cmd/dstbench`; docs. Switches for
+  9 llm-tor and 5 go-diskqueue bugs. Baseline at 300 seeds per sweep:
+  every bug not held out is found by its own sweep; the swarm with every
+  fault on (`TestDSTEverything`) is much weaker for some (lost-update 79%
+  → 10%, rotation-blind-write 24% → 0.7%), Groce's dilution; hard cells
+  (reached often, rarely triggered): token-spent-after-answer 1.3–1.7%
+  with its precondition reached in 83–98% of seeds,
+  reuse-file-without-metadata 0.3%, and two go-diskqueue bugs the
+  concurrent sweep never finds. Faithfulness check: each re-inserted
+  go-diskqueue bug first fails at the seed that originally found it.
+  Building it found a hole in llm-tor's checks (a token answered for two
+  prompts wasn't caught once option (a) allowed a second answer).
 - **C. Swarm improvements, each measured against B.** Start time drawn
   per seed (sometimes just before a day, month or year boundary);
   crashes come with latency (the swarm draws slow calls when crashes are
