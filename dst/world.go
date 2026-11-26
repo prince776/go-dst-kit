@@ -20,7 +20,8 @@
 //	sync.Mutex/WaitGroup    dst.Mutex / dst.WaitGroup (zero values work)
 //	sync.Cond               dst.Cond (dst.NewCond)
 //	context.WithTimeout     dst.WithTimeout(w, ctx, d)
-//	math/rand, crypto/rand  w.Rand()
+//	math/rand               w.Rand()
+//	crypto/rand.Read        w.Rand().CryptoRead (crypto/rand.Reader: dst.CryptoReader(w))
 //	os, net                 w.FS(), w.Net()
 //
 // Inside a simulated World, code must not block any other way: a raw

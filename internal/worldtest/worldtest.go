@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -465,8 +466,12 @@ func randInRange(w *dst.World) {
 		}
 	}
 	b := make([]byte, 16)
-	if n, err := r.Read(b); n != 16 || err != nil || slices.Equal(b, make([]byte, 16)) {
-		failf("Read: %d %v %x", n, err, b)
+	if n, err := r.CryptoRead(b); n != 16 || err != nil || slices.Equal(b, make([]byte, 16)) {
+		failf("CryptoRead: %d %v %x", n, err, b)
+	}
+	c := make([]byte, 16)
+	if _, err := io.ReadFull(dst.CryptoReader(w), c); err != nil || slices.Equal(b, c) {
+		failf("CryptoReader: %v, %x after %x", err, c, b)
 	}
 }
 

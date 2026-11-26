@@ -57,7 +57,7 @@ var funcs = map[string]map[string]string{
 		"Int": "w.Rand()", "Intn": "w.Rand()", "Int63": "w.Rand()", "Int63n": "w.Rand()",
 		"Int31": "w.Rand()", "Int31n": "w.Rand()", "Uint32": "w.Rand()", "Uint64": "w.Rand()",
 		"Float64": "w.Rand()", "Float32": "w.Rand()", "Perm": "w.Rand()", "Shuffle": "w.Rand()",
-		"Read": "w.Rand().Read", "ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
+		"Read": "w.Rand().CryptoRead", "ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
 	},
 	"math/rand/v2": {
 		"Int": "w.Rand()", "IntN": "w.Rand()", "Int64": "w.Rand()", "Int64N": "w.Rand()",
@@ -67,7 +67,7 @@ var funcs = map[string]map[string]string{
 		"ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
 	},
 	"sync":        {"NewCond": "dst.NewCond"},
-	"crypto/rand": {"Read": "w.Rand().Read", "Int": "w.Rand()", "Text": "w.Rand()"},
+	"crypto/rand": {"Read": "w.Rand().CryptoRead", "Int": "crypto/rand.Int(dst.CryptoReader(w), max)", "Text": "w.Rand().CryptoRead"},
 	"os": {
 		"Open": "dst.Open(w.FS(), ...)", "Create": "dst.Create(w.FS(), ...)", "OpenFile": "w.FS().OpenFile",
 		"ReadFile": "dst.ReadFile(w.FS(), ...)", "WriteFile": "dst.WriteFile(w.FS(), ...)",
@@ -103,7 +103,8 @@ var typeNames = map[string]map[string]string{
 
 // vars maps package path -> variable name -> the World replacement.
 var vars = map[string]map[string]string{
-	"net/http": {"DefaultClient": "dsthttp.Client(w)", "DefaultTransport": "dsthttp.Transport(w)"},
+	"net/http":    {"DefaultClient": "dsthttp.Client(w)", "DefaultTransport": "dsthttp.Transport(w)"},
+	"crypto/rand": {"Reader": "dst.CryptoReader(w)"},
 }
 
 func run(pass *analysis.Pass) (any, error) {
@@ -203,6 +204,9 @@ func okLines(fset *token.FileSet, f *ast.File) map[int]bool {
 func lastElem(path string) string {
 	if path == "google.golang.org/grpc" {
 		return "grpc"
+	}
+	if first, _, _ := strings.Cut(path, "/"); !strings.Contains(first, ".") {
+		return path // the standard library: crypto/rand, not rand
 	}
 	if i := strings.LastIndex(path, "/"); i >= 0 && !strings.HasPrefix(path[i+1:], "v") {
 		return path[i+1:]

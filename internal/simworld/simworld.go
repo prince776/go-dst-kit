@@ -16,6 +16,9 @@
 //     connection deadlines follow its own clock (offset + rate x true
 //     time), which never goes backwards.
 //   - [clock-survives-restart] A restarted machine's clock carries on.
+//   - [rand-replays] A machine's Rand (its numbers, CryptoRead and
+//     CryptoReader) draws the same for the same seed; machines and seeds
+//     draw differently.
 //   - [pause-stops-a-machine] A paused machine takes no steps; its sleeps
 //     and timers return at the resume, not before; data sent to it waits;
 //     other machines run normally.

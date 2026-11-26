@@ -3,6 +3,7 @@ package sim
 
 import (
 	"context"
+	crand "crypto/rand"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -28,6 +29,8 @@ func f(ctx context.Context) {
 	time.Sleep(time.Second)       // want `time.Sleep escapes the World; use w.Sleep`
 	_ = rand.IntN(3)              // want `math/rand/v2.IntN escapes the World; use w.Rand\(\)`
 	os.ReadFile("x")              // want `os.ReadFile escapes the World`
+	crand.Read(nil)               // want `crypto/rand.Read escapes the World; use w.Rand\(\).CryptoRead`
+	_ = crand.Reader              // want `crypto/rand.Reader escapes the World; use dst.CryptoReader\(w\)`
 	net.ListenPacket("udp", ":0") // want `net.ListenPacket escapes the World; use w.Net\(\).ListenPacket`
 	context.WithTimeout(ctx, 1)   // want `context.WithTimeout escapes the World; use dst.WithTimeout`
 	_ = time.Second.String()      // methods and constants are fine

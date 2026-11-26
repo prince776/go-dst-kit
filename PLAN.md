@@ -345,13 +345,14 @@ cost 110ns contended; the benchmark caught it.
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
-- **`Rand.CryptoRead`**: rename `Rand.Read` so the API says what it
-  replaces: `CryptoRead` stands in for `crypto/rand.Read` (crypto/rand in
-  the real World, the seeded stream in simulation); the number methods
-  stand in for `math/rand`. To settle: whether `Rand` stays an
-  `io.Reader` (for libraries that take one) through an adapter, the
-  dstlint mapping, and the note on crypto functions that ignore the
-  reader they're given.
+- ~~`Rand.CryptoRead`~~ **done**: `Rand.Read` became `CryptoRead`
+  (crypto/rand in the real World), `dst.CryptoReader(w)` is the
+  `io.Reader` for libraries, dstlint maps `crypto/rand.Read`/`Reader`/
+  `Int`/`Text` and now prints standard-library paths in full
+  (`crypto/rand.Read`, not `rand.Read`). Checked Go 1.26: most crypto
+  functions ignore the reader they're passed (`cryptocustomrand`
+  GODEBUG; `testing/cryptotest.SetGlobalRandom` is process-wide), so key
+  generation can't replay per seed; the docs say to use fixed keys.
 - **Atomics**: `sync/atomic` operations aren't scheduling points, so the
   interleavings of lock-free code aren't explored, and a goroutine
   spinning on an atomic between World calls holds the baton. Options: a
