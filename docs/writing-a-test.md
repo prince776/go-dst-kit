@@ -392,6 +392,19 @@ The first 5 seeds, and every failing seed, run twice to check that the
 system is deterministic (`Options.DeterminismChecks`). `-dst.parallel`
 sets how many seeds run at once (default GOMAXPROCS).
 
+## Workload features
+
+`h.Feature(name)` is on in half the seeds. Use it to leave whole parts
+of the workload out (an action, a pace, a second model): a seed without
+some actions does the others more often, and some bugs only show when a
+behaviour that crowds them out is absent. On go-diskqueue, consumers that
+lag hide one bug entirely and expose another.
+
+Don't make a feature of a rare trigger on a failure path (giving up,
+then trying something else): a bug needing two such features is left
+for a quarter of the seeds. A failing seed's report lists its features,
+and `dstbench` shows features that change a bug's rate 3x either way.
+
 ## Measuring exploration: dstbench
 
 Each bug a sweep finds and you fix is ground truth: a known way the code

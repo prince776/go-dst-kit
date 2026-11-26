@@ -497,6 +497,25 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   a few seeds rerun in a subprocess); swarm over workload features,
   `h.Feature(name)` reporting whether this seed enables it (Prince:
   agreed); PCT depth drawn per seed.
+  *Status: done 2026-11-26.* Measured with dstbench, 300 seeds per sweep.
+  - Start time per seed, crash latency, `Rand().Stream`: no change on
+    either benchmark (none of its bugs depends on the date; their sweeps
+    already had latency; go-diskqueue has no fault points). Kept: they
+    open behaviours the benchmark doesn't hold (finding 7 needed a
+    boundary start), and a seed's other draws are unchanged.
+  - Cross-process replay check: with llm-tor's per-process keys put back
+    it fails on the first seed.
+  - `h.Feature`: go-diskqueue's concurrent crash sweep went from never
+    finding two bugs to finding them (close-without-fsync 0 -> 9,
+    reuse-file-without-metadata 0 -> 1); the #38 bug fell 300 -> 152, as
+    lagging consumers hide it (0/148). llm-tor: rotation-blind-write
+    under every fault 2 -> 8; bugs whose trigger is a feature halve
+    (prompt-not-hashed 279 -> 143, needs reuse). Learning: make a
+    feature of what can crowd a bug out (actions, pace), not of rare
+    failure-path triggers (token-spent-after-answer needs two; as
+    features it fell 5 -> 2, back to 8 without). dstbench now lists
+    features that change a bug's rate 3x.
+  - PCT depth per seed: already there (half the seeds, depth 1-3).
 - **D. Choice sequences.** A run is (code version, choices); first as
   "seed, then from step k, seed2" (enough to fork), full tapes only if
   shrinking needs them. A corpus under `testdata/dst/` of runs that
