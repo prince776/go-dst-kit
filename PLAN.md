@@ -343,6 +343,22 @@ World checks an inlined atomic and matches bare Go (66ns contended,
 13.8ns uncontended). A first version called the non-inlined lookup and
 cost 110ns contended; the benchmark caught it.
 
+## Adoption-driven hardening (Prince, 2026-11-26)
+
+The base is built; from here the library hardens by adopting it in real
+projects and adding what they need. North star: hashicorp/raft passing a
+long DST sweep. First two:
+
+1. **go-diskqueue** (fork prince776/go-diskqueue of nsqio's, MIT): a
+   disk-backed FIFO; one I/O goroutine, channels, ticker, fsync, metadata
+   by rename. Crash and disk faults go straight at its durability.
+2. **llm-tor** (prince776/LLM-Tor backend, ~5k lines): blind-signature
+   token issuance and redemption over Azure Cosmos DB, Key Vault, Dodo
+   Payments and Gemini; fakes with fault points against real guarantees.
+
+Library gaps found along the way go in the Todo below. Released:
+v0.1.0 (main module), dstgrpc/v0.1.0, dstlint/v0.1.0.
+
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
 - ~~`Rand.CryptoRead`~~ **done**: `Rand.Read` became `CryptoRead`
@@ -367,7 +383,11 @@ cost 110ns contended; the benchmark caught it.
   needs no hand-written wrapper. To settle: naming points from methods,
   mapping errors per method (reads vs writes), methods without a context
   or an error, and streaming results.
-- **Map order**: today map iteration order is only detected, when it
+- **GC-shaped example**: a small pack store with dedupe and a
+  consolidating GC as a template (checks gated on durable completion,
+  faults off then on).
+- **Map order** (open question: flag every map range, or skip loops
+  judged order-independent): today map iteration order is only detected, when it
   changes behaviour on a determinism-checked seed. Options: dstlint flags
   `range` over a map in simulated packages unless the keys are sorted or
   the line says `//dst:ok`; run more seeds twice; a `dst.SortedKeys`
