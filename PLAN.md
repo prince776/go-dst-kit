@@ -423,6 +423,68 @@ Library findings:
   choice sequence (Hypothesis-style), which is also what guided
   exploration and shrinking need (Deferred).
 
+## Exploration plan (approved by Prince, 2026-11-26)
+
+Goal: find more bugs, measurably. Targets: llm-tor (request/response
+service with cloud fakes: interleavings, lost replies) and go-diskqueue
+(single-process storage: crash timing around fsync). Milestones in order
+A to F; stop for review at the end of each.
+
+**Guards (Prince: agreed).** The known-bug benchmark is a floor that
+catches regressions in exploration, never the target. Some bugs are held
+out (not looked at while tuning; checked at the end). The real measure is
+new bugs found in code not yet explored; coverage of rare states
+(`Sometimes` reached) is tracked alongside.
+
+**Background (research).** Swarm testing (Groce et al., ISSTA 2012:
+random per-run configurations beat all-features-on); PCT (Burckhardt et
+al., ASPLOS 2010: bounded priority changes, probability of a depth-d bug
+per run ≥ 1/(n·k^(d−1))); Antithesis (sometimes assertions as
+checkpoints, restarting runs from them by deterministic replay; Moonpool
+adds a budget per assertion); Hypothesis (shrink the choice sequence,
+MacIver & Donaldson, ECOOP 2020); TigerBeetle VOPR (faults aimed at risky
+moments, a liveness mode); Magma (ground-truth bugs, reached vs
+triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
+
+- **A. Test design.** Docs (`writing-a-test.md`): designing the workload
+  and fakes: model the real client (retries, credential renewal,
+  resending after a lost reply), cover every writer of shared state,
+  several clients per identity, fakes answering with every documented
+  error (4xx, 412, 429 with retry-after, 5xx, partial results), a
+  checklist per service type. llm-tor: two devices per user, permanent
+  abuse tokens and backups, Cosmos 429 throttling, the OpenAI path,
+  moderation that blocks. go-diskqueue: several producers and consumers,
+  `PeekChan`, a `Depth()` check.
+- **B. Baseline benchmark.** Known bugs re-insertable by **switches in
+  code** behind a `dstbugs` build tag (Prince: whichever iterates faster;
+  one build runs every bug, no worktrees; a constant false in normal
+  builds). Bugs: llm-tor's 8 fixed ones (double credit, lost update
+  webhook/issuance, lost update via abuse rotation, double charge, two
+  answers, prompt not hashed, the hash regression, the saved 503) and
+  go-diskqueue's 4; 2 + 1 held out. Per bug: failure rate per seed with a
+  confidence interval, median seeds and wall time to first failure,
+  reached (its `Sometimes` precondition) vs triggered; repeated trials
+  for stateful strategies. Not CI: run on demand to judge an exploration
+  change.
+- **C. Swarm improvements, each measured against B.** Start time drawn
+  per seed (sometimes just before a day, month or year boundary);
+  crashes come with latency (the swarm draws slow calls when crashes are
+  on); named random streams, `w.Rand().Stream(name)` (Prince: this
+  form); a cross-process replay check (a trace hash with every failure,
+  a few seeds rerun in a subprocess); swarm over workload features,
+  `h.Feature(name)` reporting whether this seed enables it (Prince:
+  agreed); PCT depth drawn per seed.
+- **D. Choice sequences.** A run is (code version, choices); first as
+  "seed, then from step k, seed2" (enough to fork), full tapes only if
+  shrinking needs them. A corpus under `testdata/dst/` of runs that
+  failed or reached rare states, replayed by the tests.
+- **E. Guided exploration.** On first reaching a rare `Sometimes`,
+  record (seed, step); later runs replay the prefix and continue with
+  fresh randomness, a budget per marker. Compared on B with plain swarm
+  and with the choice sequence fed to Go's fuzzer (`go test -fuzz`).
+- **F. Shrinking.** Minimize fault events, then fork points, then phase
+  lengths (shortlex); measured by trace length on B's failures.
+
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
 - ~~`Rand.CryptoRead`~~ **done**: `Rand.Read` became `CryptoRead`
@@ -468,7 +530,6 @@ Library findings:
 
 - The 3 inconclusive raftkv seeds and the independent bug hunt (v0;
   Prince, reconfirmed 2026-11-26: later).
-- After the normal dsttest exploration is hardened (Prince, 2026-11-26):
-  guided exploration (coverage-guided via Go's fuzzer; forking from rare
-  states by deterministic replay), shrinking failing seeds, and more
-  storage faults (I/O errors, full disk, bit rot, misdirected writes).
+- More storage faults (I/O errors, full disk, misdirected writes; bit
+  rot is in the Todo). Guided exploration and shrinking are now in the
+  exploration plan (E, F).
