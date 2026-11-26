@@ -33,7 +33,7 @@ that way. Public APIs must not expose `internal/` types.
   uses the World for goroutines, channels, select, time, locks that wait,
   contexts with timers, randomness, files and the network, and never lets
   map iteration order reach anything observable (sort keys). `dstlint`
-  checks it.
+  checks the World substitutions (not map order yet: see PLAN.md Todo).
 - **Library internals** that the simulation drives (`internal/sched`,
   `simfs`, `simnet`) must be deterministic given the seed: no wall clock,
   no global rand, sorted iteration.

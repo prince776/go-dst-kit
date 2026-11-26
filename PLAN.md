@@ -332,6 +332,30 @@ World checks an inlined atomic and matches bare Go (66ns contended,
 13.8ns uncontended). A first version called the non-inlined lookup and
 cost 110ns contended; the benchmark caught it.
 
+## Todo (Prince, 2026-11-26; propose each design before building)
+
+- **`Rand.CryptoRead`**: rename `Rand.Read` so the API says what it
+  replaces: `CryptoRead` stands in for `crypto/rand.Read` (crypto/rand in
+  the real World, the seeded stream in simulation); the number methods
+  stand in for `math/rand`. To settle: whether `Rand` stays an
+  `io.Reader` (for libraries that take one) through an adapter, the
+  dstlint mapping, and the note on crypto functions that ignore the
+  reader they're given.
+- **Atomics**: `sync/atomic` operations aren't scheduling points, so the
+  interleavings of lock-free code aren't explored, and a goroutine
+  spinning on an atomic between World calls holds the baton. Options: a
+  `dst.Atomic` family (yield before each operation in simulation, plain
+  atomics in the real World, mapped by dstlint), or yielding only on
+  some operations (CompareAndSwap, Load in a loop). Verification: a
+  lock-free bug (lost CAS update, publication before initialization)
+  that is caught with it and missed without.
+- **Map order**: today map iteration order is only detected, when it
+  changes behaviour on a determinism-checked seed. Options: dstlint flags
+  `range` over a map in simulated packages unless the keys are sorted or
+  the line says `//dst:ok`; run more seeds twice; a `dst.SortedKeys`
+  helper. Also fix CLAUDE.md, which says dstlint checks map order (it
+  doesn't yet).
+
 ## Deferred
 
 - The 3 inconclusive raftkv seeds and the independent bug hunt (v0;
