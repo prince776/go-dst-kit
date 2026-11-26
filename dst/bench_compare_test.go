@@ -157,8 +157,10 @@ func files(fsys dst.FS, n int) {
 	}
 }
 
-func BenchmarkFileReal(b *testing.B) { files(realworld.New(realworld.Options{Dir: b.TempDir()}).FS(), b.N) }
-func BenchmarkFileSim(b *testing.B)  { inSim(b, func(w *dst.World) { files(w.FS(), b.N) }) }
+func BenchmarkFileReal(b *testing.B) {
+	files(realworld.New(realworld.Options{Dir: b.TempDir()}).FS(), b.N)
+}
+func BenchmarkFileSim(b *testing.B) { inSim(b, func(w *dst.World) { files(w.FS(), b.N) }) }
 
 // ---- open + close (path resolution) ----
 
@@ -179,8 +181,10 @@ func opens(fsys dst.FS, n int) {
 	}
 }
 
-func BenchmarkOpenReal(b *testing.B) { opens(realworld.New(realworld.Options{Dir: b.TempDir()}).FS(), b.N) }
-func BenchmarkOpenSim(b *testing.B)  { inSim(b, func(w *dst.World) { opens(w.FS(), b.N) }) }
+func BenchmarkOpenReal(b *testing.B) {
+	opens(realworld.New(realworld.Options{Dir: b.TempDir()}).FS(), b.N)
+}
+func BenchmarkOpenSim(b *testing.B) { inSim(b, func(w *dst.World) { opens(w.FS(), b.N) }) }
 
 // ---- fsync ----
 
@@ -202,8 +206,10 @@ func syncs(fsys dst.FS, n int) {
 	}
 }
 
-func BenchmarkSyncReal(b *testing.B) { syncs(realworld.New(realworld.Options{Dir: b.TempDir()}).FS(), b.N) }
-func BenchmarkSyncSim(b *testing.B)  { inSim(b, func(w *dst.World) { syncs(w.FS(), b.N) }) }
+func BenchmarkSyncReal(b *testing.B) {
+	syncs(realworld.New(realworld.Options{Dir: b.TempDir()}).FS(), b.N)
+}
+func BenchmarkSyncSim(b *testing.B) { inSim(b, func(w *dst.World) { syncs(w.FS(), b.N) }) }
 
 // ---- TCP: 64-byte request/response round trip on one connection ----
 
