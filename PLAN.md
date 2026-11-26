@@ -378,9 +378,12 @@ v0.1.0 (main module), dstgrpc/v0.1.0, dstlint/v0.1.0.
 and redemption flows on a World (branch `dst`). A real HTTP service
 (chi over dsthttp) with a crashable server, never-crash clients and Dodo,
 and cloud fakes outside every machine behind `dst.Call`. Bugs confirmed
-by traced seeds: double credit on a webhook retry, lost updates between
-the webhook and issuance, a double charge on an issuance retry, a token
-buying two LLM answers, and a request hash that doesn't cover the prompt.
+by traced seeds and fixed (tracked in llm-tor's DST.md): double credit
+on a webhook retry, lost updates on the user document (webhook,
+issuance, abuse token issuance, sign-in), a double charge on an issuance
+retry, a token buying two LLM answers, a request hash that didn't cover
+the prompt, and a regression in one of the fixes. Open: transient abuse
+token epochs (clock skew at month boundaries; client-chosen epochs).
 Library findings:
 - **Process-level nondeterminism isn't caught.** RSA keys generated per
   process made seeds replay differently across processes (blinding's
@@ -397,6 +400,28 @@ Library findings:
   pairs Crash with service latency, or the docs say so loudly.
 - `NeverCrash` client machines, cloud fakes as plain maps outside
   machines, and dsthttp under chi all worked unchanged.
+- **Every simulation starts on a month and year boundary**
+  (`simworld.Epoch` = 2030-01-01 00:00 UTC) with machine clocks up to
+  10ms apart, so date-bucketing code (llm-tor's monthly epochs) straddles
+  a boundary at t=0 in every seed. It found a real clock-skew bug, but by
+  accident, and it also hides bugs that need a mid-month start.
+  Candidate: draw the start time per seed (sometimes just before a
+  boundary: midnight, month, year, DST change), from its own stream.
+- **Fixing exposed the next layer.** Fixing a bug changed the request
+  hash's role (spent before asking the provider), and the same sweep then
+  caught a regression in the fix (the hash covered credentials the client
+  renews between retries). Broadening the workload (clients rotating
+  abuse tokens, as the real client does) found another instance of an
+  already-fixed bug class in a path the first workload never wrote.
+  Lesson for docs: when a bug class is fixed, grep for every other writer
+  of the same state and make the workload exercise them.
+- **Seeds aren't a corpus.** A seed is entropy, not an input: after a fix
+  or any workload change, the same seed explores a different run, so a
+  pinned failing seed stops reproducing its bug (every llm-tor seed
+  number above means nothing after the fix commits). A regression list of
+  seeds is still cheap insurance; a durable corpus needs the recorded
+  choice sequence (Hypothesis-style), which is also what guided
+  exploration and shrinking need (Deferred).
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
