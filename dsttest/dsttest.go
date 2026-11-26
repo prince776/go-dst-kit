@@ -72,6 +72,7 @@
 package dsttest
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -101,6 +102,8 @@ var (
 	flagFirst    = flag.String("dst.first", "", `first seed of the sweep: a number, or "random" for a fresh one (printed)`)
 	flagVerbose  = flag.Bool("dst.v", false, "print the event log (with -dst.seed)")
 	flagParallel = flag.Int("dst.parallel", 0, "seeds run at once (default GOMAXPROCS)")
+	flagKeep     = flag.Bool("dst.keepgoing", false, "sweep every seed, not stopping at the first failures (Options.KeepGoing)")
+	flagJSON     = flag.String("dst.json", "", "append one JSON line per seed run to this file (for tools such as dstbench)")
 )
 
 // Faults selects the fault classes the runner may inject. Rates are drawn
@@ -220,6 +223,9 @@ func (o *Options) defaults() {
 	}
 	if *flagParallel > 0 {
 		o.Parallel = *flagParallel
+	}
+	if *flagKeep {
+		o.KeepGoing = true
 	}
 }
 
@@ -612,6 +618,7 @@ type Result struct {
 	Checkpoints []uint64
 	Steps       uint64
 	SimTime     time.Duration
+	Wall        time.Duration // the run's wall-clock time (set by Sweep)
 	Coverage    map[string]int
 	Expect      []string
 }
@@ -912,6 +919,7 @@ type Report struct {
 	SimTime          time.Duration
 	Steps            uint64
 	Wall             time.Duration
+	Results          []Result // every seed run, in seed order
 }
 
 // OK reports whether the sweep found nothing wrong.
@@ -982,7 +990,9 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 				next++
 				mu.Unlock()
 				checked := i < opts.DeterminismChecks
+				t0 := time.Now()
 				r := runSeed(seeds[i], opts, setup, nil, checked)
+				r.Wall = time.Since(t0)
 				if r.Err != nil || checked {
 					// The rerun is strict too: a misuse may explain a failure.
 					divs[i] = compare(r, runSeed(seeds[i], opts, setup, nil, true))
@@ -1004,6 +1014,7 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 			continue // not run (stopped early)
 		}
 		rep.Runs++
+		rep.Results = append(rep.Results, r)
 		rep.SimTime += r.SimTime
 		rep.Steps += r.Steps
 		for k, v := range r.Coverage {
@@ -1030,6 +1041,40 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 	return rep
 }
 
+// seedRecord is one line of -dst.json.
+type seedRecord struct {
+	Test     string         `json:"test"`
+	Seed     uint64         `json:"seed"`
+	Index    int            `json:"index"` // position in the sweep (0 is the first seed)
+	Failed   bool           `json:"failed"`
+	Error    string         `json:"error,omitempty"`
+	Steps    uint64         `json:"steps"`
+	SimNS    int64          `json:"sim_ns"`
+	WallNS   int64          `json:"wall_ns"`
+	Coverage map[string]int `json:"coverage,omitempty"`
+}
+
+// writeJSON appends a line per run of rep to path.
+func writeJSON(path, test string, rep Report) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	for _, r := range rep.Results {
+		rec := seedRecord{Test: test, Seed: r.Seed, Index: int(r.Seed - rep.FirstSeed), Failed: r.Err != nil,
+			Steps: r.Steps, SimNS: int64(r.SimTime), WallNS: int64(r.Wall), Coverage: r.Coverage}
+		if r.Err != nil {
+			rec.Error = strings.SplitN(r.Err.Error(), "\n", 2)[0]
+		}
+		if err := enc.Encode(rec); err != nil {
+			f.Close()
+			return err
+		}
+	}
+	return f.Close()
+}
+
 // Run sweeps seeds as a test, failing t for failing seeds, nondeterminism
 // and behaviours that never happened. With -dst.seed it runs one seed
 // (with -dst.v, printing its event log).
@@ -1048,6 +1093,11 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 		return Report{Runs: 1, Coverage: r.Coverage}
 	}
 	rep := Sweep(opts, setup)
+	if *flagJSON != "" {
+		if err := writeJSON(*flagJSON, t.Name(), rep); err != nil {
+			t.Errorf("dsttest: -dst.json: %v", err)
+		}
+	}
 	t.Logf("%d seeds from %d: %v simulated in %v (%.0fx), %d steps", rep.Runs, rep.FirstSeed, rep.SimTime.Round(time.Millisecond), rep.Wall.Round(time.Millisecond), float64(rep.SimTime)/float64(max(rep.Wall, 1)), rep.Steps)
 	if len(rep.Coverage) > 0 {
 		var b strings.Builder
