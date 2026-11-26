@@ -220,7 +220,13 @@ effect later, and the checker allows exactly that.
 | Your process stalls (GC pause, VM freeze) | `Faults.Pause` | nothing |
 | A service you don't run fails, times out or is slow | fault points in a wrapper around its fake (`Faults.Points`) | one `dst.Call` per method |
 | That whole service goes down | outages (`Faults.Services`) | nothing beyond `service.op` names |
+| A service answers, with an error (503 overloaded, 429, a 5xx) | `dst.Inject` in the fake, returning that response | the error response |
 | Your own code should sometimes take a rare legal path | `w.Buggify` | the other path |
+
+`dst.Call` models the request failing or its reply being lost; it can't
+make the service *answer* with an error. Real services do both, and code
+often handles them differently (an error response is easy to mistake for
+an answer and save), so model the answers too.
 
 Put fault points at the boundary, one per remote round trip. Don't use
 them to fake crashes or network faults in your own system: the runner
@@ -340,6 +346,54 @@ partition, with simulated timestamps; add `w.Logf` calls to your code to
 see your own state in the same log. The seed fails the same way every
 time, so a debugger or extra logging doesn't make it go away.
 
-Once fixed, keep the seed in a regression test with `dsttest.RunSeed` if
-the bug was subtle: sweeps start from seed 1, but a fix to the harness can
-change which seeds reach the bug.
+A seed is entropy, not an input: once the code or the workload changes,
+the same seed explores a different run. So a pinned seed (`dsttest.RunSeed`)
+only reproduces its bug until the next change, the fix included. To keep
+a fixed bug fixed, write a small ordinary test of the exact scenario the
+trace showed (it should fail when the fix is reverted), and keep the sweep
+that found it.
+
+## Sweeps that pass for the wrong reason
+
+A passing sweep only means something if the faults could reach the code
+that matters. Each of these made a real sweep pass while bugs were there.
+
+- **Crashes with nothing slow.** If your fakes answer instantly, a request
+  takes no simulated time: crashes can only land between requests, never
+  between a request's steps. Pair `Faults.Crash` with latency on your
+  fault points (`Options.Points` with `Slow`), so crashes land mid-request.
+  One service passed 1,000 crash-only seeds and failed most seeds once its
+  calls were slow.
+- **Clients that don't behave like the real ones.** A test client that
+  gives up, changes its request on a retry, or ignores a response flag the
+  real client acts on makes failures that aren't bugs, and hides the ones
+  that are. Write it to do what the real client does: retry the same
+  request, renew credentials it's told have expired, resend after a lost
+  reply.
+- **A workload that skips writers.** When a sweep finds a bug in how some
+  state is written (a lost update, say), find every other writer of that
+  state and make the workload call them too. Fixing two writers and not
+  the third passes the sweep.
+- **Coverage you didn't check.** `h.Sometimes` the things that must happen
+  (a payment credited, a token redeemed, a crash mid-request) and
+  `h.Expect` them, so a workload that quietly stops doing them fails.
+- **Inputs that change per process.** Anything the simulation uses that
+  varies from one process to the next breaks replay across processes, and
+  the determinism check can't see it (it reruns a seed in the same
+  process). Keys generated at test start are the usual culprit: crypto
+  that rejection-samples from `dst.CryptoReader` takes a key-dependent
+  number of bytes from the World's stream, shifting every later draw. Load
+  fixed test keys from testdata.
+- **Dates.** Every simulation starts at 2030-01-01 00:00 UTC, with machine
+  clocks up to `Clock.MaxOffset` apart, so code that buckets by day, month
+  or year straddles a boundary at the start of every seed. That finds
+  boundary bugs; it also means nothing in your sweep starts mid-month.
+
+## Reading many failures
+
+With `Options.KeepGoing`, a sweep reports every failing seed. Group them
+by which guarantee failed, and by direction where there is one (credited
+more or less than paid, charged more or less than delivered): each group
+is usually one bug, and its first seed is the one to trace. Replay it with
+`-dst.v` and enough `w.Logf` in your fakes (the writes to the state the
+check is about) to see the interleaving.
