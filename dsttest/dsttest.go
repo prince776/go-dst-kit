@@ -162,6 +162,9 @@ type Options struct {
 	// third of seeds, else failing 0.1% to 20% of calls (a random share of
 	// those after acting), sometimes slowed by 1ms to 1s.
 	Points map[string]Point
+	// Start pins what clocks read at the start of every run (default:
+	// drawn per seed, see Swarm.Start).
+	Start time.Time
 	// StrictIdentity checks on every scheduling call that the World is
 	// used only from goroutines it started (about 1.8µs per call). Without
 	// it, the determinism-checked seeds and replays are checked strictly
@@ -507,6 +510,14 @@ type Swarm struct {
 
 	OutageEvery time.Duration // mean time between service outages (0: none)
 	OutageFor   time.Duration // mean outage length
+
+	// Start is what clocks read at the start of the run: in half the seeds
+	// a random instant in 2030, in the other half just before a midnight,
+	// a month or a new year, so the boundary falls inside the run.
+	Start time.Time
+	// CrashLatency: with crashes on and fault points off, points still add
+	// latency (never failures), so crashes land between a request's steps.
+	CrashLatency bool
 }
 
 func (s Swarm) disk() simfs.Options {
@@ -521,7 +532,8 @@ func (s Swarm) String() string {
 	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
 		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
-		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v)", s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor)
+		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
+			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency)
 }
 
 func (s Swarm) sched() string {
@@ -541,7 +553,7 @@ func sometimes[T any](r *rand.Rand, v T) T {
 	return v
 }
 
-func newSwarm(seed uint64, f Faults) Swarm {
+func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	r := rand.New(rand.NewPCG(seed, 0x5a4f5a4f))
 	s := Swarm{MinLatency: 50 * time.Microsecond}
 	s.MeanLatency = time.Duration(100+r.IntN(2000)) * time.Microsecond
@@ -604,7 +616,33 @@ func newSwarm(seed uint64, f Faults) Swarm {
 	if f.Services {
 		s.OutageEvery, s.OutageFor = outageEvery, outageFor
 	}
+	// The start time, and crash latency, last again.
+	s.Start = drawStart(r, runLen)
+	crashLatency := r.IntN(3) != 0
+	if f.Crash && !f.Points {
+		s.CrashLatency = crashLatency
+	}
 	return s
+}
+
+// drawStart picks the start time: half the time anywhere in 2030, else
+// just before a boundary date code buckets by (midnight, the first of a
+// month, the new year), so it falls inside a run of runLen.
+func drawStart(r *rand.Rand, runLen time.Duration) time.Time {
+	year := simworld.Epoch
+	if r.IntN(2) == 0 {
+		return year.Add(time.Duration(r.Int64N(int64(365 * 24 * time.Hour))))
+	}
+	var boundary time.Time
+	switch r.IntN(3) {
+	case 0:
+		boundary = year.AddDate(0, 0, 1+r.IntN(364))
+	case 1:
+		boundary = year.AddDate(0, 1+r.IntN(11), 0)
+	default:
+		boundary = year.AddDate(1, 0, 0)
+	}
+	return boundary.Add(-time.Duration(r.Int64N(int64(max(runLen, time.Millisecond)))))
 }
 
 // ---- running ----
@@ -633,7 +671,10 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 // scheduling call (always with Options.StrictIdentity).
 func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any), strict bool) Result {
 	opts.defaults()
-	swarm := newSwarm(seed, opts.Faults)
+	swarm := newSwarm(seed, opts.Faults, opts.FaultPhase+opts.RecoveryPhase)
+	if !opts.Start.IsZero() {
+		swarm.Start = opts.Start
+	}
 	h := &Harness{opts: opts, swarm: swarm, cover: map[string]int{}}
 	h.sim = simworld.New(simworld.Options{
 		Seed:           seed,
@@ -644,6 +685,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		StrictIdentity: strict || opts.StrictIdentity,
 		PCTDepth:       swarm.PCTDepth,
 		PCTHorizon:     swarm.PCTHorizon,
+		Start:          swarm.Start,
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
@@ -653,7 +695,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 			return nil
 		},
 	})
-	h.points = newRegistry(seed, opts, h.Sometimes, h.Logf)
+	h.points = newRegistry(seed, opts, swarm, h.Sometimes, h.Logf)
 	h.sim.S.Points = h.points
 	h.test = h.sim.Machine("test")
 	r := h.sim.RunOn(h.test, func(w *dst.World) {
@@ -1136,15 +1178,21 @@ func IsDeadlock(err error) bool {
 
 // newRegistry builds a seed's fault-point registry. With Faults.Points
 // off, every point is quiet (service outages still fail them).
-func newRegistry(seed uint64, opts Options, cover func(string), logf func(string, ...any)) *points.Registry {
+func newRegistry(seed uint64, opts Options, swarm Swarm, cover func(string), logf func(string, ...any)) *points.Registry {
 	ov := map[string]points.Config{}
 	for prefix, p := range opts.Points {
 		ov[prefix] = points.Config(p)
 	}
+	slowOnly := false
 	if !opts.Faults.Points {
-		ov = map[string]points.Config{"": {}}
+		if swarm.CrashLatency {
+			slowOnly, ov = true, nil // latency only, as when fault points are off: no overrides
+		} else {
+			ov = map[string]points.Config{"": {}}
+		}
 	}
 	r := points.New(seed, ov)
+	r.SlowOnly = slowOnly
 	r.Cover, r.Logf = cover, logf
 	return r
 }

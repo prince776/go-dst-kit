@@ -73,6 +73,10 @@ type Registry struct {
 	Logf func(format string, args ...any)
 	// Cover, if set, counts a point's firing ("point NAME: fail", ...).
 	Cover func(name string)
+	// SlowOnly makes points add latency and never fail (Buggify points
+	// never fire): so crashes can land between a request's steps when
+	// fault points are otherwise off.
+	SlowOnly bool
 }
 
 type point struct {
@@ -132,6 +136,8 @@ func (r *Registry) get(name string, buggify bool) *point {
 	}
 	if c, ok := r.override(name); ok {
 		p.cfg = c
+	} else if r.SlowOnly {
+		p.cfg = slowOnly(rand.New(rand.NewPCG(r.seed^0x5bd1e995, k)), buggify)
 	}
 	r.pts[name] = p
 	if r.Logf != nil {
@@ -173,6 +179,15 @@ func draw(r *rand.Rand, buggify bool) Config {
 		c.Latency = time.Duration(math.Pow(10, 3*r.Float64())) * time.Millisecond
 	}
 	return c
+}
+
+// slowOnly draws a point's latency when it may not fail: two thirds of
+// points slow 10% to 50% of calls, by 1ms to 300ms.
+func slowOnly(r *rand.Rand, buggify bool) Config {
+	if buggify || r.IntN(3) == 0 {
+		return Config{}
+	}
+	return Config{Slow: 0.1 + 0.4*r.Float64(), Latency: time.Duration(math.Pow(10, 2.5*r.Float64())) * time.Millisecond}
 }
 
 // Inject decides one call of a fault point: whether it fails, and how much

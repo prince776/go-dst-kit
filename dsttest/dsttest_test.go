@@ -736,3 +736,139 @@ func TestChanRaw(t *testing.T) {
 		t.Fatal("Raw on a simulated channel didn't panic")
 	}
 }
+
+// Rand.Stream: a named stream is independent of the others (drawing from
+// it never changes what another draws), continues across calls, and
+// differs by name; the negative case (drawing from the main stream
+// itself) shows the check can fail.
+func TestRandStream(t *testing.T) {
+	// draws runs one seed: extra draws from the stream named extraFrom
+	// ("" is the main stream) between the main stream's values.
+	draws := func(extraFrom string) (main [3]uint64, other uint64) {
+		dsttest.RunSeed(7, dsttest.Options{FaultPhase: time.Millisecond, RecoveryPhase: time.Millisecond}, func(h *dsttest.Harness) {
+			h.Machine("m", func(w *dst.World) {
+				r := w.Rand()
+				for i := range main {
+					main[i] = r.Uint64()
+					extra := r
+					if extraFrom != "" {
+						extra = r.Stream(extraFrom)
+					}
+					for range 50 {
+						extra.Uint64()
+					}
+				}
+				other = r.Stream("other").Uint64()
+			})
+		}, nil)
+		return
+	}
+	base, baseOther := draws("crypto")
+	if again, _ := draws("library"); again != base {
+		t.Errorf("draws from one stream changed the main stream: %v vs %v", again, base)
+	}
+	if shifted, _ := draws(""); shifted == base {
+		t.Errorf("drawing from the main stream itself didn't shift it: the check can't fail")
+	}
+	if _, o := draws("library"); o != baseOther {
+		t.Errorf("stream %q changed with another stream's use: %d vs %d", "other", o, baseOther)
+	}
+
+	dsttest.RunSeed(7, dsttest.Options{FaultPhase: time.Millisecond, RecoveryPhase: time.Millisecond}, func(h *dsttest.Harness) {
+		h.Machine("m", func(w *dst.World) {
+			a1 := w.Rand().Stream("a").Uint64()
+			a2 := w.Rand().Stream("a").Uint64()
+			b := w.Rand().Stream("b").Uint64()
+			if a1 == a2 {
+				t.Errorf("the same name restarted its stream: %d twice", a1)
+			}
+			if a1 == b {
+				t.Errorf("streams a and b drew the same first value %d", a1)
+			}
+			nested := w.Rand().Stream("a").Stream("x").Uint64()
+			if nested == a1 || nested == b {
+				t.Errorf("a nested stream repeated another's value")
+			}
+		})
+	}, nil)
+
+	if r := realworld.New(realworld.Options{}).Rand().Stream("x"); r.IntN(10) < 0 {
+		t.Error("the real World's stream is unusable")
+	}
+}
+
+// Start times are drawn per seed: they differ, and some runs straddle a
+// midnight, a month boundary and a new year; Options.Start pins them.
+// Fails if every seed starts at the same instant or no run crosses a
+// boundary.
+func TestStartTimes(t *testing.T) {
+	const run = 2 * time.Second
+	starts := map[time.Time]bool{}
+	var day, month, year int
+	for seed := uint64(1); seed <= 300; seed++ {
+		var start time.Time
+		dsttest.RunSeed(seed, dsttest.Options{FaultPhase: run / 2, RecoveryPhase: run / 2}, func(h *dsttest.Harness) {
+			h.Machine("m", func(w *dst.World) { start = w.Now() })
+		}, nil)
+		starts[start.Truncate(time.Millisecond)] = true
+		end := start.Add(run).UTC()
+		s := start.UTC()
+		switch {
+		case s.Year() != end.Year():
+			year++
+		case s.Month() != end.Month():
+			month++
+		case s.Day() != end.Day():
+			day++
+		}
+	}
+	if len(starts) < 250 {
+		t.Errorf("only %d distinct start times in 300 seeds", len(starts))
+	}
+	if day == 0 || month == 0 || year == 0 {
+		t.Errorf("runs crossing a midnight %d, a month %d, a year %d: want each", day, month, year)
+	}
+	pin := time.Date(2031, 6, 1, 12, 0, 0, 0, time.UTC)
+	dsttest.RunSeed(5, dsttest.Options{FaultPhase: run / 2, RecoveryPhase: run / 2, Start: pin}, func(h *dsttest.Harness) {
+		h.Machine("m", func(w *dst.World) {
+			if got := w.Now(); got.Sub(pin).Abs() > time.Second {
+				t.Errorf("Options.Start %v: the run started at %v", pin, got)
+			}
+		})
+	}, nil)
+}
+
+// With crashes on and fault points off, the swarm slows fault points in
+// some seeds (so crashes land between a request's steps) and never fails
+// them; with crashes off too, points are quiet. Fails if crash latency
+// never happens, or if it ever injects a failure.
+func TestCrashLatency(t *testing.T) {
+	sweep := func(crash bool) (slow, fail int) {
+		rep := dsttest.Sweep(dsttest.Options{Seeds: 60, Faults: dsttest.Faults{Crash: crash}, FaultPhase: time.Second, RecoveryPhase: time.Second},
+			func(h *dsttest.Harness) {
+				h.Machine("svc", func(w *dst.World) {
+					for {
+						for _, p := range []string{"store.get", "store.put", "kms.wrap"} {
+							dst.Do(w, p, func() error { return nil })
+						}
+						w.Sleep(time.Millisecond)
+					}
+				})
+			})
+		for k, n := range rep.Coverage {
+			switch {
+			case strings.HasSuffix(k, ": slow"):
+				slow += n
+			case strings.HasSuffix(k, ": fail"), strings.HasSuffix(k, ": fail-after"), strings.HasSuffix(k, ": outage"):
+				fail += n
+			}
+		}
+		return
+	}
+	if slow, fail := sweep(true); slow == 0 || fail != 0 {
+		t.Errorf("crashes on, points off: %d slowed calls (want some), %d failures (want none)", slow, fail)
+	}
+	if slow, fail := sweep(false); slow != 0 || fail != 0 {
+		t.Errorf("crashes and points off: %d slowed, %d failed (want none)", slow, fail)
+	}
+}

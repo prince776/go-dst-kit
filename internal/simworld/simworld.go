@@ -44,11 +44,14 @@ import (
 	"github.com/prince776/go-dst-kit/internal/worldhook"
 )
 
-// Epoch is what a simulated World's clock reads at the start of a run.
+// Epoch is what a simulated World's clock reads at the start of a run,
+// unless Options.Start says otherwise.
 var Epoch = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Options configure a simulation.
 type Options struct {
+	// Start is what clocks read at the start of the run (zero: Epoch).
+	Start    time.Time
 	Seed     uint64
 	Watchdog time.Duration
 	Logf     func(format string, args ...any)
@@ -69,6 +72,7 @@ type Options struct {
 
 // Sim is one simulated run.
 type Sim struct {
+	start    time.Time // what clocks read at the start of the run
 	S        *sched.Scheduler
 	Net      *simnet.Network
 	machines map[string]*Machine
@@ -107,7 +111,11 @@ func New(opts Options) *Sim {
 			PCTDepth: opts.PCTDepth, PCTHorizon: opts.PCTHorizon}),
 		machines: map[string]*Machine{},
 	}
-	s.Net = simnet.New(s.S, Epoch, opts.Net)
+	s.start = Epoch
+	if !opts.Start.IsZero() {
+		s.start = opts.Start
+	}
+	s.Net = simnet.New(s.S, s.start, opts.Net)
 	return s
 }
 
@@ -133,7 +141,7 @@ func (s *Sim) AddMachine(name string, opts MachineOptions) *Machine {
 	m := &Machine{Name: name, M: sm, sim: s}
 	m.Disk = simfs.New(s.S, sm, opts.Disk)
 	m.Host = s.Net.Attach(sm)
-	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: Epoch, FS: m.Disk, Net: m.Host}).(*dst.World)
+	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: s.start, FS: m.Disk, Net: m.Host}).(*dst.World)
 	s.machines[name] = m
 	s.order = append(s.order, m)
 	return m

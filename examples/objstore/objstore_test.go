@@ -108,18 +108,25 @@ func TestPlantedBugs(t *testing.T) {
 }
 
 // The ambiguity bugs only show when a write can time out after taking
-// effect: without fault points they pass every seed.
+// effect. Without fault points or latency nothing times out, and they pass
+// every seed; with latency alone (crashes on, fault points off: the swarm
+// slows points then) a slow write lands after the caller gave up, and both
+// are caught.
 func TestAmbiguityBugsNeedFaultPoints(t *testing.T) {
-	o := opts()
-	o.Seeds, o.DeterminismChecks = 100, -1
-	o.Faults.Points, o.Faults.Services = false, false
 	for name, bugs := range map[string]objstore.Bugs{
 		"BlindRetry":       {BlindRetry: true},
 		"TimeoutAsFailure": {TimeoutAsFailure: true},
 	} {
+		o := opts()
+		o.Seeds, o.DeterminismChecks = 100, -1
+		o.Faults.Points, o.Faults.Services, o.Faults.Crash = false, false, false
 		rep := dsttest.Sweep(o, harness(bugs)) // (its coverage expectations go unmet: no points)
 		if len(rep.Failed) > 0 {
-			t.Errorf("%s caught without fault points: %v", name, rep.Failed[0].Err)
+			t.Errorf("%s caught without fault points or latency: %v", name, rep.Failed[0].Err)
+		}
+		o.Faults.Crash = true // and so latency on fault points, in two thirds of seeds
+		if rep := dsttest.Sweep(o, harness(bugs)); len(rep.Failed) == 0 {
+			t.Errorf("%s not caught with latency alone in %d seeds", name, rep.Runs)
 		}
 	}
 }

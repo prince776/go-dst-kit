@@ -82,7 +82,7 @@ func init() {
 	worldhook.NewWorld = func(sp worldhook.Spec) any {
 		w := &World{s: sp.Sched, m: sp.Machine, epoch: sp.Epoch}
 		if w.s != nil {
-			w.rnd = simRand{w.s.Rand("machine/" + w.m.Name + "/rand")}
+			w.rnd = newSimRand("machine/"+w.m.Name+"/rand", w.s.Rand)
 		} else {
 			w.rnd = realRand{}
 		}

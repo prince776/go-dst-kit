@@ -27,6 +27,13 @@ type Rand interface {
 	Shuffle(n int, swap func(i, j int))
 	// CryptoRead fills p with random bytes: crypto/rand.Read.
 	CryptoRead(p []byte) (int, error)
+	// Stream is an independent stream named name, derived from this one's
+	// seed: drawing from it never changes what this stream (or any other)
+	// draws next, so code that consumes a varying amount of randomness
+	// (crypto, a retry loop, a library) can't shift the rest of the run.
+	// The same name returns the same stream, continuing where it left
+	// off. In the real World every stream is the global generator.
+	Stream(name string) Rand
 }
 
 // CryptoReader is crypto/rand.Reader for a World, for libraries that take
@@ -37,9 +44,30 @@ type cryptoReader struct{ r Rand }
 
 func (c cryptoReader) Read(p []byte) (int, error) { return c.r.CryptoRead(p) }
 
-type simRand struct{ *rand.Rand }
+type simRand struct {
+	*rand.Rand
+	label   string
+	derive  func(label string) *rand.Rand
+	streams map[string]*simRand
+}
 
-func (r simRand) CryptoRead(p []byte) (int, error) {
+func newSimRand(label string, derive func(string) *rand.Rand) *simRand {
+	return &simRand{Rand: derive(label), label: label, derive: derive}
+}
+
+func (r *simRand) Stream(name string) Rand {
+	if s, ok := r.streams[name]; ok {
+		return s
+	}
+	if r.streams == nil {
+		r.streams = map[string]*simRand{}
+	}
+	s := newSimRand(r.label+"/"+name, r.derive)
+	r.streams[name] = s
+	return s
+}
+
+func (r *simRand) CryptoRead(p []byte) (int, error) {
 	for i := 0; i < len(p); i += 8 {
 		v := r.Uint64()
 		for j := 0; j < 8 && i+j < len(p); j++ {
@@ -61,3 +89,4 @@ func (realRand) Float64() float64                   { return rand.Float64() }
 func (realRand) Perm(n int) []int                   { return rand.Perm(n) }
 func (realRand) Shuffle(n int, swap func(i, j int)) { rand.Shuffle(n, swap) }
 func (realRand) CryptoRead(p []byte) (int, error)   { return crand.Read(p) }
+func (realRand) Stream(string) Rand                 { return realRand{} }
