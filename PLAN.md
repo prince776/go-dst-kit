@@ -194,6 +194,11 @@ step-back when done.
 | 13 | PCT scheduler | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
 | 14 | Per-machine clocks | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
 | 15 | UDP | ListenPacket and Dial("udp"); per-datagram latency (so reordering); loss and duplication rates per seed; partitions and dead hosts drop; plus a heartbeat failure-detector example with a planted bug (approved) | contract checks against real loopback UDP; whole-or-nothing datagrams; no faults means exactly once; loss, duplication and reordering each occur in some seed |
+| - | Fresh nightly seeds | `-dst.first=random` picks and prints a random first seed; the nightly CI sweep uses it, so each night explores new seeds (failures still print an exact replay) | flag test: random first seed differs across runs and is reported |
+| - | BUGGIFY | `w.Buggify(name)`: false in the real World; in simulation true at a per-seed rate for each named point, only during the fault phase, counted as coverage | real World always false; no firing outside the fault phase; each point fires in some seeds and is off in others; replay holds |
+| - | Process pauses | the nemesis freezes a machine for a drawn duration (GC pause, VM stall): its goroutines don't run, its timers fire late at resume, data sent to it queues, its clock keeps going. Lease example gains a storage server and a planted NoFencing bug | a paused machine takes no steps while paused; its timers fire at resume, not before; other machines run normally; NoFencing caught, the fenced version passes |
+| - | Stuck versus slow | the stuck-workload report splits goroutines waiting on a timer or deadline (likely slow) from those with nothing left to wake them (stuck) | a test with one of each classifies both correctly |
+| - | Mutex as a scheduling point | in simulation `Lock`/`RLock` yield before acquiring (a process-wide "simulation running" flag keeps the real World free); folded into the identity-check milestone (11) | a lost update across two locked sections is found; real-World mutex benchmark unchanged |
 | - | `NeverCrash` machine option | `h.Machine(name, start, dsttest.NeverCrash)` exempts a machine from the nemesis's crashes (still partitionable) | a NeverCrash machine is never crashed across a crash-heavy sweep; others still are |
 
 ## Performance (Apple M1, Go 1.25; dst/bench_compare_test.go)
@@ -221,3 +226,7 @@ can't be found). Fix proposed to Prince, not yet approved.
 
 - The 3 inconclusive raftkv seeds and the independent bug hunt (v0;
   Prince, reconfirmed 2026-11-26: later).
+- After the normal dsttest exploration is hardened (Prince, 2026-11-26):
+  guided exploration (coverage-guided via Go's fuzzer; forking from rare
+  states by deterministic replay), shrinking failing seeds, and more
+  storage faults (I/O errors, full disk, bit rot, misdirected writes).
