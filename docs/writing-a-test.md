@@ -238,6 +238,17 @@ Most of a sweep's power comes from these choices.
   have taken effect), and check the system's final state against it.
 - **Coverage.** `h.Sometimes` each kind of operation and outcome, and
   `h.Expect` the ones a sweep must reach.
+- **Check only what is observable.** A goroutine records what it received
+  after its receive returns, and the scheduler may run others in between:
+  with two consumers, the order the model records is not the order of the
+  handoffs. Check what each consumer saw (its own order), what all of them
+  saw together (no duplicates, nothing missing), and keep exact ordering
+  checks for a run with one consumer. Most false failures while writing a
+  model come from checking an order nothing could observe.
+- **Rare inputs need many seeds or a swarm over inputs.** A bug that
+  needs a value in a narrow range (a word straddling a 9,000-byte chunk
+  boundary) shows up in a fraction of a percent of seeds: run long sweeps,
+  and draw sizes near the boundaries the code has.
 
 ### What a fake should answer
 

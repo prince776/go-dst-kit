@@ -455,6 +455,16 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   abuse tokens and backups, Cosmos 429 throttling, the OpenAI path,
   moderation that blocks. go-diskqueue: several producers and consumers,
   `PeekChan`, a `Depth()` check.
+  *Status: done 2026-11-26.* Found: llm-tor finding 10 (moderation
+  chunks cut at byte offsets let a flagged word straddling a boundary
+  through; 4 of 2,000 no-fault seeds) and go-diskqueue bug 5 (the writer
+  reuses a crashed run's file at offset 0 after a read error; an acked,
+  synced message lost; ~1 in 400 concurrent crash seeds, two crashes in a
+  row). Both reported, not fixed. Every other failure while building A was
+  the model's: recording deliveries in an order nothing could observe, a
+  backup counted only once acknowledged (a PUT whose reply is lost still
+  stores it), a consumer judging "quiet" on a queue closed meanwhile, a
+  crash epoch kept per consumer instead of per consumer and producer.
 - **B. Baseline benchmark.** Known bugs re-insertable by **switches in
   code** behind a `dstbugs` build tag (Prince: whichever iterates faster;
   one build runs every bug, no worktrees; a constant false in normal
