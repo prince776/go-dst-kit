@@ -46,7 +46,8 @@ state the run uses must be created inside it.
   on `h.World().Go`.
 - `h.Always(name, fn)` checks an invariant after **every** scheduling step.
   It runs between steps, so it may read your servers' fields without
-  locks, but it must not use the World. Keep it cheap.
+  locks, but it must not use the World: no sleeps, channels, or methods
+  that take a `dst.Mutex`. Keep it cheap.
 - `h.Final(name, fn)` runs once, after the workload has finished. It may
   use the World: query the servers, crash them to judge their durable
   state (`m.Crash()` then read `m.World().FS()`).
@@ -88,6 +89,104 @@ for range 100 {
 	doOneOperation(w)
 }
 ```
+
+## Turning an end-to-end test into a simulation test
+
+An existing scenario (ingest data, run GC, check the result) makes a good
+simulation test. Run it repeatedly while faults happen, once more after
+they stop, then check the end state, with invariants checked throughout:
+
+```go
+func TestIngestAndGC(t *testing.T) {
+	dsttest.Run(t, dsttest.Options{Faults: dsttest.AllFaults, FaultPhase: 10 * time.Second, RecoveryPhase: 30 * time.Second},
+		func(h *dsttest.Harness) {
+			store := fakestore.NewService() // a service you don't run: survives crashes
+			model := newModel()             // what should exist: survives crashes
+			quietRunDone := false
+			h.Machine("client", func(w *dst.World) { // runs again after every restart
+				db := Open(w, store.Bucket(w)) // recover from durable state
+				for h.Phase() == dsttest.Faulty {
+					RunIngestAndGC(w, db, model)
+				}
+				RunIngestAndGC(w, db, model) // faults have stopped: every check applies
+				quietRunDone = true
+			})
+			h.Always("no live data lost, no dangling references", func() error { return checkSafety(store, model) })
+			h.Final("the end state matches the model", func(w *dst.World) error {
+				if !quietRunDone {
+					return errors.New("the run after recovery never finished")
+				}
+				return checkEndState(w, store, model)
+			})
+			h.Expect("gc cycle completed", "gc cycle interrupted")
+		})
+}
+```
+
+**Let the runner turn faults on and off.** It draws fault rates per seed
+(some seeds have one crash, some many, some none), times the phases and
+makes every failure replayable. The scenario reads `h.Phase()`; it
+doesn't inject faults itself.
+
+**Put each piece where it lives in production.** Code that dies with the
+process (the database library, its GC) runs in a machine's start
+function, which runs again after each restart and must recover from
+durable state; anything holding a handle to it must use the current
+incarnation's. Services you don't run (fakes, with fault points) and the
+model are created in the setup function, outside every machine, so they
+survive crashes.
+
+**Write checks that stay true under faults.** A step-by-step check like
+"after GC, the deleted items are gone" holds only if the GC finished, and
+under faults it may not have. Split checks in two:
+
+- *Always true*, even mid-operation or right after a crash: no live data
+  lost, no dangling reference, nothing deleted while still referenced.
+  These go in `h.Always`, or run unconditionally in the scenario.
+- *True once an operation completes*: reclaimed items are gone, packs are
+  consolidated, counts match. Run these only when the **system's durable
+  record** says the operation completed (a completed-cycle number in the
+  GC's metadata, say), not when the call returned nil: a call can fail
+  after completing (a lost reply, a crash after the commit) or return
+  before its result is durable. Mind what the operation could see: a GC
+  cycle reclaims what was garbage when it started, so check only the
+  deletions made before that.
+
+In the quiet run after recovery everything completes, so every check
+applies; checking that the quiet run finished (as `quietRunDone` above)
+makes sure it did.
+
+**Compare against the model, not absolute numbers.** The quiet run
+starts from whatever the faulty runs left (half-finished cycles, extra
+packs). "Exactly N packs" breaks; "nothing live lost, nothing
+reclaimable left, counts match the model" holds.
+
+**Start with faults off.** `Faults` left zero runs the scenario with exact
+checks across hundreds of interleavings: concurrency bugs first. Then
+turn on crashes and disk faults, then fault points, adjusting checks as
+each class goes on.
+
+**Many seeds, a few runs each.**
+
+- Loop the scenario for the whole fault phase: repeated runs reach states
+  one run never does (GC over an earlier GC's output, a crash while
+  recovering from a crash).
+- Most coverage comes from seeds: hundreds in CI, tens of thousands
+  nightly from fresh seeds. Keep each seed to seconds of simulated time,
+  so failures replay and debug fast.
+- Don't limit a seed to one failure: the swarm already gives some seeds a
+  single fault, and many bugs need two.
+- Draw sizes, orders and ratios from `w.Rand()`, so seeds vary the data,
+  not just the timing.
+- For a narrow window (between copying a pack and deleting its source),
+  put a fault point or `w.Buggify` there: random crashes rarely land in
+  it.
+- `h.Expect` both outcomes (completed and interrupted) so a sweep where
+  every cycle was interrupted, or none was, doesn't pass quietly.
+
+**Phases are timed, not driven by the scenario.** Set `FaultPhase` to a
+few runs' worth of simulated time, and `RecoveryPhase` to comfortably
+more than one clean run.
 
 ## Recording client histories
 
