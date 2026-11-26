@@ -392,6 +392,60 @@ The first 5 seeds, and every failing seed, run twice to check that the
 system is deterministic (`Options.DeterminismChecks`). `-dst.parallel`
 sets how many seeds run at once (default GOMAXPROCS).
 
+## Measuring exploration: dstbench
+
+Each bug a sweep finds and you fix is ground truth: a known way the code
+was wrong. Keep them re-insertable, and you can measure whether a change
+to the sweep, the workload or the library finds bugs more often.
+
+1. Re-insert each fixed bug behind a switch that only a build tag can
+   turn on, so normal builds compile the buggy paths out:
+
+   ```go
+   //go:build !dstbugs
+   package mypkg
+   func bug(name string) bool { return false }
+   ```
+
+   ```go
+   //go:build dstbugs
+   package mypkg
+   var activeBug = os.Getenv("DSTBUG")
+   func bug(name string) bool { return name != "" && name == activeBug }
+   ```
+
+   ```go
+   if !bug("close-without-fsync") {
+       f.Sync()
+   }
+   ```
+
+   Re-insert the bug as it was, not a stronger version: an easier bug
+   flatters the sweep. A check: with the bug re-inserted, the sweep should
+   first fail at the seed that originally found it.
+2. List the bugs in `dstbench.json`, each with the sweeps that should
+   catch it and, optionally, a `Sometimes` marker for its precondition:
+
+   ```json
+   {"package": ".", "tags": "dstbugs", "env": "DSTBUG",
+    "baseline": ["TestDSTCrashes"],
+    "bugs": [{"name": "close-without-fsync", "tests": ["TestDSTCrashes"], "reached": "clean close and reopen"}]}
+   ```
+3. Run `go run github.com/prince776/go-dst-kit/cmd/dstbench -seeds 300`.
+   It reports, per bug and sweep, the failure rate per seed (with a 95%
+   interval), the seeds and CPU time to the first failure, and how often
+   the precondition was reached; and runs the baseline sweeps with no bug,
+   which must pass.
+
+A bug whose precondition is reached often but which fails rarely needs
+better timing or inputs, not more of the same; one never reached needs
+the workload to do something new.
+
+Use it as a floor, not a target. Mark a few bugs `"held_out": true`
+(skipped unless `-held-out`) and look at them only to check a change at
+the end; the measure that matters is new bugs found in code not yet
+explored.
+
 ## When a seed fails
 
 The report says which check failed and the seed's fault mix. Replay it
