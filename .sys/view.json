@@ -596,42 +596,42 @@
           "signature": "func (w *World) Go(fn func())",
           "doc": "Start a goroutine in the World.",
           "group": "World",
-          "loc": "dst/world.go:93"
+          "loc": "dst/world.go:100"
         },
         {
           "name": "World.Sleep",
           "signature": "func (w *World) Sleep(d time.Duration)",
           "doc": "Pause by the World's clock.",
           "group": "World",
-          "loc": "dst/world.go:114"
+          "loc": "dst/world.go:121"
         },
         {
           "name": "World.Now",
           "signature": "func (w *World) Now() time.Time",
           "doc": "Current time by the World's clock.",
           "group": "World",
-          "loc": "dst/world.go:127"
+          "loc": "dst/world.go:134"
         },
         {
           "name": "World.Rand",
           "signature": "func (w *World) Rand() Rand",
           "doc": "The World's source of randomness.",
           "group": "World",
-          "loc": "dst/world.go:142"
+          "loc": "dst/world.go:149"
         },
         {
           "name": "World.FS",
           "signature": "func (w *World) FS() FS",
           "doc": "The World's filesystem.",
           "group": "World",
-          "loc": "dst/world.go:145"
+          "loc": "dst/world.go:152"
         },
         {
           "name": "World.Net",
           "signature": "func (w *World) Net() Net",
           "doc": "The World's network.",
           "group": "World",
-          "loc": "dst/world.go:153"
+          "loc": "dst/world.go:160"
         },
         {
           "name": "MakeChan",
@@ -704,18 +704,18 @@
           "loc": "dst/context.go:27"
         },
         {
-          "name": "Inject",
-          "signature": "func Inject(w *World, name string) Fault",
-          "doc": "Fault point for a fake service.",
+          "name": "Call",
+          "signature": "func Call[T any](ctx context.Context, w *World, name string, errs Errors, op func() (T, error)) (T, error)",
+          "doc": "Run a service call behind a fault point.",
           "group": "Fault points",
-          "loc": "dst/inject.go:56"
+          "loc": "dst/inject.go:122"
         },
         {
           "name": "World.Buggify",
           "signature": "func (w *World) Buggify(name string) bool",
           "doc": "Whether a BUGGIFY point fires.",
           "group": "Fault points",
-          "loc": "dst/inject.go:87"
+          "loc": "dst/inject.go:171"
         }
       ],
       "laws": [
@@ -767,7 +767,7 @@
         },
         {
           "id": "real-never-injects",
-          "text": "In the real World, Inject always returns None, Do always runs its operation, and Buggify is always false.",
+          "text": "In the real World, Inject always returns None, Do and Call always run their operation, and Buggify is always false.",
           "status": "verified",
           "loc": "dst/world.go:40",
           "tests": [
@@ -777,7 +777,52 @@
             "dsttest"
           ],
           "test_locs": {
-            "TestRealNeverInjects": "dsttest/dsttest_test.go:567"
+            "TestRealNeverInjects": "dsttest/dsttest_test.go:568"
+          }
+        },
+        {
+          "id": "call-fail-never-runs",
+          "text": "On Fail, Call doesn't run its operation and returns the Before error.",
+          "status": "verified",
+          "loc": "dst/world.go:42",
+          "tests": [
+            "TestCall"
+          ],
+          "test_dirs": [
+            "dsttest"
+          ],
+          "test_locs": {
+            "TestCall": "dsttest/dsttest_test.go:653"
+          }
+        },
+        {
+          "id": "call-fail-after-runs",
+          "text": "On FailAfter, Call runs its operation once and returns the After error, not its result.",
+          "status": "verified",
+          "loc": "dst/world.go:44",
+          "tests": [
+            "TestCall"
+          ],
+          "test_dirs": [
+            "dsttest"
+          ],
+          "test_locs": {
+            "TestCall": "dsttest/dsttest_test.go:653"
+          }
+        },
+        {
+          "id": "call-latency-honours-ctx",
+          "text": "Injected latency ends when the caller's context does: Call returns its error then, having run the operation unless the request was refused.",
+          "status": "verified",
+          "loc": "dst/world.go:46",
+          "tests": [
+            "TestCall"
+          ],
+          "test_dirs": [
+            "dsttest"
+          ],
+          "test_locs": {
+            "TestCall": "dsttest/dsttest_test.go:653"
           }
         }
       ],
@@ -836,7 +881,11 @@
             "Spec"
           ]
         }
-      ]
+      ],
+      "change": {
+        "kind": "contract-changing",
+        "reason": "New Call operation added to the interface, with new package laws for Call's fault and latency behaviour."
+      }
     },
     {
       "name": "dst.World",
@@ -846,73 +895,73 @@
       "paths": [
         "dst"
       ],
-      "loc": "dst/world.go:62",
+      "loc": "dst/world.go:69",
       "interface": [
         {
           "name": "World.Simulated",
           "signature": "func (w *World) Simulated() bool",
           "doc": "Whether the World is simulated.",
-          "loc": "dst/world.go:90"
+          "loc": "dst/world.go:97"
         },
         {
           "name": "World.Go",
           "signature": "func (w *World) Go(fn func())",
           "doc": "Start fn in a new goroutine.",
-          "loc": "dst/world.go:93"
+          "loc": "dst/world.go:100"
         },
         {
           "name": "World.GoNamed",
           "signature": "func (w *World) GoNamed(name string, fn func())",
           "doc": "Go with a name shown in reports and logs.",
-          "loc": "dst/world.go:103"
+          "loc": "dst/world.go:110"
         },
         {
           "name": "World.Sleep",
           "signature": "func (w *World) Sleep(d time.Duration)",
           "doc": "Pause for d by the machine's clock.",
-          "loc": "dst/world.go:114"
+          "loc": "dst/world.go:121"
         },
         {
           "name": "World.Now",
           "signature": "func (w *World) Now() time.Time",
           "doc": "time.Now by the machine's clock.",
-          "loc": "dst/world.go:127"
+          "loc": "dst/world.go:134"
         },
         {
           "name": "World.Since",
           "signature": "func (w *World) Since(t time.Time) time.Duration",
           "doc": "time.Since by the World's clock.",
-          "loc": "dst/world.go:135"
+          "loc": "dst/world.go:142"
         },
         {
           "name": "World.Until",
           "signature": "func (w *World) Until(t time.Time) time.Duration",
           "doc": "time.Until by the World's clock.",
-          "loc": "dst/world.go:138"
+          "loc": "dst/world.go:145"
         },
         {
           "name": "World.Rand",
           "signature": "func (w *World) Rand() Rand",
           "doc": "The World's Rand.",
-          "loc": "dst/world.go:142"
+          "loc": "dst/world.go:149"
         },
         {
           "name": "World.FS",
           "signature": "func (w *World) FS() FS",
           "doc": "The World's filesystem; panics if none.",
-          "loc": "dst/world.go:145"
+          "loc": "dst/world.go:152"
         },
         {
           "name": "World.Net",
           "signature": "func (w *World) Net() Net",
           "doc": "The World's network; panics if none.",
-          "loc": "dst/world.go:153"
+          "loc": "dst/world.go:160"
         },
         {
           "name": "World.Logf",
           "signature": "func (w *World) Logf(format string, args ...any)",
           "doc": "Write to the simulation event log.",
-          "loc": "dst/world.go:162"
+          "loc": "dst/world.go:169"
         }
       ],
       "laws": [
@@ -920,17 +969,17 @@
           "text": "In a simulated World, Go yields, so the new goroutine may run first.",
           "status": "inferred",
           "evidence": [
-            "dst/world.go:108",
-            "dst/world.go:109",
-            "dst/world.go:110"
+            "dst/world.go:115",
+            "dst/world.go:116",
+            "dst/world.go:117"
           ]
         },
         {
           "text": "Sleep with a non-positive duration is still a scheduling point in a simulation.",
           "status": "inferred",
           "evidence": [
-            "dst/world.go:119",
-            "dst/world.go:120"
+            "dst/world.go:126",
+            "dst/world.go:127"
           ]
         },
         {
@@ -938,26 +987,26 @@
           "detail": "Now is epoch plus the machine's local time, and Sleep converts d through the machine's clock, so clock skew between machines is visible.",
           "status": "inferred",
           "evidence": [
-            "dst/world.go:123",
-            "dst/world.go:131"
+            "dst/world.go:130",
+            "dst/world.go:138"
           ]
         },
         {
           "text": "FS and Net panic on a World built without a filesystem or network.",
           "status": "inferred",
           "evidence": [
-            "dst/world.go:146",
-            "dst/world.go:147",
+            "dst/world.go:153",
             "dst/world.go:154",
-            "dst/world.go:155"
+            "dst/world.go:161",
+            "dst/world.go:162"
           ]
         },
         {
           "text": "Logf does nothing in the real World.",
           "status": "inferred",
           "evidence": [
-            "dst/world.go:162",
-            "dst/world.go:163"
+            "dst/world.go:169",
+            "dst/world.go:170"
           ]
         }
       ],
@@ -1069,7 +1118,7 @@
           "detail": "Each machine has its own stream, named after the machine.",
           "status": "inferred",
           "evidence": [
-            "dst/world.go:75"
+            "dst/world.go:82"
           ]
         },
         {
@@ -2380,71 +2429,99 @@
       "name": "dst.Inject",
       "title": "Fault points",
       "purpose": "Named fault points and BUGGIFY points that a simulation decides per seed.",
-      "what": "`Inject` asks the scheduler's fault-point registry what happens to one call of a named service operation: `None`, `Fail` or `FailAfter`, possibly with added latency. `Do` wraps an operation in that decision, and `Buggify` asks whether an unusual code path should be taken. With no registry, as in the real World, nothing is ever injected.",
+      "what": "`Inject` asks the scheduler's fault-point registry what happens to one call of a named service operation: `None`, `Fail` or `FailAfter`, possibly with added latency. `Call` wraps a call to an outside service in that decision. It maps the two faults to the caller-visible errors given in `Errors`, and lets the caller's context cut injected latency short. `Do` is `Call` for an operation that returns only an error, with no context. `Buggify` asks whether an unusual code path should be taken. With no registry, as in the real World, nothing is ever injected.",
       "paths": [
         "dst"
       ],
-      "loc": "dst/inject.go:56",
+      "loc": "dst/inject.go:65",
       "interface": [
         {
           "name": "Inject",
           "signature": "func Inject(w *World, name string) Fault",
           "doc": "Decide the Fault for one call of a named point.",
-          "loc": "dst/inject.go:56"
+          "loc": "dst/inject.go:65"
+        },
+        {
+          "name": "Call",
+          "signature": "func Call[T any](ctx context.Context, w *World, name string, errs Errors, op func() (T, error)) (T, error)",
+          "doc": "Run op behind a fault point, honouring ctx.",
+          "loc": "dst/inject.go:122"
+        },
+        {
+          "name": "Errors",
+          "signature": "type Errors struct{}",
+          "doc": "Errors Call returns for Fail and FailAfter.",
+          "loc": "dst/inject.go:87"
         },
         {
           "name": "Do",
           "signature": "func Do(w *World, name string, op func() error) error",
-          "doc": "Run op behind a fault point.",
-          "loc": "dst/inject.go:70"
+          "doc": "Run an error-only op behind a fault point.",
+          "loc": "dst/inject.go:160"
         },
         {
           "name": "World.Buggify",
           "signature": "func (w *World) Buggify(name string) bool",
           "doc": "Whether a named BUGGIFY point fires.",
-          "loc": "dst/inject.go:87"
+          "loc": "dst/inject.go:171"
         },
         {
           "name": "ErrInjected",
           "signature": "var ErrInjected = errors.New(\"dst: injected fault\")",
-          "doc": "Error Do returns for an injected fault.",
-          "loc": "dst/inject.go:31"
+          "doc": "Default error for an injected fault.",
+          "loc": "dst/inject.go:35"
         }
       ],
       "laws": [
         {
-          "text": "On Fail, Do returns ErrInjected without running op.",
+          "text": "A nil Before or After in Errors makes Call return ErrInjected.",
+          "detail": "So Do, which passes an empty Errors, returns ErrInjected on both Fail and FailAfter.",
           "status": "inferred",
           "evidence": [
-            "dst/inject.go:72",
-            "dst/inject.go:73"
+            "dst/inject.go:92",
+            "dst/inject.go:93",
+            "dst/inject.go:94",
+            "dst/inject.go:99",
+            "dst/inject.go:100",
+            "dst/inject.go:101",
+            "dst/inject.go:161"
           ]
         },
         {
-          "text": "On FailAfter, Do runs op and returns ErrInjected whatever op returned.",
+          "text": "In a simulation, Call with an already-done ctx returns ctx.Err() without running op.",
+          "detail": "The request is never sent. This only applies when a fault-point registry is present.",
           "status": "inferred",
           "evidence": [
-            "dst/inject.go:74",
+            "dst/inject.go:124",
+            "dst/inject.go:125",
+            "dst/inject.go:126",
+            "dst/inject.go:148",
+            "dst/inject.go:149"
+          ]
+        },
+        {
+          "text": "On None with no cut-short latency, Call returns op's result unchanged.",
+          "status": "inferred",
+          "evidence": [
+            "dst/inject.go:143"
+          ]
+        },
+        {
+          "text": "Inject sleeps injected latency on the World's clock before returning, ignoring any context.",
+          "status": "inferred",
+          "evidence": [
+            "dst/inject.go:66",
+            "dst/inject.go:67",
+            "dst/inject.go:68"
+          ]
+        },
+        {
+          "text": "Without a fault-point registry, Inject returns None and Call returns op() regardless of ctx.",
+          "status": "inferred",
+          "evidence": [
             "dst/inject.go:75",
-            "dst/inject.go:76"
-          ]
-        },
-        {
-          "text": "An injected latency is slept on the World's clock before Inject returns.",
-          "status": "inferred",
-          "evidence": [
-            "dst/inject.go:61",
-            "dst/inject.go:62"
-          ]
-        },
-        {
-          "text": "A simulation without a fault-point registry never injects or buggifies.",
-          "status": "inferred",
-          "evidence": [
-            "dst/inject.go:57",
-            "dst/inject.go:58",
-            "dst/inject.go:88",
-            "dst/inject.go:89"
+            "dst/inject.go:76",
+            "dst/inject.go:124"
           ]
         }
       ],
@@ -2453,34 +2530,50 @@
           "text": "The registry decides faults per seed, only during the fault phase.",
           "status": "inferred",
           "evidence": [
-            "dst/inject.go:40",
-            "dst/inject.go:41"
+            "dst/inject.go:44",
+            "dst/inject.go:45"
           ]
         },
         {
           "text": "A quiet Inject leaves every other decision of the seed unchanged.",
           "status": "inferred",
           "evidence": [
-            "dst/inject.go:42",
-            "dst/inject.go:43"
+            "dst/inject.go:46",
+            "dst/inject.go:47",
+            "dst/inject.go:48"
           ]
         },
         {
           "text": "A Buggify point is active in about a quarter of seeds, firing on about a quarter of calls.",
           "status": "inferred",
           "evidence": [
-            "dst/inject.go:84",
-            "dst/inject.go:85",
-            "dst/inject.go:86"
+            "dst/inject.go:165"
           ]
         }
       ],
       "depends_on": [
         "points",
         "sched",
-        "dst.World"
+        "dst.World",
+        "dst.Timer",
+        "dst.Select"
       ],
       "uses": [
+        {
+          "to": "dst.Select",
+          "names": [
+            "OnDone",
+            "OnRecv",
+            "Select2"
+          ]
+        },
+        {
+          "to": "dst.Timer",
+          "names": [
+            "Timer.Stop",
+            "World.NewTimer"
+          ]
+        },
         {
           "to": "dst.World",
           "names": [
@@ -2495,7 +2588,11 @@
             "Registry.Inject"
           ]
         }
-      ]
+      ],
+      "change": {
+        "kind": "contract-changing",
+        "reason": "Adds Call and Errors. Do is now Call with an empty Errors and a background context. Inject's documentation now states that its latency ignores any context."
+      }
     },
     {
       "name": "dstgrpc",
@@ -3564,7 +3661,7 @@
             "TestFindsLostWrites"
           ],
           "test_locs": {
-            "TestFindsLostWrites": "dsttest/dsttest_test.go:73"
+            "TestFindsLostWrites": "dsttest/dsttest_test.go:74"
           }
         },
         {
@@ -3576,7 +3673,7 @@
             "TestNondeterminismReported"
           ],
           "test_locs": {
-            "TestNondeterminismReported": "dsttest/dsttest_test.go:132"
+            "TestNondeterminismReported": "dsttest/dsttest_test.go:133"
           }
         },
         {
@@ -3588,7 +3685,7 @@
             "TestAlwaysChecked"
           ],
           "test_locs": {
-            "TestAlwaysChecked": "dsttest/dsttest_test.go:155"
+            "TestAlwaysChecked": "dsttest/dsttest_test.go:156"
           }
         },
         {
@@ -3600,7 +3697,7 @@
             "TestRecoveryPhase"
           ],
           "test_locs": {
-            "TestRecoveryPhase": "dsttest/dsttest_test.go:180"
+            "TestRecoveryPhase": "dsttest/dsttest_test.go:181"
           }
         },
         {
@@ -3612,7 +3709,7 @@
             "TestExpectedCoverage"
           ],
           "test_locs": {
-            "TestExpectedCoverage": "dsttest/dsttest_test.go:217"
+            "TestExpectedCoverage": "dsttest/dsttest_test.go:218"
           }
         },
         {
@@ -3625,8 +3722,8 @@
             "TestFindsDeadlock"
           ],
           "test_locs": {
-            "TestFindsDeadlock": "dsttest/dsttest_test.go:97",
-            "TestFindsLostWrites": "dsttest/dsttest_test.go:73"
+            "TestFindsDeadlock": "dsttest/dsttest_test.go:98",
+            "TestFindsLostWrites": "dsttest/dsttest_test.go:74"
           }
         },
         {
@@ -3639,7 +3736,7 @@
             "TestLeakedGoroutineReported"
           ],
           "test_locs": {
-            "TestLeakedGoroutineReported": "dsttest/dsttest_test.go:263"
+            "TestLeakedGoroutineReported": "dsttest/dsttest_test.go:264"
           }
         },
         {
@@ -3651,7 +3748,7 @@
             "TestSlowIsNotStuck"
           ],
           "test_locs": {
-            "TestSlowIsNotStuck": "dsttest/dsttest_test.go:285"
+            "TestSlowIsNotStuck": "dsttest/dsttest_test.go:286"
           }
         },
         {
@@ -3663,7 +3760,7 @@
             "TestNeverCrash"
           ],
           "test_locs": {
-            "TestNeverCrash": "dsttest/dsttest_test.go:318"
+            "TestNeverCrash": "dsttest/dsttest_test.go:319"
           }
         },
         {
@@ -3675,7 +3772,7 @@
             "TestFirstSeedFlag"
           ],
           "test_locs": {
-            "TestFirstSeedFlag": "dsttest/dsttest_test.go:367"
+            "TestFirstSeedFlag": "dsttest/dsttest_test.go:368"
           }
         },
         {
@@ -3687,7 +3784,7 @@
             "TestSkewExplores"
           ],
           "test_locs": {
-            "TestSkewExplores": "dsttest/dsttest_test.go:410"
+            "TestSkewExplores": "dsttest/dsttest_test.go:411"
           }
         },
         {
@@ -3699,7 +3796,7 @@
             "TestPausesExplore"
           ],
           "test_locs": {
-            "TestPausesExplore": "dsttest/dsttest_test.go:452"
+            "TestPausesExplore": "dsttest/dsttest_test.go:453"
           }
         },
         {
@@ -3711,7 +3808,7 @@
             "TestPointsOnlyInFaultPhase"
           ],
           "test_locs": {
-            "TestPointsOnlyInFaultPhase": "dsttest/dsttest_test.go:510"
+            "TestPointsOnlyInFaultPhase": "dsttest/dsttest_test.go:511"
           }
         },
         {
@@ -3723,7 +3820,7 @@
             "TestOutagesExplore"
           ],
           "test_locs": {
-            "TestOutagesExplore": "dsttest/dsttest_test.go:536"
+            "TestOutagesExplore": "dsttest/dsttest_test.go:537"
           }
         },
         {
@@ -3735,7 +3832,7 @@
             "TestFaultClassesIndependent"
           ],
           "test_locs": {
-            "TestFaultClassesIndependent": "dsttest/dsttest_test.go:602"
+            "TestFaultClassesIndependent": "dsttest/dsttest_test.go:606"
           }
         }
       ],
@@ -6017,48 +6114,69 @@
     },
     {
       "name": "objstore",
-      "title": "Object store example",
-      "purpose": "Is a fake object store with conditional writes, of the kind you would write for a cloud storage client in tests, and a small client library on top: an append-only log kept in one object.",
-      "what": "The fake uses fault points (dst.Inject), so a simulation can make it unavailable (the request is refused: nothing happens), make a write time out after it took effect, slow calls down, or take the whole service down. The client must cope: a write that timed out may or may not have happened.\n\nThe log appends by read-modify-write with an ETag precondition (a lost race is retried), and each entry has a unique ID: after an ambiguous failure the client re-reads and looks for its ID before writing again, and it reports an operation as not applied only when it knows.",
+      "title": "Object store log",
+      "purpose": "Is a fake object store with conditional writes, of the kind you would write for a cloud storage client in tests, a wrapper that adds faults to it, and a small client library on top: an append-only log kept in one object.",
+      "what": "The fake (Service, Bucket) is plain and correct: usable in any test. Faulty wraps any Store with fault points (dst.Call), so a simulation can make the store refuse requests (nothing happens), lose the reply to a write that took effect, slow calls down past the caller's deadline, or go down entirely. The client must cope: a write that timed out may or may not have happened.\n\nThe log appends by read-modify-write with an ETag precondition (a lost race is retried), and each entry has a unique ID: after an ambiguous failure the client re-reads and looks for its ID before writing again, and it reports an operation as not applied only when it knows.",
       "paths": [
         "examples/objstore"
       ],
       "loc": "examples/objstore/objstore.go:1",
       "interface": [
         {
+          "name": "Store",
+          "signature": "type Store interface {\n\tGet(ctx context.Context, key string) ([]byte, string, error)\n\n\tPut(ctx context.Context, key string, data []byte, ifMatch string) (string, error)\n}",
+          "doc": "Object store client API: Get and conditional Put.",
+          "group": "Store contract",
+          "loc": "examples/objstore/objstore.go:51"
+        },
+        {
+          "name": "ErrUnavailable",
+          "signature": "var ErrUnavailable = errors.New(\"objstore: service unavailable\")",
+          "doc": "Store refused the request; nothing happened.",
+          "group": "Store contract",
+          "loc": "examples/objstore/objstore.go:43"
+        },
+        {
+          "name": "ErrTimeout",
+          "signature": "var ErrTimeout = errors.New(\"objstore: request timed out\")",
+          "doc": "No reply; the request may have taken effect.",
+          "group": "Store contract",
+          "loc": "examples/objstore/objstore.go:45"
+        },
+        {
+          "name": "ErrPrecondition",
+          "signature": "var ErrPrecondition = errors.New(\"objstore: precondition failed\")",
+          "doc": "Object's ETag did not match ifMatch.",
+          "group": "Store contract",
+          "loc": "examples/objstore/objstore.go:47"
+        },
+        {
           "name": "Service.Bucket",
           "signature": "func (s *Service) Bucket(w *dst.World) *Bucket",
-          "doc": "Returns a store client for code running in a World.",
+          "doc": "Returns a fake store client for code in a World.",
           "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:66"
-        },
-        {
-          "name": "Bucket.Get",
-          "signature": "func (b *Bucket) Get(key string) ([]byte, string, error)",
-          "doc": "Reads an object's data and ETag.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:85"
-        },
-        {
-          "name": "Bucket.Put",
-          "signature": "func (b *Bucket) Put(key string, data []byte, ifMatch string) (string, error)",
-          "doc": "Writes an object, optionally only if its ETag matches.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:102"
+          "loc": "examples/objstore/objstore.go:82"
         },
         {
           "name": "Log.Append",
           "signature": "func (l *Log) Append(id string) Outcome",
-          "doc": "Adds a unique ID and reports Applied, NotApplied or Unknown.",
+          "doc": "Adds a unique id to the log; returns its Outcome.",
           "group": "Log client",
-          "loc": "examples/objstore/objstore.go:176"
+          "loc": "examples/objstore/objstore.go:224"
+        },
+        {
+          "name": "Outcome",
+          "signature": "type Outcome int",
+          "doc": "Unknown, Applied or NotApplied, as far as the client knows.",
+          "group": "Log client",
+          "loc": "examples/objstore/objstore.go:185"
         },
         {
           "name": "Bugs",
           "signature": "type Bugs struct{}",
-          "doc": "Switches that turn on classic client mistakes.",
+          "doc": "Switches for classic client mistakes the tests must catch.",
           "group": "Log client",
-          "loc": "examples/objstore/objstore.go:134"
+          "loc": "examples/objstore/objstore.go:171"
         }
       ],
       "laws": [
@@ -6066,36 +6184,36 @@
           "id": "no-duplicates",
           "text": "No entry is ever in the log twice.",
           "status": "verified",
-          "loc": "examples/objstore/objstore.go:17",
+          "loc": "examples/objstore/objstore.go:19",
           "tests": [
             "TestObjstore"
           ],
           "test_locs": {
-            "TestObjstore": "examples/objstore/objstore_test.go:80"
+            "TestObjstore": "examples/objstore/objstore_test.go:81"
           }
         },
         {
           "id": "applied-is-durable",
           "text": "An append reported applied is in the log.",
           "status": "verified",
-          "loc": "examples/objstore/objstore.go:18",
+          "loc": "examples/objstore/objstore.go:20",
           "tests": [
             "TestObjstore"
           ],
           "test_locs": {
-            "TestObjstore": "examples/objstore/objstore_test.go:80"
+            "TestObjstore": "examples/objstore/objstore_test.go:81"
           }
         },
         {
           "id": "not-applied-is-true",
           "text": "An append reported not applied is not in the log.",
           "status": "verified",
-          "loc": "examples/objstore/objstore.go:19",
+          "loc": "examples/objstore/objstore.go:21",
           "tests": [
             "TestObjstore"
           ],
           "test_locs": {
-            "TestObjstore": "examples/objstore/objstore_test.go:80"
+            "TestObjstore": "examples/objstore/objstore_test.go:81"
           }
         }
       ],
@@ -6103,13 +6221,13 @@
         {
           "name": "Service.Peek",
           "signature": "func (s *Service) Peek(key string) []byte",
-          "doc": "Reads an object directly, with no latency or faults.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:70"
+          "doc": "Reads an object's data directly, for test checks.",
+          "loc": "examples/objstore/objstore.go:86"
         }
       ],
       "children": [
         "objstore.Service",
+        "objstore.Faulty",
         "objstore.Log"
       ],
       "depends_on": [
@@ -6118,147 +6236,102 @@
     },
     {
       "name": "objstore.Service",
-      "title": "Fake object store",
-      "purpose": "Shared in-memory object store with ETag preconditions and injected faults.",
-      "what": "A `Service` holds every object (its data plus a numeric ETag) behind one `dst.Mutex`. All `Bucket` clients made from the same `Service` see the same objects. Each `Get` and `Put` first waits `Latency` of virtual time, then asks the fault points `objstore.get` and `objstore.put` whether to fail. A refused request does nothing; a `FailAfter` on a put applies the write and then reports `ErrTimeout`.",
+      "title": "Fake store",
+      "purpose": "Correct in-memory object store with ETag-conditional writes, shared by all clients.",
+      "what": "`Service` holds the objects and an ETag counter that every caller shares. `Bucket` is a client of it bound to one World. Each request sleeps for `Latency`, then runs atomically under the service mutex. A Bucket never fails on its own and ignores the caller's context, the way a server does once it has received a request. Faults come from `Faulty`.",
       "paths": [
         "examples/objstore"
       ],
-      "loc": "examples/objstore/objstore.go:56",
+      "loc": "examples/objstore/objstore.go:72",
       "interface": [
         {
           "name": "NewService",
           "signature": "func NewService() *Service",
-          "doc": "Creates an empty shared store backend.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:63"
+          "doc": "Returns an empty store.",
+          "loc": "examples/objstore/objstore.go:79"
         },
         {
           "name": "Service.Bucket",
           "signature": "func (s *Service) Bucket(w *dst.World) *Bucket",
-          "doc": "Returns a store client for code running in a World.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:66"
+          "doc": "Returns a client of the store for a World.",
+          "loc": "examples/objstore/objstore.go:82"
         },
         {
           "name": "Bucket.Get",
-          "signature": "func (b *Bucket) Get(key string) ([]byte, string, error)",
-          "doc": "Reads an object's data and ETag.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:85"
+          "signature": "func (b *Bucket) Get(_ context.Context, key string) ([]byte, string, error)",
+          "doc": "Returns object data and ETag; missing is ETag \"0\".",
+          "loc": "examples/objstore/objstore.go:101"
         },
         {
           "name": "Bucket.Put",
-          "signature": "func (b *Bucket) Put(key string, data []byte, ifMatch string) (string, error)",
-          "doc": "Writes an object, optionally only if its ETag matches.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:102"
-        },
-        {
-          "name": "ErrUnavailable",
-          "signature": "var ErrUnavailable = errors.New(\"objstore: service unavailable\")",
-          "doc": "The request was refused and had no effect.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:40"
-        },
-        {
-          "name": "ErrTimeout",
-          "signature": "var ErrTimeout = errors.New(\"objstore: request timed out\")",
-          "doc": "No reply came; the write may have taken effect.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:42"
-        },
-        {
-          "name": "ErrPrecondition",
-          "signature": "var ErrPrecondition = errors.New(\"objstore: precondition failed\")",
-          "doc": "The object's ETag did not match ifMatch.",
-          "group": "Fake store",
-          "loc": "examples/objstore/objstore.go:44"
+          "signature": "func (b *Bucket) Put(_ context.Context, key string, data []byte, ifMatch string) (string, error)",
+          "doc": "Replaces object data if ifMatch matches; returns new ETag.",
+          "loc": "examples/objstore/objstore.go:112"
         }
       ],
       "laws": [
         {
-          "text": "Get or Put returning ErrUnavailable leaves the store unchanged.",
-          "detail": "The fault check runs before any state is touched.",
+          "text": "Get of a missing object returns no data and ETag \"0\".",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:87",
-            "examples/objstore/objstore.go:88",
             "examples/objstore/objstore.go:105",
-            "examples/objstore/objstore.go:106"
+            "examples/objstore/objstore.go:107"
           ]
         },
         {
-          "text": "Put returning ErrTimeout has applied the write if its precondition held.",
-          "detail": "FailAfter runs the real put and then drops the reply, so the caller can't tell which way it went.",
+          "text": "Put with non-empty ifMatch differing from current ETag returns ErrPrecondition and changes nothing.",
+          "detail": "ifMatch \"0\" succeeds only when the object does not exist; an empty ifMatch writes unconditionally.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:108",
+            "examples/objstore/objstore.go:117",
+            "examples/objstore/objstore.go:121",
+            "examples/objstore/objstore.go:122"
+          ]
+        },
+        {
+          "text": "Every successful Put returns a fresh ETag, never reused across the service.",
+          "detail": "ETags come from one counter that every key and Bucket shares, so a stale ETag never matches again.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:124",
+            "examples/objstore/objstore.go:126"
+          ]
+        },
+        {
+          "text": "Get after a successful Put returns that Put's data and returned ETag.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:125",
+            "examples/objstore/objstore.go:109"
+          ]
+        },
+        {
+          "text": "Mutating data passed to Put or returned by Get never changes the stored object.",
+          "status": "inferred",
+          "evidence": [
             "examples/objstore/objstore.go:109",
-            "examples/objstore/objstore.go:110"
+            "examples/objstore/objstore.go:125"
           ]
         },
         {
-          "text": "Put with a non-matching ifMatch returns ErrPrecondition and writes nothing.",
-          "detail": "ifMatch \"0\" matches only a missing object; an empty ifMatch writes unconditionally.",
+          "text": "Bucket calls never return an error other than ErrPrecondition.",
+          "detail": "The caller's ctx is ignored. Each call takes Latency of World time.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:119",
-            "examples/objstore/objstore.go:123",
-            "examples/objstore/objstore.go:124"
-          ]
-        },
-        {
-          "text": "Every successful Put gives the object a new ETag never used before.",
-          "detail": "ETags come from one counter per Service, so an ETag read before any later write never matches again.",
-          "status": "inferred",
-          "evidence": [
-            "examples/objstore/objstore.go:126",
-            "examples/objstore/objstore.go:127",
-            "examples/objstore/objstore.go:128"
-          ]
-        },
-        {
-          "text": "Get of a missing object returns no data, ETag \"0\", and no error.",
-          "status": "inferred",
-          "evidence": [
-            "examples/objstore/objstore.go:93",
-            "examples/objstore/objstore.go:94"
-          ]
-        },
-        {
-          "text": "Data passed to Put or returned by Get is copied, not shared with the store.",
-          "status": "inferred",
-          "evidence": [
-            "examples/objstore/objstore.go:96",
-            "examples/objstore/objstore.go:127"
-          ]
-        },
-        {
-          "text": "Buckets from the same Service read and write the same objects.",
-          "status": "inferred",
-          "evidence": [
-            "examples/objstore/objstore.go:66",
-            "examples/objstore/objstore.go:92",
-            "examples/objstore/objstore.go:127"
+            "examples/objstore/objstore.go:101",
+            "examples/objstore/objstore.go:102",
+            "examples/objstore/objstore.go:112",
+            "examples/objstore/objstore.go:113"
           ]
         }
       ],
       "assumes": [
         {
-          "text": "dst.Mutex makes each check-and-write in put atomic across simulated goroutines.",
+          "text": "dst.Mutex makes each Get and Put atomic with respect to other simulated goroutines.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:116",
-            "examples/objstore/objstore.go:117"
-          ]
-        },
-        {
-          "text": "dst.Inject returns None, Fail or FailAfter as the simulation decides.",
-          "status": "inferred",
-          "evidence": [
-            "examples/objstore/objstore.go:87",
-            "examples/objstore/objstore.go:104"
+            "examples/objstore/objstore.go:103",
+            "examples/objstore/objstore.go:114"
           ]
         }
       ],
@@ -6266,8 +6339,8 @@
         {
           "name": "Service.Peek",
           "signature": "func (s *Service) Peek(key string) []byte",
-          "doc": "Reads an object directly, with no latency or faults.",
-          "loc": "examples/objstore/objstore.go:70"
+          "doc": "Object data without a client, for test checks.",
+          "loc": "examples/objstore/objstore.go:86"
         }
       ],
       "depends_on": [
@@ -6275,121 +6348,198 @@
       ]
     },
     {
-      "name": "objstore.Log",
-      "title": "Append-only log",
-      "purpose": "Client that appends unique IDs to one object safely despite ambiguous failures.",
-      "what": "A `Log` stores entry IDs one per line in a single object. `Append` loops: read the object, return `Applied` if the ID is already there, otherwise write the object with the ID added, conditional on the ETag it read. A lost race or a refused request leads to another try; a timeout marks the outcome as ambiguous until a later read settles it. Each try after the first backs off longer, and the number of tries is capped by `Attempts`. `Bugs` switches turn off the ID check, the precondition, or the honest handling of timeouts.",
+      "name": "objstore.Faulty",
+      "title": "Fault wrapper",
+      "purpose": "Wraps a Store so simulations inject refusals, lost replies, delays and outages.",
+      "what": "`Faulty` decorates any `Store`. Each method is one `dst.Call` at fault point `objstore.get` or `objstore.put`. It turns the dst fault kinds into the errors a real client sees: a fault before the request is a refusal, and a lost reply to a write is a timeout. A lost reply to a read is reported as a refusal too, since a read changes nothing.",
       "paths": [
         "examples/objstore"
       ],
-      "loc": "examples/objstore/objstore.go:158",
+      "loc": "examples/objstore/objstore.go:134",
       "interface": [
         {
-          "name": "NewLog",
-          "signature": "func NewLog(w *dst.World, b *Bucket, key string, bugs Bugs) *Log",
-          "doc": "Returns a log client for one key with optional bugs.",
-          "group": "Log client",
-          "loc": "examples/objstore/objstore.go:168"
-        },
-        {
-          "name": "Log.Append",
-          "signature": "func (l *Log) Append(id string) Outcome",
-          "doc": "Adds a unique ID and reports Applied, NotApplied or Unknown.",
-          "group": "Log client",
-          "loc": "examples/objstore/objstore.go:176"
-        },
-        {
-          "name": "Outcome",
-          "signature": "type Outcome int",
-          "doc": "What an append did, as far as the client knows.",
-          "group": "Log client",
-          "loc": "examples/objstore/objstore.go:147"
-        },
-        {
-          "name": "Entries",
-          "signature": "func Entries(data []byte) []string",
-          "doc": "Parses a log object into its entry IDs.",
-          "group": "Log client",
-          "loc": "examples/objstore/objstore.go:173"
-        },
-        {
-          "name": "Bugs",
-          "signature": "type Bugs struct{}",
-          "doc": "Switches that turn on classic client mistakes.",
-          "group": "Log client",
+          "name": "Faulty",
+          "signature": "func Faulty(w *dst.World, s Store) Store",
+          "doc": "Wraps a Store with the objstore.get and objstore.put fault points.",
           "loc": "examples/objstore/objstore.go:134"
         }
       ],
       "laws": [
         {
-          "text": "Append of an ID already in the log returns Applied without writing.",
-          "detail": "Doesn't hold when Bugs.BlindRetry is set.",
+          "text": "A faulted Get returns ErrUnavailable, whether the fault hit before or after the read.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:186",
-            "examples/objstore/objstore.go:187"
+            "examples/objstore/objstore.go:145",
+            "examples/objstore/objstore.go:155"
           ]
         },
         {
-          "text": "Append makes at most Attempts store writes.",
-          "detail": "Attempts defaults to 8 in NewLog.",
+          "text": "A Put faulted before the request returns ErrUnavailable and the store is unchanged.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:169",
-            "examples/objstore/objstore.go:178",
-            "examples/objstore/objstore.go:192"
+            "examples/objstore/objstore.go:147",
+            "examples/objstore/objstore.go:163"
           ]
         },
         {
-          "text": "Append returns Unknown only if a write of its own timed out and stayed unresolved.",
-          "detail": "Otherwise it ends with Applied, or NotApplied once its tries run out.",
+          "text": "A Put whose reply is lost returns ErrTimeout though the write may have applied.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:177",
-            "examples/objstore/objstore.go:200",
-            "examples/objstore/objstore.go:204",
-            "examples/objstore/objstore.go:207"
+            "examples/objstore/objstore.go:143",
+            "examples/objstore/objstore.go:147"
           ]
         },
         {
-          "text": "A precondition failure or refused request makes Append try again.",
+          "text": "Without an injected fault, Faulty returns exactly what the wrapped Store returns.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:183",
-            "examples/objstore/objstore.go:184",
-            "examples/objstore/objstore.go:202"
-          ]
-        },
-        {
-          "text": "Append keeps every entry it read and adds the new ID at the end.",
-          "status": "inferred",
-          "evidence": [
-            "examples/objstore/objstore.go:192",
-            "examples/objstore/objstore.go:173"
+            "examples/objstore/objstore.go:155",
+            "examples/objstore/objstore.go:156",
+            "examples/objstore/objstore.go:163",
+            "examples/objstore/objstore.go:164"
           ]
         }
       ],
       "assumes": [
         {
-          "text": "Callers pass IDs that are unique and contain no whitespace.",
-          "detail": "Entries splits on whitespace, and the duplicate check relies on unique IDs.",
+          "text": "dst.Call skips fn on a Before fault and runs fn but discards its result on an After fault.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:173",
-            "examples/objstore/objstore.go:175"
+            "examples/objstore/objstore.go:145",
+            "examples/objstore/objstore.go:147"
           ]
         },
         {
-          "text": "Put changes nothing when it fails with ErrPrecondition or ErrUnavailable.",
+          "text": "dst.Call returns a ctx error when delays push a call past the caller's deadline.",
           "status": "inferred",
           "evidence": [
-            "examples/objstore/objstore.go:202"
+            "examples/objstore/objstore.go:155",
+            "examples/objstore/objstore.go:163"
           ]
         }
       ],
       "depends_on": [
-        "objstore.Service",
-        "dst"
+        "dst",
+        "objstore.Service"
+      ]
+    },
+    {
+      "name": "objstore.Log",
+      "title": "Log client",
+      "purpose": "Append-only log of unique entry IDs kept in one object, robust to ambiguous failures.",
+      "what": "A `Log` stores newline-separated entry IDs in one object of a `Store`. `Append` repeats read-check-conditional-write for up to `Attempts` tries, each request with its own `RequestTimeout` deadline. A definite failure (refused, or ETag mismatch) means retry. Any other failure makes the outcome ambiguous until a later read finds the ID. `Bugs` switches turn on classic mistakes so that tests can show they are caught.",
+      "paths": [
+        "examples/objstore"
+      ],
+      "loc": "examples/objstore/objstore.go:199",
+      "interface": [
+        {
+          "name": "NewLog",
+          "signature": "func NewLog(w *dst.World, s Store, key string, bugs Bugs) *Log",
+          "doc": "Returns a log client at key with Attempts 8.",
+          "loc": "examples/objstore/objstore.go:209"
+        },
+        {
+          "name": "Log.Append",
+          "signature": "func (l *Log) Append(id string) Outcome",
+          "doc": "Adds a unique id; returns Applied, NotApplied or Unknown.",
+          "loc": "examples/objstore/objstore.go:224"
+        },
+        {
+          "name": "Entries",
+          "signature": "func Entries(data []byte) []string",
+          "doc": "Splits a log object into entry IDs in order.",
+          "loc": "examples/objstore/objstore.go:221"
+        },
+        {
+          "name": "Outcome",
+          "signature": "type Outcome int",
+          "doc": "What an append did, as far as the client knows.",
+          "loc": "examples/objstore/objstore.go:185"
+        },
+        {
+          "name": "Bugs",
+          "signature": "type Bugs struct{}",
+          "doc": "BlindRetry, TimeoutAsFailure, NoConditional mistake switches.",
+          "loc": "examples/objstore/objstore.go:171"
+        }
+      ],
+      "laws": [
+        {
+          "text": "Appending an id already in the log returns Applied without writing again.",
+          "detail": "Does not hold with Bugs.BlindRetry.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:236",
+            "examples/objstore/objstore.go:237"
+          ]
+        },
+        {
+          "text": "Append returns Unknown only if some write failed with a non-definite error.",
+          "detail": "Only ErrUnavailable and ErrPrecondition count as definite; timeouts, deadline errors and unexpected errors are ambiguous.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:216",
+            "examples/objstore/objstore.go:252",
+            "examples/objstore/objstore.go:256"
+          ]
+        },
+        {
+          "text": "Append makes at most Attempts read-write tries before giving up.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:226",
+            "examples/objstore/objstore.go:256"
+          ]
+        },
+        {
+          "text": "Every Get and Put the Log issues carries its own RequestTimeout deadline.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:230",
+            "examples/objstore/objstore.go:242"
+          ]
+        },
+        {
+          "text": "Each write is conditional on the ETag of the read it extends.",
+          "detail": "So a concurrent append between the read and the write fails with ErrPrecondition and the append is retried, never lost. Not under Bugs.NoConditional.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:231",
+            "examples/objstore/objstore.go:243"
+          ]
+        },
+        {
+          "text": "Entries returns IDs in the order they were appended.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:221",
+            "examples/objstore/objstore.go:243"
+          ]
+        }
+      ],
+      "assumes": [
+        {
+          "text": "The Store's ErrUnavailable and ErrPrecondition mean the write certainly did not happen.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:216",
+            "examples/objstore/objstore.go:217"
+          ]
+        },
+        {
+          "text": "Callers pass ids that are unique and contain no whitespace.",
+          "status": "inferred",
+          "evidence": [
+            "examples/objstore/objstore.go:223",
+            "examples/objstore/objstore.go:221"
+          ]
+        }
+      ],
+      "depends_on": [
+        "dst",
+        "objstore.Faulty",
+        "objstore.Service"
       ]
     },
     {
@@ -7581,7 +7731,7 @@
             "internal/simworld"
           ],
           "test_locs": {
-            "TestAlwaysMisuse": "dsttest/dsttest_test.go:394",
+            "TestAlwaysMisuse": "dsttest/dsttest_test.go:395",
             "TestRawGoroutineMisuse": "internal/simworld/misuse_test.go:24"
           }
         },
