@@ -277,19 +277,19 @@ func report(cells []cell, seeds int) {
 	for _, c := range cells {
 		for _, f := range sortedKeys(c.Features) {
 			sp := c.Features[f]
-			if sp.On == 0 || sp.Off == 0 || sp.FailOn+sp.FailOff < 3 {
+			if sp.On == 0 || sp.Off == 0 {
 				continue
 			}
 			on, off := float64(sp.FailOn)/float64(sp.On), float64(sp.FailOff)/float64(sp.Off)
 			lo, hi := math.Min(on, off), math.Max(on, off)
-			if hi >= 3*lo { // 3x either way (or one side never fails)
+			if hi >= 3*lo && significant(sp) { // 3x either way, and not chance
 				notes = append(notes, fmt.Sprintf("  %s under %s: with %s on %d/%d failed, off %d/%d",
 					orBaseline(c.Bug), c.Test, f, sp.FailOn, sp.On, sp.FailOff, sp.Off))
 			}
 		}
 	}
 	if len(notes) > 0 {
-		fmt.Println("\nworkload features that change a bug's rate 3x or more:")
+		fmt.Println("\nworkload features that change a bug's rate 3x or more (p < 0.01):")
 		fmt.Println(strings.Join(notes, "\n"))
 	}
 	byBug := map[string]bool{}
@@ -320,6 +320,18 @@ func report(cells []cell, seeds int) {
 	if len(missed) > 0 {
 		fmt.Printf("never found: %s\n", strings.Join(missed, ", "))
 	}
+}
+
+// significant reports whether a feature's on and off failure rates differ
+// by more than chance: a two-proportion z test at p < 0.01 (|z| > 2.58).
+func significant(sp split) bool {
+	n1, n2 := float64(sp.On), float64(sp.Off)
+	p := float64(sp.FailOn+sp.FailOff) / (n1 + n2)
+	se := math.Sqrt(p * (1 - p) * (1/n1 + 1/n2))
+	if se == 0 {
+		return false
+	}
+	return math.Abs(float64(sp.FailOn)/n1-float64(sp.FailOff)/n2)/se > 2.58
 }
 
 func sortedKeys[V any](m map[string]V) []string {

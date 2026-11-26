@@ -543,6 +543,16 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   - Verification: a fork matches the unforked run up to its anchor and
     differs after; a path replays exactly in and across processes; a
     stream that isn't reseeded makes that test fail.
+  *Status: done 2026-11-27.* Paths, forks (marker and step anchors),
+  RunPath/-dst.path, first-mark steps; the corpus (-dst.save,
+  -dst.corpus, exact/drifted); Features["*"] and a fixed-workload sweep
+  per target. Benchmark unchanged within noise (all bugs found; the
+  floors work: read-past-rolled-file 300/300 at fixed pace vs 152 with
+  pace features, prompt-not-hashed 205 vs 119). Found on the way: an old
+  Shutdown hang (about 1 run in 30, fixed); the trace hashes scheduling,
+  not values (documented); dstbench's feature notes fired on noise (now
+  a two-proportion test at p < 0.01: the C note that lagging consumers
+  expose close-without-fsync, 7/148 vs 2/152, doesn't pass it).
 - **E. Guided exploration.** Antithesis's model: a `Sometimes` marker
   is a checkpoint, and a share of runs restart from where it first
   fired. Runs go in generations (the next generation's choices depend
