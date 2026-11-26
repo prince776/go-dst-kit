@@ -16,36 +16,53 @@ import (
 // scheduling point: another goroutine may run before it acquires, as in
 // real Go, so races between separate critical sections are explored.
 //
+// A Mutex (like every dst primitive) belongs to one World: don't share
+// one between simulations running in parallel, or between a simulation
+// and real code (a package-level mutex in code under test would be).
+//
 // Verified:
 //   - [lock-is-a-scheduling-point] Another goroutine may run before Lock
 //     acquires. So a lost update across two locked sections is found.
 type Mutex struct {
 	mu      sync.Mutex
 	waiters atomic.Int32 // simulated goroutines parked on this mutex
+	s       atomic.Pointer[sched.Scheduler]
 }
 
 // Lock is (*sync.Mutex).Lock.
 func (m *Mutex) Lock() {
-	if t := simTask(); t != nil {
-		s := t.Sched()
-		s.Yield() // another goroutine may get here first, as in real Go
-		for !m.mu.TryLock() {
-			m.waiters.Add(1)
-			s.ParkOn(m, "lock")
-			m.waiters.Add(-1)
+	if sched.Active() { // inlined: the real World's whole cost
+		if s := simSchedSlow(&m.s); s != nil {
+			s.Yield() // another goroutine may get here first, as in real Go
+			for !m.mu.TryLock() {
+				m.waiters.Add(1)
+				s.ParkOn(m, "lock")
+				m.waiters.Add(-1)
+			}
+			return
 		}
-		return
 	}
 	m.mu.Lock()
 }
 
-// simTask is the calling simulated goroutine, or nil. Outside any
-// simulation it costs one (inlined) atomic load.
-func simTask() *sched.Task {
-	if !sched.Active() {
-		return nil
+// simSched returns the scheduler of the simulated goroutine calling, or
+// nil in the real World (one inlined atomic load outside any simulation).
+// A primitive caches the scheduler it was used under: while that one is
+// mid-step, its running task is the caller (the scheduler's identity
+// check verifies this), so the costly goroutine lookup happens once per
+// primitive, not once per call. A primitive belongs to one World.
+//
+// Callers write `if sched.Active()` around it so the real World's check
+// stays inlined.
+func simSchedSlow(cache *atomic.Pointer[sched.Scheduler]) *sched.Scheduler {
+	if s := cache.Load(); s != nil && s.Stepping() {
+		return s
 	}
-	return sched.CurrentTask()
+	if t := sched.CurrentTask(); t != nil {
+		cache.Store(t.Sched())
+		return t.Sched()
+	}
+	return nil
 }
 
 // TryLock is (*sync.Mutex).TryLock.
@@ -55,8 +72,8 @@ func (m *Mutex) TryLock() bool { return m.mu.TryLock() }
 func (m *Mutex) Unlock() {
 	m.mu.Unlock()
 	if m.waiters.Load() > 0 {
-		if t := sched.CurrentTask(); t != nil {
-			t.Sched().WakeOne(m)
+		if s := simSchedSlow(&m.s); s != nil {
+			s.WakeOne(m)
 		}
 	}
 }
@@ -67,21 +84,23 @@ type RWMutex struct {
 	mu             sync.RWMutex
 	waiters        atomic.Int32
 	writersWaiting atomic.Int32
+	s              atomic.Pointer[sched.Scheduler]
 }
 
 // Lock is (*sync.RWMutex).Lock.
 func (m *RWMutex) Lock() {
-	if t := simTask(); t != nil {
-		s := t.Sched()
-		s.Yield()
-		m.writersWaiting.Add(1)
-		for !m.mu.TryLock() {
-			m.waiters.Add(1)
-			s.ParkOn(m, "lock (write)")
-			m.waiters.Add(-1)
+	if sched.Active() { // inlined: the real World's whole cost
+		if s := simSchedSlow(&m.s); s != nil {
+			s.Yield()
+			m.writersWaiting.Add(1)
+			for !m.mu.TryLock() {
+				m.waiters.Add(1)
+				s.ParkOn(m, "lock (write)")
+				m.waiters.Add(-1)
+			}
+			m.writersWaiting.Add(-1)
+			return
 		}
-		m.writersWaiting.Add(-1)
-		return
 	}
 	m.mu.Lock()
 }
@@ -94,15 +113,16 @@ func (m *RWMutex) Unlock() {
 
 // RLock is (*sync.RWMutex).RLock.
 func (m *RWMutex) RLock() {
-	if t := simTask(); t != nil {
-		s := t.Sched()
-		s.Yield()
-		for m.writersWaiting.Load() > 0 || !m.mu.TryRLock() {
-			m.waiters.Add(1)
-			s.ParkOn(m, "lock (read)")
-			m.waiters.Add(-1)
+	if sched.Active() { // inlined: the real World's whole cost
+		if s := simSchedSlow(&m.s); s != nil {
+			s.Yield()
+			for m.writersWaiting.Load() > 0 || !m.mu.TryRLock() {
+				m.waiters.Add(1)
+				s.ParkOn(m, "lock (read)")
+				m.waiters.Add(-1)
+			}
+			return
 		}
-		return
 	}
 	m.mu.RLock()
 }
@@ -115,8 +135,8 @@ func (m *RWMutex) RUnlock() {
 
 func (m *RWMutex) wake() {
 	if m.waiters.Load() > 0 {
-		if t := sched.CurrentTask(); t != nil {
-			t.Sched().WakeAll(m)
+		if s := simSchedSlow(&m.s); s != nil {
+			s.WakeAll(m)
 		}
 	}
 }

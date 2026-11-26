@@ -136,8 +136,8 @@ both Worlds to keep them honest.
   the determinism check reports the seed; sort the keys.
 - **Exploration is random**, not exhaustive: rare interleavings need many
   seeds. Run a long sweep nightly (`-dst.seeds=20000`).
-- **Not modelled yet:** clock skew between machines (all share one clock),
-  UDP, disk-full and I/O errors, bit rot.
+- **Not modelled yet:** UDP, wall-clock jumps, disk-full and I/O errors,
+  bit rot.
 - **Overhead in production** is small but not zero: a channel round trip
   costs about 295ns against 266ns raw and an uncontended mutex 14ns. The
   general `dst.Select` uses reflection (about 250ns against 54ns native);

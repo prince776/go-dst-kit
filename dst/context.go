@@ -39,10 +39,11 @@ func WithDeadline(w *World, parent context.Context, deadline time.Time) (context
 		return c, cancel // the parent's earlier deadline cancels us
 	}
 	c.deadline, c.hasDeadline = deadline, true
-	if d := w.Until(deadline); d <= 0 {
+	if w.Until(deadline) <= 0 {
 		c.cancel(context.DeadlineExceeded, nil)
 	} else if c.err == nil {
-		c.timer = w.s.At(w.s.Now()+d, func() { c.cancel(context.DeadlineExceeded, nil) })
+		// The deadline is in this machine's local time.
+		c.timer = w.s.At(w.m.TrueAt(deadline.Sub(w.epoch)), func() { c.cancel(context.DeadlineExceeded, nil) })
 	}
 	return c, cancel
 }

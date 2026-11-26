@@ -91,6 +91,13 @@ type Host struct {
 	nextPort  int
 }
 
+// now is the host machine's local time: deadlines set by code on it are
+// in that clock.
+func (h *Host) now() time.Time { return h.n.epoch.Add(h.m.LocalNow()) }
+
+// trueAt is the true time at which the host's clock reaches deadline.
+func (h *Host) trueAt(deadline time.Time) time.Duration { return h.m.TrueAt(deadline.Sub(h.n.epoch)) }
+
 // Attach connects machine m to the network under its name.
 func (n *Network) Attach(m *sched.Machine) *Host {
 	h := &Host{n: n, name: m.Name, m: m, listeners: map[int]*listener{}, nextPort: 40000}
@@ -141,8 +148,6 @@ func (n *Network) latency() time.Duration {
 	tail := time.Duration(min(n.rng.ExpFloat64()*mean, 10*mean))
 	return n.opts.MinLatency + tail
 }
-
-func (n *Network) now() time.Time { return n.epoch.Add(n.s.Now()) }
 
 // ---- addresses ----
 
@@ -295,7 +300,7 @@ func (h *Host) DialContext(ctx context.Context, network, address string) (net.Co
 	d.send()
 	var timer sched.Timer
 	if deadline, ok := ctx.Deadline(); ok {
-		timer = s.At(max(deadline.Sub(n.epoch), s.Now()), func() { d.finish(nil, os.ErrDeadlineExceeded) })
+		timer = s.At(h.trueAt(deadline), func() { d.finish(nil, os.ErrDeadlineExceeded) })
 	}
 	stop := dst.AfterDone(ctx, func() { d.finish(nil, ctx.Err()) })
 	for !d.done {
@@ -484,18 +489,18 @@ func (e *endpoint) opErr(op string, err error) error {
 func (e *endpoint) wait(deadline time.Time, why string) bool {
 	s := e.n.s
 	if !deadline.IsZero() {
-		if !e.n.now().Before(deadline) {
+		if !e.h.now().Before(deadline) {
 			return true
 		}
 		gen := e.deadlineGen
-		t := s.At(deadline.Sub(e.n.epoch), func() {
+		t := s.At(e.h.trueAt(deadline), func() {
 			if gen == e.deadlineGen {
 				s.WakeAll(e)
 			}
 		})
 		s.ParkOn(e, why)
 		t.Stop()
-		return !e.n.now().Before(deadline)
+		return !e.h.now().Before(deadline)
 	}
 	s.ParkOn(e, why)
 	return false
@@ -532,7 +537,7 @@ func (e *endpoint) Write(p []byte) (int, error) {
 		return 0, e.opErr("write", net.ErrClosed)
 	case e.err != nil:
 		return 0, e.opErr("write", e.err)
-	case !e.wdl.IsZero() && !n.now().Before(e.wdl):
+	case !e.wdl.IsZero() && !e.h.now().Before(e.wdl):
 		return 0, e.opErr("write", os.ErrDeadlineExceeded)
 	}
 	if len(p) == 0 {

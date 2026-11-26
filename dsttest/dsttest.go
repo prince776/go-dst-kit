@@ -55,6 +55,8 @@
 //   - [never-crash] The runner never crashes a NeverCrash machine.
 //   - [fresh-seeds] -dst.first=random starts each sweep from a new seed,
 //     and -dst.first=N from N.
+//   - [skew-explores] Machine clocks stay within the Clock bounds; fast,
+//     slow and at-bound clocks all occur.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -124,12 +126,28 @@ type Options struct {
 	// KeepGoing reports every failing seed instead of stopping after the
 	// first few.
 	KeepGoing bool
+	// Clock bounds the machines' clocks (see ClockOptions).
+	Clock ClockOptions
 	// StrictIdentity checks on every scheduling call that the World is
 	// used only from goroutines it started (about 1.8µs per call). Without
 	// it, the determinism-checked seeds and replays are checked strictly
 	// and the rest by sampling: a leftover raw goroutine misuses the World
 	// in nearly every seed, so a few strict seeds catch it.
 	StrictIdentity bool
+}
+
+// ClockOptions bound the machines' clocks. Each machine's clock starts
+// within MaxOffset of true time and runs at a rate within MaxDrift of 1,
+// drawn per machine and seed (a quarter of the draws sit exactly at a
+// bound); it keeps going across restarts. The test machine, and with it
+// every invariant, uses true time.
+//
+// The defaults are close to NTP-synced servers: 10ms and 100ppm. Set
+// MaxDrift to the bound your protocol assumes to test right up to it.
+type ClockOptions struct {
+	MaxOffset    time.Duration
+	MaxDrift     float64
+	Synchronized bool // every machine reads true time
 }
 
 func (o *Options) defaults() {
@@ -156,6 +174,12 @@ func (o *Options) defaults() {
 	}
 	if o.MaxSteps == 0 {
 		o.MaxSteps = 10_000_000
+	}
+	if o.Clock.MaxOffset == 0 {
+		o.Clock.MaxOffset = 10 * time.Millisecond
+	}
+	if o.Clock.MaxDrift == 0 {
+		o.Clock.MaxDrift = 100e-6
 	}
 	if o.DeterminismChecks == 0 {
 		o.DeterminismChecks = 5
@@ -253,7 +277,7 @@ func (h *Harness) Machine(name string, start func(w *dst.World), opts ...Machine
 	if m.neverCrash {
 		disk.IOCrashProb = 0
 	}
-	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: disk})
+	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: disk, Clock: h.drawClock(name)})
 	sm.Disk.OnCrashLoss = func(_ int, torn bool) {
 		h.Sometimes("disk lost unsynced writes")
 		if torn {
@@ -265,6 +289,34 @@ func (h *Harness) Machine(name string, start func(w *dst.World), opts ...Machine
 	h.machines = append(h.machines, m)
 	sm.Boot()
 	return m
+}
+
+// drawClock picks a machine's clock from its own random stream, so adding
+// a machine never changes another's clock.
+func (h *Harness) drawClock(name string) sched.Clock {
+	c := h.opts.Clock
+	if c.Synchronized {
+		return sched.Clock{Rate: 1}
+	}
+	r := h.sim.S.Rand("clock/" + name)
+	draw := func(bound float64) float64 {
+		if r.IntN(4) == 0 { // at the bound, where bugs hide
+			if r.IntN(2) == 0 {
+				return -bound
+			}
+			return bound
+		}
+		return (2*r.Float64() - 1) * bound
+	}
+	offset := time.Duration(draw(float64(c.MaxOffset)))
+	return sched.Clock{Offset: offset, Rate: 1 + draw(c.MaxDrift)}
+}
+
+// Clock reports the machine's clock: local time = offset + rate x true
+// time.
+func (m *Machine) Clock() (offset time.Duration, rate float64) {
+	c := m.m.M.Clock()
+	return c.Offset, c.Rate
 }
 
 // Name is the machine's name (its network host).

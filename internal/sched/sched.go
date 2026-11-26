@@ -39,6 +39,7 @@ import (
 	"container/heap"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -81,7 +82,7 @@ type Options struct {
 	// StrictIdentity checks on every scheduling call that the caller is
 	// the goroutine holding the baton (about 1.8µs each). By default a
 	// cheap structural check runs on every call and the goroutine ID on
-	// every 16th.
+	// every 256th.
 	StrictIdentity bool
 }
 
@@ -128,7 +129,64 @@ type Machine struct {
 	dead        bool
 	s           *Scheduler
 	onCrash     []func()
+	clock       Clock
 }
+
+// Clock is a machine's clock: its local time is Offset + Rate x the
+// simulation's true time. It belongs to the machine, not the process, so
+// it carries on across restarts. The zero Clock is true time.
+type Clock struct {
+	Offset time.Duration
+	Rate   float64 // 1 + drift; 0 means 1
+}
+
+// SetClock sets the machine's clock (before it runs).
+func (m *Machine) SetClock(c Clock) {
+	if c.Rate == 0 {
+		c.Rate = 1
+	}
+	m.clock = c
+}
+
+// Clock returns the machine's clock.
+func (m *Machine) Clock() Clock {
+	if m.clock.Rate == 0 {
+		return Clock{Offset: m.clock.Offset, Rate: 1}
+	}
+	return m.clock
+}
+
+// Local converts true time to the machine's local time.
+func (m *Machine) Local(t time.Duration) time.Duration {
+	c := m.Clock()
+	if c.Rate == 1 {
+		return c.Offset + t
+	}
+	return c.Offset + time.Duration(float64(t)*c.Rate)
+}
+
+// LocalNow is the machine's local time now.
+func (m *Machine) LocalNow() time.Duration { return m.Local(m.s.now) }
+
+// TrueAt is the earliest true time, not before now, at which the machine's
+// clock reads at least local: when a timer set for local should fire.
+func (m *Machine) TrueAt(local time.Duration) time.Duration {
+	c := m.Clock()
+	var t time.Duration
+	if c.Rate == 1 {
+		t = local - c.Offset
+	} else {
+		t = time.Duration(math.Ceil(float64(local-c.Offset) / c.Rate))
+		for m.Local(t) < local { // float rounding
+			t++
+		}
+	}
+	return max(t, m.s.now)
+}
+
+// TrueAfter is the true time at which d of the machine's local time will
+// have passed.
+func (m *Machine) TrueAfter(d time.Duration) time.Duration { return m.TrueAt(m.LocalNow() + d) }
 
 // Dead reports whether the machine is crashed (and not yet restarted).
 func (m *Machine) Dead() bool { return m.dead }
@@ -392,8 +450,9 @@ func (e *PanicError) Error() string {
 //
 // The check is cheap by default: the task must still be in the running
 // state (an operation made on its behalf by another goroutine changes
-// that), and every 16th call compares goroutine IDs. StrictIdentity
-// compares them on every call.
+// that), and every 256th call compares goroutine IDs (reading one costs
+// about 1.8µs and takes a process-wide lock). StrictIdentity compares them
+// on every call.
 func (s *Scheduler) Current() *Task {
 	t := s.cur
 	if t == nil {
@@ -403,7 +462,7 @@ func (s *Scheduler) Current() *Task {
 		panic(killSignal{})
 	}
 	s.calls++
-	if t.state != running || s.opts.StrictIdentity || s.calls%16 == 0 {
+	if t.state != running || s.opts.StrictIdentity || s.calls%256 == 0 {
 		if goid() != t.goid {
 			s.misuse(t)
 		}
@@ -455,6 +514,9 @@ func (s *Scheduler) misuse(holder *Task) {
 	}
 	runtime.Goexit() // a foreign goroutine: stop it before it touches the run
 }
+
+// Stepping reports whether a task holds the baton now (mid-step).
+func (s *Scheduler) Stepping() bool { return s.cur != nil }
 
 // InTask reports whether a task holds the baton (false inside timer
 // callbacks).

@@ -193,6 +193,31 @@ each one.
   a bug needing one goroutine starved for 50 steps is found by uniform
   choice in 0 of 1,000 seeds, by PCT in 20 of 50. Swarm draws PCT last,
   so every earlier knob keeps its per-seed value.
+- **Clocks, as built (M14)**: `local = offset + rate x true`, on the
+  scheduler's Machine (so it survives restarts). Converting a local
+  deadline to true time rounds up and checks itself, so a timer never
+  fires before its machine's clock reaches the deadline (the network
+  re-checks deadlines after its timers fire, so 1ns early could loop).
+  Each machine draws its clock from a stream named after it. The lease
+  example taught a real lesson: a drift margin large enough for the
+  drift bug also hides smaller timing mistakes (counting from the reply),
+  so the client's drift bound is a setting and each planted bug runs at
+  the bound that exposes it (100ppm or an exaggerated 5%). Added a fifth
+  clock bug beyond the plan: AbsoluteExpiry (trusting the server's
+  timestamp), caught by clock offset; both clock bugs pass with
+  synchronized clocks.
+- **Performance regression found and fixed (M14)**: sweeps had become
+  ~3x slower since M11. A profile showed half the CPU in runtime.printlock:
+  reading a goroutine ID goes through runtime.Stack, which takes a
+  process-wide lock, so parallel seeds serialized on it. 127k lookups per
+  300-seed lease sweep: 74k from 1-in-16 identity sampling (now 1 in
+  256; the strict seeds do the real work) and 54k from Lock (now one per
+  mutex: a primitive caches its scheduler and trusts it while that
+  scheduler is mid-step). Lease sweep 1.7s -> 0.74s; simulated contended
+  mutex 3.1µs -> 0.65µs. A primitive now belongs to one World
+  (documented). The contended-mutex benchmark was also unfair (mutex and
+  counter as separate allocations); side by side, dst.Mutex equals
+  sync.Mutex.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
@@ -233,7 +258,7 @@ a step-back when done.
 | 11 | Goroutine-identity check (**done**, with the mutex fix) | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
 | 12 | `Select2` / `Select3` (**done**) | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
 | 13 | PCT scheduler (**done**) | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
-| 14 | Per-machine clocks | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
+| 14 | Per-machine clocks (**done**) | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
 | 15 | UDP | ListenPacket and Dial("udp"); per-datagram latency (so reordering); loss and duplication rates per seed; partitions and dead hosts drop; plus a heartbeat failure-detector example with a planted bug (approved) | contract checks against real loopback UDP; whole-or-nothing datagrams; no faults means exactly once; loss, duplication and reordering each occur in some seed |
 | 17 | Fault points (approved 2026-11-26) | `dst.Inject(w, name) Fault` returns None, Fail (didn't happen) or FailAfter (happened, caller sees an error), sleeping any injected latency itself; real World always None. Per-point rates and latency drawn per seed, some seeds off; only in the fault phase; counted as coverage; per-point random streams derived from the name. Service outages: the nemesis fails every point under a prefix for a window (`Faults.Services`). `Options.Points` overrides rates by prefix. `w.Buggify(name)` shares the registry. Example: fake object store with conditional writes and a client library; planted blind retry (duplicate) and timeout-as-failure (lost ack); correct version uses ETag-style conditional writes | real World never injects; nothing outside the fault phase; each point fails in some seeds and is off in others; adding a point leaves other points' decisions unchanged; replay holds; planted bugs caught, correct client passes |
 | - | Fresh nightly seeds | `-dst.first=random` picks and prints a random first seed; the nightly CI sweep uses it, so each night explores new seeds (failures still print an exact replay) | flag test: random first seed differs across runs and is reported |
@@ -250,7 +275,7 @@ a step-back when done.
 | channel round trip | 266ns | 295ns | 3.7µs |
 | select (2 ready cases) | 54ns | 250ns (`Select`), 61ns (`Select2`, 0 allocs) | - |
 | spawn + wait | 344ns | 390ns | 6.3µs |
-| mutex, 4 goroutines contending | 67ns | 66ns | 3.1µs (Lock now yields) |
+| mutex, 4 goroutines contending | 67ns | 67ns | 0.65µs (Lock yields; scheduler cached per mutex) |
 | context WithTimeout + cancel | 298ns | 295ns | 347ns |
 | timer arm + stop | 131ns | 156ns | 166ns |
 | 4 KiB write + read | 1.7µs | 1.6µs | 2.2µs |

@@ -148,8 +148,9 @@ func (f *FS) newInode(dir bool, mode fs.FileMode) *inode {
 	return ino
 }
 
+// now is the machine's local time (file times come from its clock).
 func (f *FS) now() time.Time {
-	return time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).Add(f.s.Now())
+	return time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC).Add(f.m.LocalNow())
 }
 
 // ---- live operations ----

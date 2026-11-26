@@ -73,6 +73,9 @@ type Machine struct {
 // MachineOptions configure a machine.
 type MachineOptions struct {
 	Disk simfs.Options
+	// Clock is the machine's clock (default: true time). It persists
+	// across restarts.
+	Clock sched.Clock
 }
 
 // New starts a simulation.
@@ -105,6 +108,10 @@ func (s *Sim) AddMachine(name string, opts MachineOptions) *Machine {
 		panic("simworld: duplicate machine " + name)
 	}
 	sm := s.S.NewMachine(name)
+	sm.SetClock(opts.Clock)
+	if c := sm.Clock(); c != (sched.Clock{Rate: 1}) {
+		s.S.Logf("machine %s clock: offset %v, rate %.6f", name, c.Offset, c.Rate)
+	}
 	m := &Machine{Name: name, M: sm, sim: s}
 	m.Disk = simfs.New(s.S, sm, opts.Disk)
 	m.Host = s.Net.Attach(sm)

@@ -330,7 +330,7 @@ func TestNeverCrash(t *testing.T) {
 				for {
 					f.Write([]byte("x"))
 					f.Sync()
-					w.Sleep(time.Millisecond)
+					w.Sleep(10 * time.Millisecond)
 				}
 			}, opts...)
 		}
@@ -400,5 +400,47 @@ func TestAlwaysMisuse(t *testing.T) {
 	}, nil)
 	if r.Err == nil || !strings.Contains(r.Err.Error(), "an invariant (Always)") || !strings.Contains(r.Err.Error(), "dsttest_test.go") {
 		t.Fatalf("got %v", r.Err)
+	}
+}
+
+// Verifies: [skew-explores]
+// Fails if: a clock leaves its bounds, fast, slow or at-bound clocks never
+// occur, or Synchronized leaves any skew.
+func TestSkewExplores(t *testing.T) {
+	type clk struct {
+		off  time.Duration
+		rate float64
+	}
+	collect := func(c dsttest.ClockOptions) []clk {
+		var mu sync.Mutex
+		var all []clk
+		dsttest.Sweep(dsttest.Options{Seeds: 40, Clock: c, FaultPhase: time.Millisecond, RecoveryPhase: time.Millisecond}, func(h *dsttest.Harness) {
+			for _, n := range []string{"a", "b", "c"} {
+				m := h.Machine(n, func(w *dst.World) {})
+				off, rate := m.Clock()
+				mu.Lock()
+				all = append(all, clk{off, rate})
+				mu.Unlock()
+			}
+		})
+		return all
+	}
+	const maxOff, maxDrift = 5 * time.Millisecond, 0.01
+	var fast, slow, atBound bool
+	for _, c := range collect(dsttest.ClockOptions{MaxOffset: maxOff, MaxDrift: maxDrift}) {
+		if c.off < -maxOff || c.off > maxOff || c.rate < 1-maxDrift || c.rate > 1+maxDrift {
+			t.Fatalf("clock %+v outside the bounds", c)
+		}
+		fast = fast || c.rate > 1
+		slow = slow || c.rate < 1
+		atBound = atBound || c.rate == 1+maxDrift || c.rate == 1-maxDrift || c.off == maxOff || c.off == -maxOff
+	}
+	if !fast || !slow || !atBound {
+		t.Fatalf("fast %v, slow %v, at a bound %v", fast, slow, atBound)
+	}
+	for _, c := range collect(dsttest.ClockOptions{Synchronized: true}) {
+		if c.off != 0 || c.rate != 1 {
+			t.Fatalf("Synchronized gave clock %+v", c)
+		}
 	}
 }

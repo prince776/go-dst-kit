@@ -26,9 +26,15 @@ a law in the package that implements it, with a test.
   brute-force enumeration of Go's semantics, in both directions: every
   outcome the simulator produces is legal, and every legal outcome is
   produced by some seed.
-- Time is virtual and shared by all machines. It advances only when no
-  goroutine can run, straight to the next timer. Timers fire in deadline
-  order.
+- Time is virtual. One true timeline drives the simulation and advances
+  only when no goroutine can run, straight to the next timer. Each machine
+  reads its own clock: an offset from true time plus a drift in rate
+  (`Options.Clock`, default up to 10ms and 100ppm, a quarter of the draws
+  at the bounds), kept across restarts. Its `Now`, sleeps, timers,
+  context deadlines and connection deadlines all follow that clock;
+  network latency and disk speed are in true time. Invariants, and the
+  test machine, use true time. Wall-clock jumps (NTP steps) aren't
+  modelled: Go's monotonic clock hides them from durations anyway.
 - Reported as failures: every goroutine blocked (deadlock); workload
   goroutines, or goroutines they started, never finishing (deadlock, leak,
   or lost liveness); a panic in any goroutine (with your stack); a
@@ -92,7 +98,7 @@ their machines.
   random.
 - Deadlines (`SetDeadline`, `DialContext`) follow the virtual clock.
 
-Not modelled yet: UDP, clock skew between machines, bandwidth limits.
+Not modelled yet: UDP, bandwidth limits.
 
 ## The runner (`dsttest`)
 

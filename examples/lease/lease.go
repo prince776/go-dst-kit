@@ -8,6 +8,9 @@
 //
 //   - the client counts its lease from when it sent the request (the
 //     server granted it later, so it expires later there);
+//   - the client shortens its lease by the protocol's drift bound, since
+//     its clock may run slower than the server's;
+//   - durations, not timestamps, cross the network: clocks disagree;
 //   - a client that can't renew stops acting when its lease ends;
 //   - a restarted server, which forgot its grants, waits one lease length
 //     before granting anything.
@@ -40,6 +43,10 @@ import (
 // TTL is how long a lease lasts.
 const TTL = 200 * time.Millisecond
 
+// DefaultMaxDrift is the clock drift a Client tolerates unless told
+// otherwise: any machine's clock runs at a rate within 1% of true time.
+const DefaultMaxDrift = 0.01
+
 // Bugs are mistakes the server and clients can be told to make.
 type Bugs struct {
 	// ClockFromReply makes a client count its lease from when the grant
@@ -52,6 +59,14 @@ type Bugs struct {
 	// ServerForgets makes a restarted server grant at once, though leases
 	// it granted before the crash may still be running.
 	ServerForgets bool
+	// NoDriftMargin makes a client hold its lease for the full TTL by its
+	// own clock: if that runs slower than the server's, it outlasts the
+	// server's lease.
+	NoDriftMargin bool
+	// AbsoluteExpiry makes a client trust the expiry time the server
+	// sends, read by the client's clock: an offset between the clocks
+	// stretches the lease.
+	AbsoluteExpiry bool
 }
 
 // Server grants leases. Its state is in memory only.
@@ -87,7 +102,7 @@ func (s *Server) handle(cmd, client string) string {
 		if s.OnGrant != nil {
 			s.OnGrant(client)
 		}
-		return "granted " + strconv.FormatInt(int64(TTL), 10)
+		return "granted " + strconv.FormatInt(int64(TTL), 10) + " " + strconv.FormatInt(s.until.UnixNano(), 10)
 	case "release":
 		if s.holder == client {
 			s.holder = ""
@@ -122,21 +137,25 @@ type Client struct {
 	name   string
 	server string
 	bugs   Bugs
+	// MaxDrift is the protocol's drift bound: the client shortens its
+	// lease by it (default DefaultMaxDrift). Correct for any bound the
+	// clocks honour.
+	MaxDrift float64
 	// End is when the client believes its lease ends (zero: not held).
 	End time.Time
 }
 
 // NewClient returns a client named name for the server at addr.
 func NewClient(w *dst.World, name, addr string, bugs Bugs) *Client {
-	return &Client{w: w, name: name, server: addr, bugs: bugs}
+	return &Client{w: w, name: name, server: addr, bugs: bugs, MaxDrift: DefaultMaxDrift}
 }
 
 // Holds reports whether the client believes it holds the lease now.
 func (c *Client) Holds() bool { return c.w.Now().Before(c.End) }
 
-// request sends one command; it reports a grant and when the client may
-// count it from.
-func (c *Client) request(cmd string) (granted bool, from time.Time) {
+// request sends one command; it reports a grant and when the client's
+// lease ends by its own clock.
+func (c *Client) request(cmd string) (granted bool, end time.Time) {
 	sent := c.w.Now()
 	ctx, cancel := dst.WithTimeout(c.w, context.Background(), TTL/4)
 	defer cancel()
@@ -154,19 +173,34 @@ func (c *Client) request(cmd string) (granted bool, from time.Time) {
 	if err != nil || !strings.HasPrefix(line, "granted") {
 		return false, time.Time{}
 	}
+	from := sent
 	if c.bugs.ClockFromReply {
-		return true, c.w.Now()
+		from = c.w.Now()
 	}
-	return true, sent
+	if c.bugs.AbsoluteExpiry {
+		f := strings.Fields(line)
+		if len(f) == 3 {
+			n, _ := strconv.ParseInt(f[2], 10, 64)
+			return true, time.Unix(0, n) // the server's clock, read as ours
+		}
+	}
+	if c.bugs.NoDriftMargin {
+		return true, from.Add(TTL)
+	}
+	// Our clock may run up to MaxDrift slow and the server's up to
+	// MaxDrift fast: TTL(1-2e) of ours is at most TTL of theirs. (A large
+	// bound's margin also hides smaller timing mistakes, such as counting
+	// from the reply: the tests check each at the bound that exposes it.)
+	return true, from.Add(time.Duration(float64(TTL) * (1 - 2*c.MaxDrift)))
 }
 
 // Run acquires and renews the lease forever, doing work while it holds it.
 func (c *Client) Run() {
 	for {
-		ok, from := c.request("acquire")
+		ok, end := c.request("acquire")
 		switch {
 		case ok:
-			c.End = from.Add(TTL)
+			c.End = end
 		case c.bugs.NoStepDown && c.Holds():
 			c.End = c.End.Add(TTL) // assumes the renewal just got lost
 		}

@@ -114,7 +114,11 @@ func (w *World) Sleep(d time.Duration) {
 		time.Sleep(d)
 		return
 	}
-	w.s.Sleep(d)
+	if d <= 0 {
+		w.s.Sleep(d) // a scheduling point
+		return
+	}
+	w.s.Sleep(w.m.TrueAfter(d) - w.s.Now()) // d by this machine's clock
 }
 
 // Now is time.Now.
@@ -122,7 +126,7 @@ func (w *World) Now() time.Time {
 	if w.s == nil {
 		return time.Now()
 	}
-	return w.epoch.Add(w.s.Now())
+	return w.epoch.Add(w.m.LocalNow())
 }
 
 // Since is time.Since.

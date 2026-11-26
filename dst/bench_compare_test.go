@@ -55,18 +55,24 @@ func BenchmarkSpawnSim(b *testing.B)  { inSim(b, func(w *dst.World) { spawn(w, b
 
 // ---- contended mutex: 4 goroutines ----
 
+// The mutex sits next to the data it guards, as in real code: as separate
+// allocations their cache-line placement, not the mutex, dominates (a
+// 24-byte dst.Mutex and its counter measured 108ns that way, 66ns side by
+// side, the same as sync.Mutex).
 func BenchmarkMutexContendedRaw(b *testing.B) {
-	var mu sync.Mutex
+	var x struct {
+		mu sync.Mutex
+		n  int
+	}
 	var wg sync.WaitGroup
-	n := 0
 	for g := 0; g < 4; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < b.N/4; i++ {
-				mu.Lock()
-				n++
-				mu.Unlock()
+				x.mu.Lock()
+				x.n++
+				x.mu.Unlock()
 			}
 		}()
 	}
@@ -74,17 +80,19 @@ func BenchmarkMutexContendedRaw(b *testing.B) {
 }
 
 func contended(w *dst.World, total int) {
-	var mu dst.Mutex
+	var x struct {
+		mu dst.Mutex
+		n  int
+	}
 	var wg dst.WaitGroup
-	n := 0
 	for g := 0; g < 4; g++ {
 		wg.Add(1)
 		w.Go(func() {
 			defer wg.Done()
 			for i := 0; i < total/4; i++ {
-				mu.Lock()
-				n++
-				mu.Unlock()
+				x.mu.Lock()
+				x.n++
+				x.mu.Unlock()
 			}
 		})
 	}

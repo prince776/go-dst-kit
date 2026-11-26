@@ -42,7 +42,7 @@ func (w *World) After(d time.Duration) Chan[time.Time] { return w.NewTimer(d).C 
 func (t *Timer) arm(d time.Duration) {
 	s, m := t.w.s, t.w.m
 	inc := m.Incarnation
-	t.ev = s.At(s.Now()+d, func() {
+	t.ev = s.At(m.TrueAfter(d), func() { // d by this machine's clock
 		if !m.Alive(inc) {
 			return // the machine that set this timer crashed
 		}
@@ -106,7 +106,7 @@ func (w *World) NewTicker(d time.Duration) *Ticker {
 func (t *Ticker) arm() {
 	s, m := t.w.s, t.w.m
 	inc := m.Incarnation
-	t.ev = s.At(s.Now()+t.d, func() {
+	t.ev = s.At(m.TrueAfter(t.d), func() {
 		if !m.Alive(inc) {
 			return // the machine that started this ticker crashed
 		}

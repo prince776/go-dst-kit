@@ -11,7 +11,14 @@ import (
 	"github.com/prince776/go-dst-kit/examples/lease"
 )
 
-func harness(bugs lease.Bugs) func(h *dsttest.Harness) {
+// Drift bounds the tests use: realistic, and exaggerated to reach the
+// edge of the drift assumption quickly.
+const (
+	realistic   = 100e-6
+	exaggerated = 0.05
+)
+
+func harness(bugs lease.Bugs, drift float64) func(h *dsttest.Harness) {
 	return func(h *dsttest.Harness) {
 		var lastHolder string
 		var grantsInRecovery int
@@ -39,6 +46,7 @@ func harness(bugs lease.Bugs) func(h *dsttest.Harness) {
 			name := fmt.Sprintf("c%d", i)
 			machines = append(machines, h.Machine(name, func(w *dst.World) {
 				c := lease.NewClient(w, name, "lock:1", bugs)
+				c.MaxDrift = drift
 				clients[name] = c // a restarted client starts with no lease
 				c.Run()
 			}))
@@ -65,31 +73,44 @@ func harness(bugs lease.Bugs) func(h *dsttest.Harness) {
 	}
 }
 
-var opts = dsttest.Options{
-	Seeds:         300,
-	Faults:        dsttest.Faults{Crash: true, Partition: true, Network: true},
-	FaultPhase:    5 * time.Second,
-	RecoveryPhase: 2 * time.Second,
+// optsFor tests right up to the drift bound the clients assume.
+func optsFor(drift float64) dsttest.Options {
+	return dsttest.Options{
+		Seeds:         300,
+		Faults:        dsttest.Faults{Crash: true, Partition: true, Network: true},
+		FaultPhase:    5 * time.Second,
+		RecoveryPhase: 2 * time.Second,
+		Clock:         dsttest.ClockOptions{MaxDrift: drift},
+	}
 }
 
 // Verifies: [one-holder], [lease-is-granted]
 // Fails if: two clients ever believe they hold the lease at once, or no
 // one gets it after faults stop.
 func TestLease(t *testing.T) {
-	dsttest.Run(t, opts, harness(lease.Bugs{}))
+	for _, drift := range []float64{realistic, exaggerated} {
+		t.Run(fmt.Sprintf("drift=%g", drift), func(t *testing.T) {
+			dsttest.Run(t, optsFor(drift), harness(lease.Bugs{}, drift))
+		})
+	}
 }
 
 // Each planted bug must be caught as two simultaneous holders.
 func TestPlantedBugs(t *testing.T) {
-	for name, bugs := range map[string]lease.Bugs{
-		"ClockFromReply": {ClockFromReply: true},
-		"NoStepDown":     {NoStepDown: true},
-		"ServerForgets":  {ServerForgets: true},
+	for name, c := range map[string]struct {
+		bugs  lease.Bugs
+		drift float64 // the bound that exposes it
+	}{
+		"ClockFromReply": {lease.Bugs{ClockFromReply: true}, realistic},
+		"NoStepDown":     {lease.Bugs{NoStepDown: true}, realistic},
+		"ServerForgets":  {lease.Bugs{ServerForgets: true}, realistic},
+		"NoDriftMargin":  {lease.Bugs{NoDriftMargin: true}, exaggerated},
+		"AbsoluteExpiry": {lease.Bugs{AbsoluteExpiry: true}, realistic},
 	} {
 		t.Run(name, func(t *testing.T) {
-			o := opts
+			o := optsFor(c.drift)
 			o.DeterminismChecks = -1
-			rep := dsttest.Sweep(o, harness(bugs))
+			rep := dsttest.Sweep(o, harness(c.bugs, c.drift))
 			if len(rep.Failed) == 0 {
 				t.Fatalf("%d seeds never caught %s", rep.Runs, name)
 			}
@@ -98,5 +119,20 @@ func TestPlantedBugs(t *testing.T) {
 			}
 			t.Logf("caught at seed %d: %v", rep.Failed[0].Seed, rep.Failed[0].Err)
 		})
+	}
+}
+
+// The clock bugs need skew: with synchronized clocks they pass.
+func TestClockBugsNeedSkew(t *testing.T) {
+	for name, bugs := range map[string]lease.Bugs{
+		"NoDriftMargin":  {NoDriftMargin: true},
+		"AbsoluteExpiry": {AbsoluteExpiry: true},
+	} {
+		o := optsFor(exaggerated)
+		o.DeterminismChecks = -1
+		o.Clock = dsttest.ClockOptions{Synchronized: true}
+		if rep := dsttest.Sweep(o, harness(bugs, exaggerated)); len(rep.Failed) > 0 {
+			t.Fatalf("%s failed with synchronized clocks: %v", name, rep.Failed[0].Err)
+		}
 	}
 }
