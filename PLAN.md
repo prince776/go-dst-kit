@@ -516,14 +516,44 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
     features it fell 5 -> 2, back to 8 without). dstbench now lists
     features that change a bug's rate 3x.
   - PCT depth per seed: already there (half the seeds, depth 1-3).
-- **D. Choice sequences.** A run is (code version, choices); first as
-  "seed, then from step k, seed2" (enough to fork), full tapes only if
-  shrinking needs them. A corpus under `testdata/dst/` of runs that
-  failed or reached rare states, replayed by the tests.
-- **E. Guided exploration.** On first reaching a rare `Sometimes`,
-  record (seed, step); later runs replay the prefix and continue with
-  fresh randomness, a budget per marker. Compared on B with plain swarm
-  and with the choice sequence fed to Go's fuzzer (`go test -fuzz`).
+- **D. Paths and a corpus** (design agreed with Prince 2026-11-27).
+  - A run is a *path*: a root seed plus forks, each "from here, seed s".
+    A fork is anchored to a marker (just after the nth `Sometimes(name)`)
+    or, with no marker, a scheduler step: `17/"rotated"#2:99/@9000:3`.
+    Marker anchors survive most code changes; step numbers don't
+    (Antithesis keys assertion history by message for the same reason).
+  - A fork keeps the root's configuration (swarm mix, features, point
+    configurations, clocks) and reseeds every stream of choices
+    (scheduling, PCT, nemesis timing, machine Rand and its Streams, the
+    disk, the network, fault-point calls), each from the new seed and
+    its own name.
+  - `RunPath`, `-dst.path=...`; failures print their path.
+  - Corpus: failing paths in `testdata/dst/<Test>/` (committed, like Go's
+    `testdata/fuzz`), replayed first by `Run`; the explorer's frontier
+    (rare-state paths) in the user cache dir, not committed (Go keeps its
+    generated corpus in the build cache). An entry stores its trace and
+    checkpoints: on replay the same trace is exact, a different one is
+    *drifted* (the code changed) and reported so, never as "fixed". A
+    saved path speeds exploration; it is not a regression test (a found
+    bug gets a targeted test; Hypothesis invalidates its database when
+    a test's source changes and recommends explicit examples for the
+    same reason). `-dst.save` adds and refreshes entries.
+  - Also: `Options.Features` can pin every feature on (Prince: one such
+    sweep per target, as a floor for the easy bugs).
+  - Verification: a fork matches the unforked run up to its anchor and
+    differs after; a path replays exactly in and across processes; a
+    stream that isn't reseeded makes that test fail.
+- **E. Guided exploration.** Antithesis's model: a `Sometimes` marker
+  is a checkpoint, and a share of runs restart from where it first
+  fired. Runs go in generations (the next generation's choices depend
+  only on earlier ones, so an exploration replays from its first seed
+  and budget). Each run is a fresh seed with probability p, else a fork
+  just after a rare marker's first hit, markers weighted inversely by
+  how many runs reached them (AFLFast's power schedule), with a budget
+  per marker. `-dst.explore=N`. Compared on B with plain swarm and with
+  Go's fuzzer driving the choices (fuzz bytes as a choice tape, falling
+  back to the generator), by CPU time to first failure; held-out bugs
+  at the end.
 - **F. Shrinking.** Minimize fault events, then fork points, then phase
   lengths (shortlex); measured by trace length on B's failures.
 
