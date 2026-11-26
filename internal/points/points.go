@@ -77,6 +77,9 @@ type Registry struct {
 	// never fire): so crashes can land between a request's steps when
 	// fault points are otherwise off.
 	SlowOnly bool
+	// NewRand, if set, makes each point's stream of per-call decisions
+	// (so a fork of the run reseeds them); else they come from the seed.
+	NewRand func(label string) *rand.Rand
 }
 
 type point struct {
@@ -130,8 +133,12 @@ func (r *Registry) get(name string, buggify bool) *point {
 	h := fnv.New64a()
 	h.Write([]byte(name))
 	k := h.Sum64()
+	rng := rand.New(rand.NewPCG(r.seed, k))
+	if r.NewRand != nil {
+		rng = r.NewRand("point/" + name)
+	}
 	p := &point{
-		rng: rand.New(rand.NewPCG(r.seed, k)),
+		rng: rng,
 		cfg: draw(rand.New(rand.NewPCG(r.seed^0x9e3779b97f4a7c15, k)), buggify),
 	}
 	if c, ok := r.override(name); ok {

@@ -50,6 +50,8 @@ var Epoch = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // Options configure a simulation.
 type Options struct {
+	// Forks continue the run with fresh randomness (sched.Options.Forks).
+	Forks []sched.Fork
 	// Start is what clocks read at the start of the run (zero: Epoch).
 	Start    time.Time
 	Seed     uint64
@@ -108,7 +110,7 @@ func New(opts Options) *Sim {
 	s := &Sim{
 		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
 			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep, StrictIdentity: opts.StrictIdentity,
-			PCTDepth: opts.PCTDepth, PCTHorizon: opts.PCTHorizon}),
+			PCTDepth: opts.PCTDepth, PCTHorizon: opts.PCTHorizon, Forks: opts.Forks}),
 		machines: map[string]*Machine{},
 	}
 	s.start = Epoch

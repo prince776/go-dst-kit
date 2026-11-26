@@ -103,6 +103,7 @@ import (
 
 var (
 	flagSeed     = flag.Uint64("dst.seed", 0, "run only this seed")
+	flagPath     = flag.String("dst.path", "", `run only this path (a seed with forks, as failures print it: 17/"marker"#2:99)`)
 	flagSeeds    = flag.Int("dst.seeds", 0, "number of seeds to sweep (overrides Options.Seeds)")
 	flagFirst    = flag.String("dst.first", "", `first seed of the sweep: a number, or "random" for a fresh one (printed)`)
 	flagVerbose  = flag.Bool("dst.v", false, "print the event log (with -dst.seed)")
@@ -353,7 +354,7 @@ func (h *Harness) drawClock(name string) sched.Clock {
 	if c.Synchronized {
 		return sched.Clock{Rate: 1}
 	}
-	r := h.sim.S.Rand("clock/" + name)
+	r := h.sim.S.ConfigRand("clock/" + name) // configuration: kept at a fork
 	draw := func(bound float64) float64 {
 		if r.IntN(4) == 0 { // at the bound, where bugs hide
 			if r.IntN(2) == 0 {
@@ -492,7 +493,10 @@ func (h *Harness) Feature(name string) bool {
 }
 
 // Sometimes records that a behaviour happened in this run (coverage).
-func (h *Harness) Sometimes(name string) { h.cover[name]++ }
+func (h *Harness) Sometimes(name string) {
+	h.cover[name]++
+	h.sim.S.Mark(name)
+}
 
 // Expect declares behaviours that must happen in at least one seed of the
 // sweep; otherwise the sweep fails (the test never exercised them).
@@ -698,6 +702,13 @@ type Result struct {
 	Features    map[string]bool // the workload features the run asked about, and whether they were on
 	Coverage    map[string]int
 	Expect      []string
+	// Path is the run's path; Forked how many of its forks the run reached
+	// (a fork whose anchor never came leaves the rest unapplied).
+	Path   Path
+	Forked int
+	// FirstMarks is the step at which each Sometimes marker was first
+	// reached: where an explorer forks to go further from there.
+	FirstMarks map[string]uint64
 }
 
 // RunSeed runs one seed and returns its result. logf, if set, receives the
@@ -706,9 +717,21 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 	return runSeed(seed, opts, setup, logf, true)
 }
 
-// runSeed runs one seed; strict checks goroutine identity on every
-// scheduling call (always with Options.StrictIdentity).
+// RunPath runs one path (a seed, with forks) and returns its result.
+func RunPath(p Path, opts Options, setup func(h *Harness), logf func(format string, args ...any)) Result {
+	return runPath(p, opts, setup, logf, true)
+}
+
 func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any), strict bool) Result {
+	return runPath(Path{Seed: seed}, opts, setup, logf, strict)
+}
+
+// runPath runs one path; strict checks goroutine identity on every
+// scheduling call (always with Options.StrictIdentity). The root seed
+// decides the configuration (faults, features, points, clocks); forks
+// reseed only the choices.
+func runPath(path Path, opts Options, setup func(h *Harness), logf func(format string, args ...any), strict bool) Result {
+	seed := path.Seed
 	opts.defaults()
 	swarm := newSwarm(seed, opts.Faults, opts.FaultPhase+opts.RecoveryPhase)
 	if !opts.Start.IsZero() {
@@ -725,6 +748,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		PCTDepth:       swarm.PCTDepth,
 		PCTHorizon:     swarm.PCTHorizon,
 		Start:          swarm.Start,
+		Forks:          path.schedForks(),
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
@@ -735,6 +759,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		},
 	})
 	h.points = newRegistry(seed, opts, swarm, h.Sometimes, h.Logf)
+	h.points.NewRand = h.sim.S.Rand // per-call decisions fork with the run
 	h.sim.S.Points = h.points
 	h.test = h.sim.Machine("test")
 	r := h.sim.RunOn(h.test, func(w *dst.World) {
@@ -767,7 +792,8 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		}
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
-		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features}
+		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features,
+		Path: path, Forked: h.sim.S.ForksApplied(), FirstMarks: h.sim.S.FirstMarks()}
 }
 
 // unfinished reports workload goroutines (and goroutines they started)
@@ -1206,7 +1232,7 @@ func replayInChild(test string, call int, r Result) error {
 		parts[i] = "^" + regexp.QuoteMeta(p) + "$"
 	}
 	cmd := exec.Command(os.Args[0], "-test.run="+strings.Join(parts, "/"), "-test.count=1",
-		"-dst.seeds=1", fmt.Sprintf("-dst.first=%d", r.Seed), "-dst.parallel=1", "-dst.json="+out)
+		"-dst.path="+r.Path.String(), "-dst.json="+out)
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	var log bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &log, &log
@@ -1246,12 +1272,27 @@ func tail(s string, n int) string {
 // (with -dst.v, printing its event log).
 func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 	t.Helper()
-	if *flagSeed != 0 {
+	if *flagSeed != 0 || *flagPath != "" {
 		var logf func(string, ...any)
 		if *flagVerbose {
 			logf = func(format string, args ...any) { fmt.Fprintf(os.Stdout, format+"\n", args...) }
 		}
-		r := RunSeed(*flagSeed, opts, setup, logf)
+		path := Path{Seed: *flagSeed}
+		if *flagPath != "" {
+			var err error
+			if path, err = ParsePath(*flagPath); err != nil {
+				t.Fatalf("%v", err)
+			}
+		}
+		r := RunPath(path, opts, setup, logf)
+		if os.Getenv(childEnv) != "" && *flagJSON != "" {
+			if err := writeJSON(*flagJSON, t.Name(), runCall(t), Report{FirstSeed: r.Seed, Results: []Result{r}}); err != nil {
+				t.Errorf("dsttest: -dst.json: %v", err)
+			}
+		}
+		if len(r.Path.Forks) > 0 && r.Forked < len(r.Path.Forks) {
+			t.Logf("path %v: only %d of its %d forks were reached (the code changed since it was found?)", r.Path, r.Forked, len(r.Path.Forks))
+		}
 		t.Logf("seed %d: %s; %v simulated in %d steps\nfaults: %v%s", r.Seed, outcome(r), r.SimTime, r.Steps, r.Swarm, featureList(r.Features))
 		if r.Err != nil {
 			t.Fatalf("seed %d: %v", r.Seed, r.Err)
@@ -1293,7 +1334,7 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 			t.Errorf("... and more failing seeds (use KeepGoing to list them all)")
 			break
 		}
-		t.Errorf("seed %d failed: %v\nfaults: %v%s\ntrace: %016x\nreplay: go test -run '^%s$' -dst.seed=%d -dst.v", r.Seed, r.Err, r.Swarm, featureList(r.Features), r.Fingerprint, name, r.Seed)
+		t.Errorf("seed %d failed: %v\nfaults: %v%s\ntrace: %016x\nreplay: go test -run '^%s$' %s -dst.v", r.Seed, r.Err, r.Swarm, featureList(r.Features), r.Fingerprint, name, r.Path.flag())
 	}
 	for _, d := range rep.Nondeterministic {
 		t.Error(d)

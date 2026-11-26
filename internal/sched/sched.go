@@ -86,6 +86,26 @@ type Options struct {
 	// cheap structural check runs on every call and the goroutine ID on
 	// every 256th.
 	StrictIdentity bool
+	// Forks continue the run, from each fork's anchor on, with every
+	// stream of choices reseeded from the fork's seed (see Fork). They
+	// apply in order: a fork whose anchor never comes leaves the rest
+	// unapplied.
+	Forks []Fork
+}
+
+// Fork is a point where a run continues with fresh randomness: just after
+// the Nth Mark(Marker) when Marker is set, else at step Step.
+type Fork struct {
+	Marker string
+	N      int
+	Step   uint64
+	Seed   uint64
+}
+
+// stream is a stream of choices: reseeded at a fork.
+type stream struct {
+	key uint64
+	pcg *rand.PCG
 }
 
 // Scheduler runs tasks one at a time in an order decided by the seed.
@@ -93,22 +113,30 @@ type Scheduler struct {
 	// Points, if set, decides dst.Inject and World.Buggify calls.
 	Points *points.Registry
 
-	opts     Options
-	rng      *rand.Rand
-	now      time.Duration
-	events   eventHeap
-	seq      uint64
-	tasks    []*Task
-	runnable []*Task
-	cur      *Task
-	handoff  chan struct{}
-	hash     uint64
-	steps    uint64
-	checks   []uint64
-	failMu   sync.Mutex // a goroutine outside the World may report misuse
-	failure  error
-	machines []*Machine
-	calls    uint64 // scheduling calls, for sampling the identity check
+	opts Options
+	rng  *rand.Rand
+	// shuttingDown: Shutdown is killing tasks one at a time.
+	shuttingDown bool
+	streams      []*stream
+	curSeed      uint64            // the seed streams are drawn from now (the last fork's)
+	forked       int               // forks applied
+	forkNow      bool              // the next fork's marker anchor has come
+	marks        map[string]int    // Mark counts
+	firstAt      map[string]uint64 // the step of each marker's first Mark
+	now          time.Duration
+	events       eventHeap
+	seq          uint64
+	tasks        []*Task
+	runnable     []*Task
+	cur          *Task
+	handoff      chan struct{}
+	hash         uint64
+	steps        uint64
+	checks       []uint64
+	failMu       sync.Mutex // a goroutine outside the World may report misuse
+	failure      error
+	machines     []*Machine
+	calls        uint64 // scheduling calls, for sampling the identity check
 	// PCT state.
 	pctRng   *rand.Rand
 	drops    []uint64 // steps at which the running task's priority drops
@@ -255,6 +283,9 @@ func New(opts Options) *Scheduler {
 		abort:   make(chan struct{}),
 		hash:    14695981039346656037,
 		queues:  map[any][]*Task{},
+		curSeed: opts.Seed,
+		marks:   map[string]int{},
+		firstAt: map[string]uint64{},
 	}
 	s.rng = s.Rand("sched")
 	if opts.PCTDepth > 0 {
@@ -338,11 +369,56 @@ func (s *Scheduler) pick() *Task {
 // Rand returns a generator for one named consumer, derived from the seed
 // and the label only. Adding a consumer never changes another's stream.
 func (s *Scheduler) Rand(label string) *rand.Rand {
-	h := fnv.New64a()
-	h.Write([]byte(label))
-	k := h.Sum64()
+	k := labelKey(label)
+	st := &stream{key: k, pcg: rand.NewPCG(s.curSeed^k, s.curSeed*0x9e3779b97f4a7c15+k)}
+	s.streams = append(s.streams, st)
+	return rand.New(st.pcg)
+}
+
+// ConfigRand is a stream for the run's configuration (a machine's clock,
+// say): drawn from the root seed, and never reseeded at a fork.
+func (s *Scheduler) ConfigRand(label string) *rand.Rand {
+	k := labelKey(label)
 	return rand.New(rand.NewPCG(s.opts.Seed^k, s.opts.Seed*0x9e3779b97f4a7c15+k))
 }
+
+func labelKey(label string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(label))
+	return h.Sum64()
+}
+
+// fork reseeds every stream of choices from seed, each by its label.
+func (s *Scheduler) fork(seed uint64) {
+	s.curSeed = seed
+	for _, st := range s.streams {
+		st.pcg.Seed(seed^st.key, seed*0x9e3779b97f4a7c15+st.key)
+	}
+	s.forked++
+	s.forkNow = false
+	s.Logf("fork %d: seed %d (step %d)", s.forked, seed, s.steps)
+}
+
+// Mark records that the marker name was reached (a Sometimes): it anchors
+// forks, and its first step is reported by FirstMarks.
+func (s *Scheduler) Mark(name string) {
+	s.marks[name]++
+	if s.marks[name] == 1 {
+		s.firstAt[name] = s.steps
+	}
+	if s.forked < len(s.opts.Forks) {
+		f := s.opts.Forks[s.forked]
+		if f.Marker == name && s.marks[name] == f.N {
+			s.forkNow = true // after the current step
+		}
+	}
+}
+
+// FirstMarks is the step at which each marker was first reached.
+func (s *Scheduler) FirstMarks() map[string]uint64 { return s.firstAt }
+
+// ForksApplied is how many of Options.Forks the run reached.
+func (s *Scheduler) ForksApplied() int { return s.forked }
 
 // Seed returns the run's seed.
 func (s *Scheduler) Seed() uint64 { return s.opts.Seed }
@@ -499,6 +575,13 @@ func (s *Scheduler) Current() *Task {
 
 // handOff gives the baton back to the loop (unless the run was aborted).
 func (s *Scheduler) handOff() {
+	if s.shuttingDown {
+		// Shutdown is waiting for this killed task: hand back even if the
+		// run was aborted (a misuse between steps closes abort, and the
+		// select below would then pick either case).
+		s.handoff <- struct{}{}
+		return
+	}
 	select {
 	case s.handoff <- struct{}{}:
 	case <-s.abort:
@@ -736,6 +819,11 @@ func (s *Scheduler) Run(done func() bool) error {
 			s.Fail(&LimitError{fmt.Sprintf("the run didn't finish within %d steps (t=%v)", s.opts.MaxSteps, s.now)})
 			break
 		}
+		if s.forked < len(s.opts.Forks) {
+			if f := s.opts.Forks[s.forked]; s.forkNow || (f.Marker == "" && s.steps >= f.Step) {
+				s.fork(f.Seed)
+			}
+		}
 		if t := s.pick(); t != nil {
 			s.Trace(uint64(t.ID))
 			s.steps++
@@ -841,6 +929,7 @@ func (s *Scheduler) Shutdown() {
 		return // a task escaped the World; we can't safely wake anything
 	}
 	s.stopped = true
+	s.shuttingDown = true // read by the woken task after the wake send
 	for _, t := range s.tasks {
 		if t.state == finished {
 			continue
