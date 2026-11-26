@@ -14,21 +14,31 @@ type Case interface {
 	// simulated World
 	ready() bool
 	commit()
-	enqueue(sel *sched.SelState, idx int)
-	complete()
+	enqueue(sel *sched.SelState, idx int) (complete func())
 	// real World
 	realCase() reflect.SelectCase
 	realDone(v reflect.Value, ok bool)
 }
 
+// Op is a Case on a channel of T: what OnRecv, OnSend and OnDone return,
+// and what Select2 and Select3 take. It is a small value; Select2 and
+// Select3 don't allocate for it.
+type Op[T any] struct {
+	c    Chan[T]
+	send bool
+	v    T             // the value to send
+	recv func(T, bool) // a receive's function
+	sent func()        // a send's function (may be nil)
+}
+
 // OnRecv is `case v, ok := <-c: fn(v, ok)`.
-func OnRecv[T any](c Chan[T], fn func(v T, ok bool)) Case { return &recvCase[T]{c: c, fn: fn} }
+func OnRecv[T any](c Chan[T], fn func(v T, ok bool)) Op[T] { return Op[T]{c: c, recv: fn} }
 
 // OnSend is `case c <- v: fn()`. fn may be nil.
-func OnSend[T any](c Chan[T], v T, fn func()) Case { return &sendCase[T]{c: c, v: v, fn: fn} }
+func OnSend[T any](c Chan[T], v T, fn func()) Op[T] { return Op[T]{c: c, send: true, v: v, sent: fn} }
 
 // OnDone is `case <-ctx.Done(): fn()`.
-func OnDone(ctx context.Context, fn func()) Case {
+func OnDone(ctx context.Context, fn func()) Op[struct{}] {
 	return OnRecv(Done(ctx), func(struct{}, bool) { fn() })
 }
 
@@ -40,6 +50,9 @@ func Default(fn func()) Case { return defaultCase{fn} }
 // World); otherwise it runs Default if present, or waits until a case is
 // ready. Cases on nil channels are never ready; with no cases it blocks
 // forever.
+//
+// In the real World it uses reflection (about 4x the cost of a native
+// select); Select2 and Select3 are native for two or three cases.
 func Select(w *World, cases ...Case) {
 	if w.s == nil {
 		realSelect(cases)
@@ -64,10 +77,11 @@ func Select(w *World, cases ...Case) {
 		return
 	}
 	sel := &sched.SelState{}
+	completes := make([]func(), len(cases))
 	n := 0
 	for i, c := range cases {
 		if !c.isNil() {
-			c.enqueue(sel, i)
+			completes[i] = c.enqueue(sel, i)
 			n++
 		}
 	}
@@ -76,7 +90,7 @@ func Select(w *World, cases ...Case) {
 		panic("unreachable")
 	}
 	s.Park("select")
-	cases[sel.Index].complete()
+	completes[sel.Index]()
 }
 
 func realSelect(cases []Case) {
@@ -88,80 +102,78 @@ func realSelect(cases []Case) {
 	cases[i].realDone(v, ok)
 }
 
-type recvCase[T any] struct {
-	c  Chan[T]
-	fn func(T, bool)
-	w  *sched.Waiter[T]
+// fire runs the case's function: a receive's with (v, ok), a send's.
+func (o Op[T]) fire(v T, ok bool) {
+	if o.send {
+		if o.sent != nil {
+			o.sent()
+		}
+		return
+	}
+	o.recv(v, ok)
 }
 
-func (r *recvCase[T]) isNil() bool     { return r.c.sim == nil }
-func (r *recvCase[T]) isDefault() bool { return false }
-func (r *recvCase[T]) ready() bool     { return r.c.sim.RecvReady() }
-func (r *recvCase[T]) commit() {
-	v, ok, _ := r.c.sim.TryRecv()
-	r.fn(v, ok)
-}
-func (r *recvCase[T]) enqueue(sel *sched.SelState, idx int) { r.w = r.c.sim.EnqueueRecv(sel, idx) }
-func (r *recvCase[T]) complete()                            { r.fn(r.w.Val, r.w.OK) }
-func (r *recvCase[T]) realCase() reflect.SelectCase {
-	if r.c.sim != nil {
-		panic("dst: simulated channel used in the real World")
+func (o Op[T]) isNil() bool     { return o.c.sim == nil }
+func (o Op[T]) isDefault() bool { return false }
+
+func (o Op[T]) ready() bool {
+	if o.send {
+		return o.c.sim.SendReady()
 	}
-	return reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.c.ro)}
+	return o.c.sim.RecvReady()
 }
-func (r *recvCase[T]) realDone(v reflect.Value, ok bool) {
-	var x T
-	if ok {
+
+func (o Op[T]) commit() {
+	if o.send {
+		o.c.sim.TrySend(o.v)
+		o.fire(o.v, true)
+		return
+	}
+	v, ok, _ := o.c.sim.TryRecv()
+	o.fire(v, ok)
+}
+
+func (o Op[T]) enqueue(sel *sched.SelState, idx int) func() {
+	if o.send {
+		w := o.c.sim.EnqueueSend(sel, idx, o.v)
+		return func() {
+			if w.ClosedPanic {
+				panic("send on closed channel")
+			}
+			o.fire(o.v, true)
+		}
+	}
+	w := o.c.sim.EnqueueRecv(sel, idx)
+	return func() { o.fire(w.Val, w.OK) }
+}
+
+func (o Op[T]) realCase() reflect.SelectCase {
+	r, s := realChans(o.c, o.send)
+	if o.send {
+		v := o.v // only this copy escapes (taking &o.v would move all of o)
+		return reflect.SelectCase{Dir: reflect.SelectSend, Chan: reflect.ValueOf(s), Send: reflect.ValueOf(&v).Elem()}
+	}
+	return reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r)}
+}
+
+func (o Op[T]) realDone(v reflect.Value, ok bool) {
+	if ok && !o.send {
+		var x T
 		reflect.ValueOf(&x).Elem().Set(v)
+		o.fire(x, true)
+		return
 	}
-	r.fn(x, ok)
+	var zero T
+	o.fire(zero, ok)
 }
-
-type sendCase[T any] struct {
-	c  Chan[T]
-	v  T
-	fn func()
-	w  *sched.Waiter[T]
-}
-
-func (s *sendCase[T]) isNil() bool     { return s.c.sim == nil }
-func (s *sendCase[T]) isDefault() bool { return false }
-func (s *sendCase[T]) ready() bool     { return s.c.sim.SendReady() }
-func (s *sendCase[T]) commit() {
-	s.c.sim.TrySend(s.v)
-	s.done()
-}
-func (s *sendCase[T]) enqueue(sel *sched.SelState, idx int) { s.w = s.c.sim.EnqueueSend(sel, idx, s.v) }
-func (s *sendCase[T]) complete() {
-	if s.w.ClosedPanic {
-		panic("send on closed channel")
-	}
-	s.done()
-}
-func (s *sendCase[T]) done() {
-	if s.fn != nil {
-		s.fn()
-	}
-}
-func (s *sendCase[T]) realCase() reflect.SelectCase {
-	if s.c.sim != nil {
-		panic("dst: simulated channel used in the real World")
-	}
-	if s.c.rw == nil && s.c.ro != nil {
-		panic("dst: send on a receive-only channel")
-	}
-	return reflect.SelectCase{Dir: reflect.SelectSend, Chan: reflect.ValueOf(s.c.rw), Send: reflect.ValueOf(&s.v).Elem()}
-}
-func (s *sendCase[T]) realDone(reflect.Value, bool) { s.done() }
 
 type defaultCase struct{ fn func() }
 
-func (d defaultCase) isNil() bool                  { return false }
-func (d defaultCase) isDefault() bool              { return true }
-func (d defaultCase) ready() bool                  { return true }
-func (d defaultCase) commit()                      { d.run() }
-func (d defaultCase) enqueue(*sched.SelState, int) {}
-func (d defaultCase) complete()                    {}
+func (d defaultCase) isNil() bool                         { return false }
+func (d defaultCase) isDefault() bool                     { return true }
+func (d defaultCase) ready() bool                         { return true }
+func (d defaultCase) commit()                             { d.run() }
+func (d defaultCase) enqueue(*sched.SelState, int) func() { return nil }
 func (d defaultCase) realCase() reflect.SelectCase {
 	return reflect.SelectCase{Dir: reflect.SelectDefault}
 }

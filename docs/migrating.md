@@ -88,6 +88,18 @@ Like Go, `Select` picks at random among ready cases (in simulation, by the
 seed), runs `dst.Default` if nothing is ready and there is one, and
 otherwise waits.
 
+In the real World `Select` uses reflection, about 4x a native `select`.
+On hot paths with two or three cases and no default, use `dst.Select2` or
+`dst.Select3`: the same cases, compiled to a native `select`, with no
+allocation:
+
+```go
+dst.Select2(w,
+	dst.OnRecv(in, func(v Msg, ok bool) { handle(v) }),
+	dst.OnDone(ctx, func() { done = true }),
+)
+```
+
 ## 3. Things that still escape
 
 - **Map iteration order** decides behaviour if you act on map entries in

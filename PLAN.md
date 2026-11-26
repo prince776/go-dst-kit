@@ -172,6 +172,17 @@ each one.
   once (no waiting for the watchdog). An Always invariant that uses the
   World is always caught. The raw-goroutine test can't run under -race:
   the misuse is a data race, which -race reports itself.
+- **Typed select, as built (M12)**: `OnRecv`/`OnSend`/`OnDone` return
+  `Op[T]`, a small struct that is also a `Case`, so existing `Select`
+  calls are unchanged and `Select2`/`Select3` infer their types. A first
+  version made `Op[T]` an interface; boxing cost 2 allocations and 95ns,
+  so it became a value, with the simulated path's per-case wait state
+  moved into a completion closure. The 8 direction combinations of
+  `Select3` are written by hand, not generated (few enough; the
+  exhaustive contract check runs every direction and position with one
+  case ready, and fails fast instead of hanging if an arm is miswired;
+  shown by swapping two branches). Mixing up two cases' values doesn't
+  compile: each case has its own type parameter.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
@@ -210,7 +221,7 @@ a step-back when done.
 |---|---|---|---|
 | 10 | `dst.Cond` (**done**) | Wait/Signal/Broadcast over dst.Mutex/RWMutex; real = sync.Cond, sim = scheduler wait queue; dstlint points sync.Cond users to it | contract checks in both Worlds: Signal wakes exactly one, Broadcast all, Wait reacquires the lock, a Signal with no waiter is lost |
 | 11 | Goroutine-identity check (**done**, with the mutex fix) | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
-| 12 | `Select2` / `Select3` | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
+| 12 | `Select2` / `Select3` (**done**) | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
 | 13 | PCT scheduler | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
 | 14 | Per-machine clocks | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
 | 15 | UDP | ListenPacket and Dial("udp"); per-datagram latency (so reordering); loss and duplication rates per seed; partitions and dead hosts drop; plus a heartbeat failure-detector example with a planted bug (approved) | contract checks against real loopback UDP; whole-or-nothing datagrams; no faults means exactly once; loss, duplication and reordering each occur in some seed |
@@ -227,7 +238,7 @@ a step-back when done.
 | Operation | Bare Go | Real World | Simulated |
 |---|---|---|---|
 | channel round trip | 266ns | 295ns | 3.7µs |
-| select (2 ready cases) | 54ns | 225ns | - |
+| select (2 ready cases) | 54ns | 250ns (`Select`), 61ns (`Select2`, 0 allocs) | - |
 | spawn + wait | 344ns | 390ns | 6.3µs |
 | mutex, 4 goroutines contending | 67ns | 66ns | 3.1µs (Lock now yields) |
 | context WithTimeout + cancel | 298ns | 295ns | 347ns |

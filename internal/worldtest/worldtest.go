@@ -37,6 +37,11 @@ var Checks = []Check{
 	{"select/waits-for-first-ready", selectWaits},
 	{"select/send-case", selectSend},
 	{"select/nil-channel-never-ready", selectNil},
+	{"select2/every-direction-and-position", select2Exhaustive},
+	{"select3/every-direction-and-position", select3Exhaustive},
+	{"select2/picks-a-ready-case", select2Ready},
+	{"select2/waits-for-first-ready", select2Waits},
+	{"select2/closed-done-and-nil", select2ClosedDoneNil},
 	{"time/sleep-advances-clock", sleepAdvances},
 	{"time/timers-fire-in-deadline-order", timersInOrder},
 	{"time/timer-stop-and-reset", timerStopReset},
@@ -551,4 +556,134 @@ func condLostSignal(w *dst.World) {
 	}
 	c.Signal()
 	wg.Wait()
+}
+
+// typedCase builds a case at position pos for the exhaustive checks: a
+// receive or a send, ready or not. fired records which position ran and
+// with what value.
+func typedCase(w *dst.World, pos int, send, ready bool, fired *[2]int) dst.Op[int] {
+	if send {
+		var c dst.Chan[int]
+		if ready {
+			c = dst.MakeChan[int](w, 1) // room to send
+		} else {
+			c = dst.MakeChan[int](w, 0) // nobody receives
+		}
+		return dst.OnSend(c, 100+pos, func() { *fired = [2]int{pos, 100 + pos} })
+	}
+	var c dst.Chan[int]
+	if ready {
+		c = dst.MakeChan[int](w, 1)
+		c.Send(10 + pos)
+	} else {
+		c = dst.MakeChan[int](w, 0) // nobody sends
+	}
+	return dst.OnRecv(c, func(v int, ok bool) {
+		if !ok {
+			v = -2 // received from a closed channel: wrong
+		}
+		*fired = [2]int{pos, v}
+	})
+}
+
+// exhaustive runs sel with n cases for every combination of directions,
+// with exactly one case ready, and checks that exactly that case fired with
+// its value.
+func exhaustive(w *dst.World, n int, sel func(cases []dst.Op[int])) {
+	for dirs := 0; dirs < 1<<n; dirs++ {
+		for readyPos := 0; readyPos < n; readyPos++ {
+			fired := [2]int{-1, -1}
+			cases := make([]dst.Op[int], n)
+			for pos := range n {
+				cases[pos] = typedCase(w, pos, dirs&(1<<pos) != 0, pos == readyPos, &fired)
+			}
+			// Run it apart, with a limit: a case wired to the wrong channel
+			// direction would otherwise hang the check.
+			done := dst.MakeChan[int](w, 1)
+			w.Go(func() {
+				sel(cases)
+				done.Send(1)
+			})
+			hung := false
+			dst.Select2(w,
+				dst.OnRecv(done, func(int, bool) {}),
+				dst.OnRecv(w.After(time.Second), func(time.Time, bool) { hung = true }),
+			)
+			if hung {
+				failf("directions %0*b, only case %d ready: select never returned", n, dirs, readyPos)
+			}
+			want := 10 + readyPos
+			if dirs&(1<<readyPos) != 0 {
+				want = 100 + readyPos
+			}
+			if fired != [2]int{readyPos, want} {
+				failf("directions %0*b, only case %d ready: fired %v, want [%d %d]", n, dirs, readyPos, fired, readyPos, want)
+			}
+		}
+	}
+}
+
+func select2Exhaustive(w *dst.World) {
+	exhaustive(w, 2, func(c []dst.Op[int]) { dst.Select2(w, c[0], c[1]) })
+}
+
+func select3Exhaustive(w *dst.World) {
+	exhaustive(w, 3, func(c []dst.Op[int]) { dst.Select3(w, c[0], c[1], c[2]) })
+}
+
+func select2Ready(w *dst.World) {
+	a, b := dst.MakeChan[int](w, 1), dst.MakeChan[string](w, 1)
+	seen := map[string]bool{}
+	for range 200 {
+		a.TrySend(1)
+		b.TrySend("x")
+		dst.Select2(w,
+			dst.OnRecv(a, func(int, bool) { seen["a"] = true }),
+			dst.OnRecv(b, func(string, bool) { seen["b"] = true }),
+		)
+	}
+	if !seen["a"] || !seen["b"] {
+		failf("with both ready, 200 Select2s chose only %v", seen)
+	}
+}
+
+func select2Waits(w *dst.World) {
+	a, b := dst.MakeChan[int](w, 0), dst.MakeChan[string](w, 0)
+	w.Go(func() {
+		w.Sleep(tick)
+		b.Send("late")
+	})
+	got := ""
+	dst.Select2(w,
+		dst.OnRecv(a, func(int, bool) { failf("a was never sent to") }),
+		dst.OnRecv(b, func(v string, _ bool) { got = v }),
+	)
+	if got != "late" {
+		failf("got %q, want late", got)
+	}
+}
+
+func select2ClosedDoneNil(w *dst.World) {
+	var nilc dst.Chan[int]
+	closed := dst.MakeChan[int](w, 0)
+	closed.Close()
+	ok := true
+	dst.Select2(w,
+		dst.OnRecv(nilc, func(int, bool) { failf("nil channel was ready") }),
+		dst.OnRecv(closed, func(_ int, k bool) { ok = k }),
+	)
+	if ok {
+		failf("receive from a closed channel reported ok")
+	}
+	ctx, cancel := dst.WithCancel(w, context.Background())
+	cancel()
+	done := false
+	dst.Select3(w,
+		dst.OnRecv(nilc, func(int, bool) { failf("nil channel was ready") }),
+		dst.OnSend(nilc, 1, func() { failf("send on nil channel was ready") }),
+		dst.OnDone(ctx, func() { done = true }),
+	)
+	if !done {
+		failf("OnDone didn't fire for a cancelled context")
+	}
 }

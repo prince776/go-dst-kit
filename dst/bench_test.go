@@ -76,3 +76,12 @@ func BenchmarkMutexUncontendedReal(b *testing.B) {
 		mu.Unlock()
 	}
 }
+
+func BenchmarkSelect2Real(b *testing.B) {
+	w := realworld.New(realworld.Options{})
+	x, y := dst.MakeChan[int](w, 1), dst.MakeChan[int](w, 1)
+	for i := 0; i < b.N; i++ {
+		x.Send(i)
+		dst.Select2(w, dst.OnRecv(x, func(int, bool) {}), dst.OnRecv(y, func(int, bool) {}))
+	}
+}
