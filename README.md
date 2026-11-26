@@ -79,6 +79,18 @@ go run github.com/prince776/go-dst-kit/dstlint/cmd/dstlint ./...
 wal/log.go:42:9: time.Now escapes the World; use w.Now()
 ```
 
+## Documentation
+
+- [Migrating](docs/migrating.md): threading the World through, the
+  substitutions, what still escapes.
+- [Writing a simulation test](docs/writing-a-test.md): the harness,
+  phases, turning an end-to-end test into a simulation test, histories,
+  faults in your own fakes, replaying a failure.
+- [Fault model](docs/fault-model.md): exactly what is simulated, and what
+  isn't.
+- [Research](docs/research.md): how other approaches to deterministic
+  simulation compare.
+
 ## Packages
 
 | Package | What |
