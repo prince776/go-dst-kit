@@ -210,31 +210,90 @@ effect later, and the checker allows exactly that.
 
 ## Faults in your own fakes
 
-A service you don't simulate (cloud storage, a managed database, a queue)
-gets a fake in tests. Put fault points in the fake and the runner makes it
-fail for you, the same way it crashes machines:
+### Which tool for which fault
+
+| What goes wrong | Use | You write |
+|---|---|---|
+| Your process dies (SIGKILL, power loss) | machine crashes (`Faults.Crash`) | nothing: the code must recover on restart |
+| Your disk loses or tears unsynced writes | `w.FS()` (`Faults.Disk`) | nothing |
+| The network between your own machines | `w.Net()` (`Faults.Partition`, `Network`) | nothing |
+| Your process stalls (GC pause, VM freeze) | `Faults.Pause` | nothing |
+| A service you don't run fails, times out or is slow | fault points in a wrapper around its fake (`Faults.Points`) | one `dst.Call` per method |
+| That whole service goes down | outages (`Faults.Services`) | nothing beyond `service.op` names |
+| Your own code should sometimes take a rare legal path | `w.Buggify` | the other path |
+
+Put fault points at the boundary, one per remote round trip. Don't use
+them to fake crashes or network faults in your own system: the runner
+does those, more realistically.
+
+### A fake, and a wrapper that adds faults
+
+Keep the fake plain: a correct, in-memory implementation of the client
+interface, usable in any test. Add faults in a wrapper with the same
+interface, one `dst.Call` per method:
 
 ```go
-func (t *FakeTable) Insert(ctx context.Context, e Entity) error {
-	switch dst.Inject(t.w, "table.insert") {
-	case dst.Fail: // refused: nothing happened
-		return &ResponseError{StatusCode: 503}
-	case dst.FailAfter: // it happened, but the caller never hears
-		t.insert(e)
-		return context.DeadlineExceeded
-	}
-	return t.insert(e)
+// Faulty wraps any Store with fault points.
+func Faulty(w *dst.World, s Store) Store { return faulty{w, s} }
+
+var (
+	readErrs  = dst.Errors{Before: unavailable, After: unavailable} // a lost read reply changes nothing
+	writeErrs = dst.Errors{Before: unavailable, After: timedOut}    // a lost write reply is ambiguous
+)
+
+func (f faulty) Put(ctx context.Context, key string, data []byte, ifMatch string) (string, error) {
+	return dst.Call(ctx, f.w, "objstore.put", writeErrs, func() (string, error) {
+		return f.s.Put(ctx, key, data, ifMatch)
+	})
 }
 ```
 
-`dst.Do(w, name, op)` is the short form: it returns `dst.ErrInjected`
-without running op on Fail, runs op and returns `dst.ErrInjected` on
-FailAfter. Inject also sleeps any latency it injects. In the real World a
-point is always quiet.
+`dst.Call` decides, per call: **None** runs the operation and returns its
+result; **Fail** returns `Errors.Before()` without running it (refused:
+nothing happened); **FailAfter** runs it and returns `Errors.After()`
+instead of its result (it happened, the reply was lost). Injected
+latency waits on the caller's context: if that ends first, Call returns
+the context's error and the operation still happens unless the decision
+was Fail. So the fake must act like a server that has the request: it
+shouldn't give up because the caller's context is done. A context
+already done when the call starts isn't sent at all. In the real World,
+Call just calls through. [`examples/objstore`](../examples/objstore) is
+this pattern in full.
 
-- **Names** are `service.operation`. With `Faults.Services` on, the
-  runner takes a whole service down for a while (every point of it
-  fails), as a real outage would.
+If you write wrappers with pre- and post-call error hooks today, Fail is
+the pre-call error and FailAfter the post-call one; the difference is
+that the runner chooses them from the seed, so a failure replays, rates
+vary per seed, whole services go down, and each firing is counted.
+
+### Choosing the errors
+
+Return what your real client returns in that situation. If the real
+service distinguishes "definitely not done" (a 503 before processing, a
+failed precondition) from "don't know" (a timeout), map Fail to the
+first and FailAfter to the second. If the real client can't tell them
+apart, use the same error for both: that forces your code to treat every
+error as possibly applied, which is what production demands. Then the
+code under test should treat only errors that are certainly refusals as
+"didn't happen"; everything else, including a context deadline, is
+ambiguous.
+
+### Kinds of operation
+
+- **A read** has no side effects, so a lost reply looks exactly like a
+  refused request: map both faults to the same error.
+- **A write** is where FailAfter matters: the write is applied and the
+  caller sees an error (the lost acknowledgement).
+- **A read with side effects** (a queue receive that consumes a message,
+  a read that renews a lease) is like a write: FailAfter means the effect
+  happened but the caller never heard.
+- **A multi-step operation** (a multipart upload, a paginated list) gets
+  one point per step: each is its own round trip.
+
+### Names, rates and coverage
+
+- **Names** are `service.operation`. With `Faults.Services` on, the runner
+  takes a whole service down for a while (every point of it fails), as a
+  real outage would.
 - **Rates** are drawn per seed from a stream named after the point: quiet
   in a third of seeds, else failing 0.1% to 20% of calls (a random share
   of them after acting), sometimes slowed by 1ms to 1s. Adding a point
@@ -247,13 +306,19 @@ point is always quiet.
   makes sure the ambiguous case was reached.
 - Points fire only in the fault phase.
 
+`dst.Inject(w, name)` is the lower-level form, returning the decision
+(after sleeping its latency, without watching a context) for a fake that
+handles faults itself; `dst.Do` is Call for an operation that returns
+only an error.
+
+### Buggify
+
 `w.Buggify(name)` (after FoundationDB's BUGGIFY) is a point in your own
 code: it returns true now and then in a simulation, so code can take a
 legal but rare path (a tiny buffer, an early flush, a spurious retry) to
 shake out bugs that path hides. Each point is active in about a quarter
 of seeds and then fires on about a quarter of calls; it is always false
-in the real World. [`examples/objstore`](../examples/objstore) has a fake
-store and a client that handles the ambiguous case.
+in the real World.
 
 ## Running
 

@@ -20,7 +20,8 @@ func harness(bugs objstore.Bugs) func(h *dsttest.Harness) {
 			boots := 0
 			h.Machine(name, func(w *dst.World) {
 				boots++
-				log := objstore.NewLog(w, svc.Bucket(w), "log", bugs)
+				store := objstore.Faulty(w, svc.Bucket(w)) // the plain fake, with faults added
+				log := objstore.NewLog(w, store, "log", bugs)
 				for i := 0; ; i++ {
 					id := fmt.Sprintf("%s.%d.%d", name, boots, i)
 					o := log.Append(id)

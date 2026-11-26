@@ -122,18 +122,38 @@ connected socket that sends to and receives from one peer):
 
 Not modelled yet: bandwidth limits.
 
-## Fault points (`dst.Inject`, `w.Buggify`, `internal/points`)
+## Fault points (`dst.Inject`, `dst.Call`, `w.Buggify`, `internal/points`)
 
-Points are in the code under test and its fakes; see
-[writing a test](writing-a-test.md#faults-in-your-own-fakes).
+A fault point stands for one call to a service the simulation doesn't run
+(cloud storage, a managed database, a third-party API), placed in its fake
+or in a wrapper around the fake; see [writing a
+test](writing-a-test.md#faults-in-your-own-fakes). Each call gets one
+decision, after an injected latency (often zero) during which other
+goroutines run:
 
-- A call fails without acting (**Fail**), fails after acting
-  (**FailAfter**: the operation happened, the caller sees an error), is
-  slowed, or proceeds. Rates are drawn per seed and per point.
-- A **service outage** fails every point of a service (`svc.` in
-  `svc.op`) for a window: lengths log-uniform from 10ms to 3s.
-- Nothing fires outside the fault phase, and a quiet point changes
-  nothing in the schedule.
+| Decision | The operation | The caller | Models |
+|---|---|---|---|
+| None | happens | gets the real result | normal |
+| Fail | does not happen | gets an error (`Errors.Before`) | refused (503, throttled), connection refused, request lost on the way |
+| FailAfter | happens; its effects stay | gets an error instead of the result (`Errors.After`) | timeout or reset after the service acted, lost reply |
+
+With `dst.Call`, injected latency ends early when the caller's context
+does: the caller gets the context's error, and the operation still
+happens unless the decision was Fail (a slow request the service received
+takes effect, though the caller gave up). A context already done when the
+call starts means the request is never sent.
+
+- Decisions are a pure function of the seed. Each point's rates are drawn
+  per seed from a stream named after it: quiet in a third of seeds, else
+  failing 0.1% to 20% of calls (a random share of them after acting), and
+  in some seeds slowed by 1ms to 1s. Adding a point leaves the others'
+  decisions as they were; a quiet point changes nothing in the schedule.
+- A **service outage** fails every point of a service (`svc` in
+  `svc.op`) for a window, lengths log-uniform from 10ms to 3s.
+- Nothing fires outside the fault phase, or in the real World.
+- `w.Buggify(name)` is a point in your own code: true now and then (about
+  a quarter of seeds, then a quarter of calls), so the code takes a legal
+  but rare path.
 
 ## The runner (`dsttest`)
 

@@ -2,6 +2,7 @@ package dsttest_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -562,7 +563,7 @@ func TestOutagesExplore(t *testing.T) {
 
 // Verifies: [real-never-injects]
 // Fails if: the real World injects a fault or fires a Buggify point, or
-// Do doesn't run the operation there; or (negative) a simulated World set
+// Do or Call doesn't run the operation there; or (negative) a simulated World set
 // to always fail doesn't.
 func TestRealNeverInjects(t *testing.T) {
 	w := realworld.New(realworld.Options{})
@@ -577,6 +578,9 @@ func TestRealNeverInjects(t *testing.T) {
 	}
 	if ran != 1000 {
 		t.Fatalf("Do ran its operation %d of 1000 times", ran)
+	}
+	if v, err := dst.Call(context.Background(), w, "svc.op", dst.Errors{}, func() (int, error) { return 7, nil }); v != 7 || err != nil {
+		t.Fatalf("Call in the real World: %d, %v", v, err)
 	}
 	var fails, afterRan int
 	dsttest.Sweep(dsttest.Options{Seeds: 1, Faults: dsttest.Faults{Points: true}, Points: map[string]dsttest.Point{"svc.": {FailAfter: 1}},
@@ -638,5 +642,72 @@ func TestFaultClassesIndependent(t *testing.T) {
 	}
 	if compared < 3 {
 		t.Fatalf("only %d of 10 seeds had crashes to compare", compared)
+	}
+}
+
+// Verifies: [call-fail-never-runs], [call-fail-after-runs], [call-latency-honours-ctx]
+// Fails if: Call runs op on Fail, doesn't run it exactly once on FailAfter,
+// returns the wrong error or value, waits out injected latency after the
+// context is done, or skips op when a context cuts a request short that
+// wasn't refused.
+func TestCall(t *testing.T) {
+	errRefused, errLost := errors.New("refused"), errors.New("lost reply")
+	errs := dst.Errors{Before: func() error { return errRefused }, After: func() error { return errLost }}
+	var cut, uncut int
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 3, Parallel: 1, Faults: dsttest.Faults{Points: true},
+		Points: map[string]dsttest.Point{
+			"svc.fail":  {Fail: 1},
+			"svc.after": {FailAfter: 1},
+			"svc.slow":  {Slow: 1, Latency: 20 * time.Millisecond},
+		},
+		FaultPhase: 5 * time.Second, RecoveryPhase: 100 * time.Millisecond}, func(h *dsttest.Harness) {
+		h.Machine("m", func(w *dst.World) {
+			w.Sleep(time.Millisecond) // into the fault phase
+			bg := context.Background()
+			for range 50 {
+				ran := 0
+				op := func() (int, error) { ran++; return 42, nil }
+				if v, err := dst.Call(bg, w, "svc.fail", errs, op); v != 0 || err != errRefused || ran != 0 {
+					h.Failf("Fail: got %d, %v; op ran %d times, want 0", v, err, ran)
+				}
+				if v, err := dst.Call(bg, w, "svc.after", errs, op); v != 0 || err != errLost || ran != 1 {
+					h.Failf("FailAfter: got %d, %v; op ran %d times, want 1", v, err, ran)
+				}
+				if _, err := dst.Call(bg, w, "svc.after", dst.Errors{}, op); !errors.Is(err, dst.ErrInjected) {
+					h.Failf("FailAfter with no Errors: %v, want ErrInjected", err)
+				}
+				ran = 0
+				done, stop := dst.WithCancel(w, bg)
+				stop()
+				if _, err := dst.Call(done, w, "svc.after", errs, op); !errors.Is(err, context.Canceled) || ran != 0 {
+					h.Failf("Call with a done context: %v; op ran %d times, want 0 (never sent)", err, ran)
+				}
+				ctx, cancel := dst.WithTimeout(w, bg, 10*time.Millisecond)
+				start := w.Now()
+				v, err := dst.Call(ctx, w, "svc.slow", errs, op)
+				took := w.Since(start)
+				cancel()
+				switch {
+				case err == nil:
+					uncut++
+					if v != 42 || ran != 1 || took >= 10*time.Millisecond {
+						h.Failf("slow call within the deadline: %d, op ran %d, took %v", v, ran, took)
+					}
+				case errors.Is(err, context.DeadlineExceeded):
+					cut++
+					if took > 10*time.Millisecond+time.Microsecond || ran != 1 {
+						h.Failf("slow call cut by the deadline took %v (want 10ms); op ran %d times, want 1", took, ran)
+					}
+				default:
+					h.Failf("slow call: %v", err)
+				}
+			}
+		})
+	})
+	if !rep.OK() {
+		t.Fatalf("%v", rep.Failed[0].Err)
+	}
+	if cut == 0 || uncut == 0 {
+		t.Errorf("%d slow calls were cut by their deadline and %d not; want some of each", cut, uncut)
 	}
 }

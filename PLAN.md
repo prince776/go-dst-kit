@@ -257,6 +257,17 @@ each one.
   rereads the whole log, so clients space appends 20ms (5ms cost 12s per
   300 seeds). BlindRetry and TimeoutAsFailure pass every seed without
   fault points: the ambiguous timeout is what finds them.
+- **Fault wrappers (after M17, Prince 2026-11-26)**: fakes stay plain and
+  a wrapper adds faults, as with pre- and post-call error hooks. Added
+  `dst.Call(ctx, w, name, Errors{Before, After}, op)`: Fail never runs
+  op, FailAfter always does, injected latency ends with the caller's
+  context (op still runs unless Fail: a received slow request takes
+  effect), and a context already done isn't sent. `Errors` is per call,
+  so a wrapper maps reads and writes differently. Found while designing
+  it: `Inject` slept its latency past the caller's deadline. The objstore
+  example now has a plain fake, a `Faulty` wrapper, and per-request
+  deadlines (220 puts per 300 seeds are cut by one); the client treats
+  every error but a definite refusal as ambiguous.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
@@ -349,6 +360,12 @@ cost 110ns contended; the benchmark caught it.
   some operations (CompareAndSwap, Load in a loop). Verification: a
   lock-free bug (lost CAS update, publication before initialization)
   that is caught with it and missed without.
+- **`dstwrap` generator**: writes a fault-injecting wrapper from an
+  interface, one `dst.Call` per method (`//go:generate dstwrap -type
+  Bucket -service objstore`), so an SDK client with dozens of methods
+  needs no hand-written wrapper. To settle: naming points from methods,
+  mapping errors per method (reads vs writes), methods without a context
+  or an error, and streaming results.
 - **Map order**: today map iteration order is only detected, when it
   changes behaviour on a determinism-checked seed. Options: dstlint flags
   `range` over a map in simulated packages unless the keys are sorted or

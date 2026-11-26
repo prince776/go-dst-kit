@@ -38,10 +38,17 @@
 //   - [timers-follow-world-clock] Timers, tickers, Sleep and context
 //     deadlines fire by the World's clock, in deadline order.
 //   - [real-never-injects] In the real World, Inject always returns None,
-//     Do always runs its operation, and Buggify is always false.
+//     Do and Call always run their operation, and Buggify is always false.
+//   - [call-fail-never-runs] On Fail, Call doesn't run its operation and
+//     returns the Before error.
+//   - [call-fail-after-runs] On FailAfter, Call runs its operation once
+//     and returns the After error, not its result.
+//   - [call-latency-honours-ctx] Injected latency ends when the caller's
+//     context does: Call returns its error then, having run the operation
+//     unless the request was refused.
 //
 // Children: World, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
-// Ticker, WithCancel, WithTimeout, WithDeadline, Rand, Inject, Do, Buggify
+// Ticker, WithCancel, WithTimeout, WithDeadline, Rand, Inject, Do, Call, Buggify
 // Depends on: internal/sched (the simulator's engine)
 package dst
 

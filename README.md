@@ -41,7 +41,8 @@ can't reproduce it. Under simulation:
   latency, partitions, resets, datagram loss and duplication, process
   crashes and pauses, power loss that drops unsynced writes or tears
   them, clock skew between machines, and failures, timeouts and outages
-  of the services you fake (`dst.Inject`, `w.Buggify`). Each seed draws its own mix of faults (swarm
+  of the services you fake (`dst.Call`), and rare paths in your own code
+  (`w.Buggify`). Each seed draws its own mix of faults (swarm
   testing).
 - **Everything replays**: same seed, same run, step for step, with an
   event log (`-dst.v`).
