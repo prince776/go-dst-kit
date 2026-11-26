@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
@@ -17,6 +18,11 @@ var NetChecks = []Check{
 	{"net/refused", netRefused},
 	{"net/read-deadline", netDeadline},
 	{"net/close", netClose},
+	{"udp/echo", udpEcho},
+	{"udp/boundaries", udpBoundaries},
+	{"udp/connected", udpConnected},
+	{"udp/read-deadline", udpDeadline},
+	{"udp/close-unblocks", udpClose},
 }
 
 func listen(w *dst.World) net.Listener {
@@ -128,5 +134,114 @@ func netClose(w *dst.World) {
 	must(c.Close())
 	if _, err := c.Write([]byte("x")); err == nil {
 		failf("write after Close succeeded")
+	}
+}
+
+func listenUDP(w *dst.World) net.PacketConn {
+	pc, err := w.Net().ListenPacket("udp", "localhost:0")
+	must(err)
+	return pc
+}
+
+// udpServe echoes every datagram back to its sender until pc is closed.
+func udpServe(w *dst.World, pc net.PacketConn) {
+	w.Go(func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			pc.WriteTo(buf[:n], from)
+		}
+	})
+}
+
+func udpEcho(w *dst.World) {
+	srv := listenUDP(w)
+	defer srv.Close()
+	udpServe(w, srv)
+	cl := listenUDP(w)
+	defer cl.Close()
+	_, err := cl.WriteTo([]byte("ping"), srv.LocalAddr())
+	must(err)
+	buf := make([]byte, 64)
+	cl.SetReadDeadline(w.Now().Add(5 * time.Second))
+	n, from, err := cl.ReadFrom(buf)
+	must(err)
+	if string(buf[:n]) != "ping" || from.String() != srv.LocalAddr().String() {
+		failf("got %q from %v, want \"ping\" from %v", buf[:n], from, srv.LocalAddr())
+	}
+}
+
+// Datagrams arrive whole: each read returns exactly one datagram.
+func udpBoundaries(w *dst.World) {
+	srv := listenUDP(w)
+	defer srv.Close()
+	cl := listenUDP(w)
+	defer cl.Close()
+	sizes := map[int]bool{1: true, 100: true, 1200: true}
+	for n := range sizes {
+		_, err := cl.WriteTo(bytes.Repeat([]byte{byte(n)}, n), srv.LocalAddr())
+		must(err)
+	}
+	srv.SetReadDeadline(w.Now().Add(5 * time.Second))
+	buf := make([]byte, 2048)
+	for range len(sizes) {
+		n, _, err := srv.ReadFrom(buf)
+		must(err)
+		if !sizes[n] || !bytes.Equal(buf[:n], bytes.Repeat([]byte{byte(n)}, n)) {
+			failf("read a %d-byte datagram, not one of those sent whole", n)
+		}
+		delete(sizes, n)
+	}
+}
+
+func udpConnected(w *dst.World) {
+	srv := listenUDP(w)
+	defer srv.Close()
+	udpServe(w, srv)
+	c, err := w.Net().Dial("udp", srv.LocalAddr().String())
+	must(err)
+	defer c.Close()
+	if c.RemoteAddr().String() != srv.LocalAddr().String() {
+		failf("RemoteAddr %v, want %v", c.RemoteAddr(), srv.LocalAddr())
+	}
+	_, err = c.Write([]byte("hello"))
+	must(err)
+	c.SetReadDeadline(w.Now().Add(5 * time.Second))
+	buf := make([]byte, 64)
+	n, err := c.Read(buf)
+	must(err)
+	if string(buf[:n]) != "hello" {
+		failf("read %q, want \"hello\"", buf[:n])
+	}
+}
+
+func udpDeadline(w *dst.World) {
+	pc := listenUDP(w)
+	defer pc.Close()
+	start := w.Now()
+	pc.SetReadDeadline(start.Add(50 * time.Millisecond))
+	_, _, err := pc.ReadFrom(make([]byte, 8))
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		failf("read: %v, want a deadline error", err)
+	}
+	if w.Since(start) < 50*time.Millisecond {
+		failf("deadline fired after %v, want 50ms", w.Since(start))
+	}
+}
+
+func udpClose(w *dst.World) {
+	pc := listenUDP(w)
+	done := dst.MakeChan[error](w, 1)
+	w.Go(func() {
+		_, _, err := pc.ReadFrom(make([]byte, 8))
+		done.Send(err)
+	})
+	w.Sleep(10 * time.Millisecond)
+	must(pc.Close())
+	if err, _ := done.Recv(); !errors.Is(err, net.ErrClosed) {
+		failf("read after close: %v, want net.ErrClosed", err)
 	}
 }

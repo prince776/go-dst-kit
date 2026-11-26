@@ -13,4 +13,7 @@ type Net interface {
 	Listen(network, address string) (net.Listener, error)
 	Dial(network, address string) (net.Conn, error)
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+	// ListenPacket is net.ListenPacket (UDP). Dial("udp", ...) gives a
+	// connected UDP socket.
+	ListenPacket(network, address string) (net.PacketConn, error)
 }

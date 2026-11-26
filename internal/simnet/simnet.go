@@ -34,6 +34,12 @@
 //   - [reset-discards-unread] Data sent to a closed connection resets it,
 //     and the reset discards what the other end hasn't read.
 //
+// UDP (udp.go) is datagrams: whole or not at all, each after its own
+// latency, lost or duplicated at Options' rates; partitions, crashed
+// hosts and unbound ports drop them. Unlike a real kernel, a datagram to
+// an unbound port draws no ICMP error, and addresses are host:port names,
+// not *net.UDPAddr. Its laws are verified through simworld.
+//
 // Depends on: internal/sched
 package simnet
 
@@ -62,6 +68,9 @@ type Options struct {
 	MinLatency, MeanLatency time.Duration
 	// ResetProb is the chance that a connection is reset at each write.
 	ResetProb float64
+	// UDPLossProb and UDPDupProb are the chances that a datagram is lost,
+	// or delivered twice.
+	UDPLossProb, UDPDupProb float64
 }
 
 // Network connects machines.
@@ -88,6 +97,7 @@ type Host struct {
 	name      string
 	m         *sched.Machine
 	listeners map[int]*listener
+	packets   map[int]*packetConn // UDP sockets by port
 	nextPort  int
 }
 
@@ -100,11 +110,14 @@ func (h *Host) trueAt(deadline time.Time) time.Duration { return h.m.TrueAt(dead
 
 // Attach connects machine m to the network under its name.
 func (n *Network) Attach(m *sched.Machine) *Host {
-	h := &Host{n: n, name: m.Name, m: m, listeners: map[int]*listener{}, nextPort: 40000}
+	h := &Host{n: n, name: m.Name, m: m, listeners: map[int]*listener{}, packets: map[int]*packetConn{}, nextPort: 40000}
 	n.hosts[m.Name] = h
 	m.OnCrash(func() {
 		for _, port := range slices.Sorted(maps.Keys(h.listeners)) {
 			h.listeners[port].closeNow()
+		}
+		for _, port := range slices.Sorted(maps.Keys(h.packets)) {
+			h.packets[port].close()
 		}
 	})
 	return h
@@ -278,6 +291,9 @@ func (h *Host) Dial(network, address string) (net.Conn, error) {
 // DialContext is net.Dialer.DialContext; the context's deadline and
 // cancellation follow the World.
 func (h *Host) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if isUDP(network) {
+		return h.dialUDP(network, address) // connectionless: nothing to wait for
+	}
 	n, s := h.n, h.n.s
 	s.Yield()
 	opErr := func(err error) error { return &net.OpError{Op: "dial", Net: network, Err: err} }
@@ -592,4 +608,4 @@ func ErrTimeout(err error) bool { return errors.Is(err, os.ErrDeadlineExceeded) 
 
 // StopFaults turns off random connection resets (the runner's recovery
 // phase).
-func (n *Network) StopFaults() { n.opts.ResetProb = 0 }
+func (n *Network) StopFaults() { n.opts.ResetProb, n.opts.UDPLossProb, n.opts.UDPDupProb = 0, 0, 0 }

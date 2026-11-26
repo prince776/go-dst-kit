@@ -12,6 +12,21 @@
 //     created them.
 //   - [runs-end] A run that exceeds its time or step limit fails instead
 //     of running forever.
+//   - [clocks-are-local] A machine's Now, sleeps, timers, context and
+//     connection deadlines follow its own clock (offset + rate x true
+//     time), which never goes backwards.
+//   - [clock-survives-restart] A restarted machine's clock carries on.
+//   - [pause-stops-a-machine] A paused machine takes no steps; its sleeps
+//     and timers return at the resume, not before; data sent to it waits;
+//     other machines run normally.
+//   - [udp-faults] Without faults every datagram arrives exactly once;
+//     with them, datagrams are lost, duplicated and reordered.
+//   - [udp-partition-drops] A datagram sent across a partition is dropped,
+//     not held.
+//   - [udp-pause-buffers] A paused machine's socket keeps up to 256
+//     datagrams for when it resumes and drops the rest.
+//   - [udp-crash-drops] Datagrams to a crashed machine are dropped; its
+//     sockets don't survive the restart, which can bind the same ports.
 //
 // Depends on: dst, internal/sched, internal/simfs
 package simworld

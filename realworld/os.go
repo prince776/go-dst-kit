@@ -109,6 +109,10 @@ func (osNet) Dial(network, address string) (net.Conn, error) {
 	return net.Dial(network, address)
 }
 
+func (osNet) ListenPacket(network, address string) (net.PacketConn, error) {
+	return net.ListenPacket(network, address)
+}
+
 func (osNet) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, network, address)

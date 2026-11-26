@@ -100,7 +100,7 @@ type Faults struct {
 	Crash     bool // crash and restart machines (power loss: unsynced data may be lost)
 	Partition bool // partition the network, symmetrically or one way
 	Disk      bool // torn writes and power loss inside I/O calls
-	Network   bool // connection resets and latency spikes
+	Network   bool // connection resets, latency spikes, datagram loss and duplication
 	Pause     bool // pause machines without crashing them (GC pauses, VM stalls)
 }
 
@@ -466,6 +466,9 @@ type Swarm struct {
 
 	PauseEvery time.Duration // mean time between machine pauses (0: none)
 	PauseFor   time.Duration // mean pause length
+
+	UDPLossProb float64 // chance a datagram is lost
+	UDPDupProb  float64 // chance a datagram is delivered twice
 }
 
 func (s Swarm) disk() simfs.Options {
@@ -473,14 +476,14 @@ func (s Swarm) disk() simfs.Options {
 }
 
 func (s Swarm) net() simnet.Options {
-	return simnet.Options{MinLatency: s.MinLatency, MeanLatency: s.MeanLatency, ResetProb: s.ResetProb}
+	return simnet.Options{MinLatency: s.MinLatency, MeanLatency: s.MeanLatency, ResetProb: s.ResetProb, UDPLossProb: s.UDPLossProb, UDPDupProb: s.UDPDupProb}
 }
 
 func (s Swarm) String() string {
 	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
 		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
-		fmt.Sprintf(", pause every ~%v (for ~%v)", s.PauseEvery, s.PauseFor)
+		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}", s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb)
 }
 
 func (s Swarm) sched() string {
@@ -547,6 +550,13 @@ func newSwarm(seed uint64, f Faults) Swarm {
 	pauseFor := time.Duration(math.Pow(10, 1+2.3*r.Float64())) * time.Millisecond
 	if f.Pause {
 		s.PauseEvery, s.PauseFor = pauseEvery, pauseFor
+	}
+	// UDP faults (part of Network), drawn last for the same reason: loss
+	// up to 20%, duplication up to 5%.
+	udpLoss := sometimes(r, 0.2*r.Float64())
+	udpDup := sometimes(r, 0.05*r.Float64())
+	if f.Network {
+		s.UDPLossProb, s.UDPDupProb = udpLoss, udpDup
 	}
 	return s
 }

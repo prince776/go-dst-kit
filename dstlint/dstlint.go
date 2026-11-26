@@ -77,7 +77,8 @@ var funcs = map[string]map[string]string{
 	},
 	"net": {
 		"Dial": "w.Net().Dial", "DialTimeout": "w.Net().DialContext", "Listen": "w.Net().Listen",
-		"ListenTCP": "w.Net().Listen", "DialTCP": "w.Net().Dial", "ListenPacket": "(not simulated yet)",
+		"ListenTCP": "w.Net().Listen", "DialTCP": "w.Net().Dial", "ListenPacket": "w.Net().ListenPacket",
+		"ListenUDP": "w.Net().ListenPacket", "DialUDP": "w.Net().Dial",
 	},
 	"net/http": {
 		"ListenAndServe": "dsthttp.Serve", "Serve": "dsthttp.Serve", "Get": "dsthttp.Client(w).Get",

@@ -89,7 +89,7 @@ Not modelled yet: a full disk, I/O errors, bit rot, misdirected writes.
 ## Network (`internal/simnet`)
 
 Connections are TCP-like streams (`net.Conn`), between hosts named after
-their machines.
+their machines. UDP is below.
 
 - Bytes arrive in order, exactly once, after a latency of a floor plus an
   exponential tail (drawn per seed, occasionally spiking 20×).
@@ -104,7 +104,23 @@ their machines.
   random.
 - Deadlines (`SetDeadline`, `DialContext`) follow the virtual clock.
 
-Not modelled yet: UDP, bandwidth limits.
+**UDP** (`w.Net().ListenPacket("udp", ...)`, or `Dial("udp", ...)` for a
+connected socket that sends to and receives from one peer):
+
+- Each datagram arrives whole or not at all, after its own latency, so
+  datagrams reorder. With network faults on, a seed loses up to 20% of
+  them and duplicates up to 5%.
+- A partition, a crashed host, or a port nobody listens on **drops**
+  datagrams: UDP never holds them. A paused host's socket keeps up to 256
+  for when it resumes, and drops the rest.
+- A crash closes the machine's sockets; the restarted machine can bind
+  the same ports.
+- Differences from a real kernel: a datagram to an unbound port draws no
+  ICMP error (a connected socket's next read doesn't fail with
+  ECONNREFUSED), and addresses are `host:port` names, not `*net.UDPAddr`:
+  compare them with `String()`.
+
+Not modelled yet: bandwidth limits.
 
 ## The runner (`dsttest`)
 

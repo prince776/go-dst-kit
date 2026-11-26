@@ -38,7 +38,8 @@ timeout. Ordinary tests don't reach them, and when a flaky test does, you
 can't reproduce it. Under simulation:
 
 - **Everything is explored**: goroutine order (uniform and PCT), network
-  latency, partitions, resets, process crashes and pauses, power loss
+  latency, partitions, resets, datagram loss and duplication, process
+  crashes and pauses, power loss
   that drops unsynced writes or tears them, and clock skew between
   machines. Each seed draws its own mix of faults (swarm
   testing).
@@ -103,6 +104,7 @@ every planted bug is caught, for the right reason.
 |---|---|
 | [wal](examples/wal): checksummed write-ahead log | no fsync, no directory fsync, appending after a torn tail |
 | [dedupe](examples/dedupe): exactly-once over retries | dedupe set in memory, "seen" logged separately from the effect |
+| [heartbeat](examples/heartbeat): UDP failure detector | no sequence numbers (found only with UDP faults), sequence numbers that restart with the process, a monitor that learns members from heartbeats |
 | [lease](examples/lease): lock service with leases and fenced writes | lease timed from the reply, no step-down, restarted server forgets, no drift margin, trusting the server's timestamp, no fencing (found only with pauses) |
 | [gcounter](examples/gcounter): gossiped CRDT counter | merge by sum, rename without fsync |
 | [twophase](examples/twophase): two-phase commit | participant decides alone, decision sent before logged, prepare not logged |
@@ -137,7 +139,7 @@ both Worlds to keep them honest.
   the determinism check reports the seed; sort the keys.
 - **Exploration is random**, not exhaustive: rare interleavings need many
   seeds. Run a long sweep nightly (`-dst.seeds=20000`).
-- **Not modelled yet:** UDP, wall-clock jumps, disk-full and I/O errors,
+- **Not modelled yet:** wall-clock jumps, disk-full and I/O errors,
   bit rot.
 - **Overhead in production** is small but not zero: a channel round trip
   costs about 295ns against 266ns raw and an uncontended mutex 14ns. The
