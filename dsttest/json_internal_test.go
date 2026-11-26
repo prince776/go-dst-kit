@@ -28,7 +28,7 @@ func TestSweepResultsAndJSON(t *testing.T) {
 		t.Fatalf("%d results, want 12", len(rep.Results))
 	}
 	path := filepath.Join(t.TempDir(), "seeds.jsonl")
-	if err := writeJSON(path, "TestX", rep); err != nil {
+	if err := writeJSON(path, "TestX", 0, rep); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(path)

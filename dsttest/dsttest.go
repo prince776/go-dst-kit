@@ -72,6 +72,7 @@
 package dsttest
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -80,6 +81,9 @@ import (
 	"math"
 	"math/rand/v2"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -104,7 +108,11 @@ var (
 	flagParallel = flag.Int("dst.parallel", 0, "seeds run at once (default GOMAXPROCS)")
 	flagKeep     = flag.Bool("dst.keepgoing", false, "sweep every seed, not stopping at the first failures (Options.KeepGoing)")
 	flagJSON     = flag.String("dst.json", "", "append one JSON line per seed run to this file (for tools such as dstbench)")
+	flagXProcess = flag.Bool("dst.xprocess", true, "rerun a seed in a new process of the test binary and check it replays the same")
 )
+
+// childEnv marks a test binary run by the cross-process replay check.
+const childEnv = "DSTTEST_REPLAY_CHILD"
 
 // Faults selects the fault classes the runner may inject. Rates are drawn
 // per seed.
@@ -1086,7 +1094,9 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 // seedRecord is one line of -dst.json.
 type seedRecord struct {
 	Test     string         `json:"test"`
+	Call     int            `json:"call"` // which call of Run in the test (0 is the first)
 	Seed     uint64         `json:"seed"`
+	Trace    string         `json:"trace"` // the run's fingerprint, in hex
 	Index    int            `json:"index"` // position in the sweep (0 is the first seed)
 	Failed   bool           `json:"failed"`
 	Error    string         `json:"error,omitempty"`
@@ -1097,14 +1107,14 @@ type seedRecord struct {
 }
 
 // writeJSON appends a line per run of rep to path.
-func writeJSON(path, test string, rep Report) error {
+func writeJSON(path, test string, call int, rep Report) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	enc := json.NewEncoder(f)
 	for _, r := range rep.Results {
-		rec := seedRecord{Test: test, Seed: r.Seed, Index: int(r.Seed - rep.FirstSeed), Failed: r.Err != nil,
+		rec := seedRecord{Test: test, Call: call, Trace: fmt.Sprintf("%016x", r.Fingerprint), Seed: r.Seed, Index: int(r.Seed - rep.FirstSeed), Failed: r.Err != nil,
 			Steps: r.Steps, SimNS: int64(r.SimTime), WallNS: int64(r.Wall), Coverage: r.Coverage}
 		if r.Err != nil {
 			rec.Error = strings.SplitN(r.Err.Error(), "\n", 2)[0]
@@ -1115,6 +1125,72 @@ func writeJSON(path, test string, rep Report) error {
 		}
 	}
 	return f.Close()
+}
+
+var (
+	runCallsMu sync.Mutex
+	runCalls   = map[testing.TB]int{}
+)
+
+// runCall numbers the calls of Run within one execution of a test (a
+// rerun with -count, or the child of the replay check, starts again at 0).
+func runCall(test testing.TB) int {
+	runCallsMu.Lock()
+	defer runCallsMu.Unlock()
+	n := runCalls[test]
+	runCalls[test] = n + 1
+	return n
+}
+
+// replayInChild runs seed r again in a new process of the test binary and
+// checks it plays the same: a seed that replays in one process but not in
+// another depends on something outside the World (keys or maps made per
+// process, the environment, files), so a reported seed may not reproduce.
+func replayInChild(test string, call int, r Result) error {
+	dir, err := os.MkdirTemp("", "dsttest-replay-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	out := filepath.Join(dir, "seed.jsonl")
+	parts := strings.Split(test, "/")
+	for i, p := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(p) + "$"
+	}
+	cmd := exec.Command(os.Args[0], "-test.run="+strings.Join(parts, "/"), "-test.count=1",
+		"-dst.seeds=1", fmt.Sprintf("-dst.first=%d", r.Seed), "-dst.parallel=1", "-dst.json="+out)
+	cmd.Env = append(os.Environ(), childEnv+"=1")
+	var log bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &log, &log
+	runErr := cmd.Run() // fails when the seed fails: the record says how
+	data, err := os.ReadFile(out)
+	if err != nil && runErr == nil && strings.Contains(log.String(), "no tests to run") {
+		return nil // Run under a testing.TB that isn't a test of this binary: nothing to rerun
+	}
+	if err != nil {
+		return fmt.Errorf("replaying seed %d in a new process: no record (%v):\n%s", r.Seed, runErr, tail(log.String(), 2000))
+	}
+	want := fmt.Sprintf("%016x", r.Fingerprint)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec seedRecord
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.Call != call || rec.Seed != r.Seed {
+			continue
+		}
+		if rec.Trace != want || rec.Failed != (r.Err != nil) {
+			return fmt.Errorf("seed %d plays differently in a new process (trace %s, failed %v; here %s, failed %v): "+
+				"the run depends on something outside the World made per process, such as keys or maps built at init, "+
+				"the environment or files; a reported seed may not reproduce", r.Seed, rec.Trace, rec.Failed, want, r.Err != nil)
+		}
+		return nil
+	}
+	return fmt.Errorf("replaying seed %d in a new process: its record is missing", r.Seed)
+}
+
+func tail(s string, n int) string {
+	if len(s) > n {
+		return s[len(s)-n:]
+	}
+	return s
 }
 
 // Run sweeps seeds as a test, failing t for failing seeds, nondeterminism
@@ -1134,9 +1210,21 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 		}
 		return Report{Runs: 1, Coverage: r.Coverage}
 	}
+	call := runCall(t)
 	rep := Sweep(opts, setup)
+	if opts.DeterminismChecks >= 0 && *flagXProcess && os.Getenv(childEnv) == "" && len(rep.Results) > 0 {
+		check := []Result{rep.Results[0]}
+		if len(rep.Failed) > 0 && rep.Failed[0].Seed != check[0].Seed {
+			check = append(check, rep.Failed[0])
+		}
+		for _, r := range check {
+			if err := replayInChild(t.Name(), call, r); err != nil {
+				t.Errorf("dsttest: %v", err)
+			}
+		}
+	}
 	if *flagJSON != "" {
-		if err := writeJSON(*flagJSON, t.Name(), rep); err != nil {
+		if err := writeJSON(*flagJSON, t.Name(), call, rep); err != nil {
 			t.Errorf("dsttest: -dst.json: %v", err)
 		}
 	}
@@ -1157,7 +1245,7 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 			t.Errorf("... and more failing seeds (use KeepGoing to list them all)")
 			break
 		}
-		t.Errorf("seed %d failed: %v\nfaults: %v\nreplay: go test -run '^%s$' -dst.seed=%d -dst.v", r.Seed, r.Err, r.Swarm, name, r.Seed)
+		t.Errorf("seed %d failed: %v\nfaults: %v\ntrace: %016x\nreplay: go test -run '^%s$' -dst.seed=%d -dst.v", r.Seed, r.Err, r.Swarm, r.Fingerprint, name, r.Seed)
 	}
 	for _, d := range rep.Nondeterministic {
 		t.Error(d)

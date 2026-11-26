@@ -872,3 +872,45 @@ func TestCrashLatency(t *testing.T) {
 		t.Errorf("crashes and points off: %d slowed, %d failed (want none)", slow, fail)
 	}
 }
+
+// namedRecorder is a recorder that keeps the real test's name, so the
+// cross-process check reruns this very test.
+type namedRecorder struct{ recorder }
+
+func (r *namedRecorder) Name() string { return r.TB.Name() }
+
+// Run reruns a seed in a new process of the test binary: a run that
+// depends on something made per process (here the process ID) is
+// reported, and a deterministic one is not. Fails if either goes wrong.
+func TestRunCrossProcessReplay(t *testing.T) {
+	opts := dsttest.Options{Seeds: 3, FaultPhase: 100 * time.Millisecond, RecoveryPhase: 100 * time.Millisecond}
+	setup := func(perProcess bool) func(h *dsttest.Harness) {
+		return func(h *dsttest.Harness) {
+			h.Go(func(w *dst.World) {
+				d := time.Duration(1+w.Rand().IntN(5)) * time.Millisecond
+				if perProcess {
+					d = time.Duration(os.Getpid()) * time.Microsecond // differs in every process
+				}
+				w.Sleep(d)
+			})
+		}
+	}
+	t.Run("deterministic", func(t *testing.T) {
+		rec := &namedRecorder{recorder{TB: t}}
+		dsttest.Run(rec, opts, setup(false))
+		if len(rec.errs) > 0 {
+			t.Fatalf("a deterministic run was reported: %v", rec.errs)
+		}
+	})
+	t.Run("per-process", func(t *testing.T) {
+		if os.Getenv("DSTTEST_REPLAY_CHILD") != "" {
+			dsttest.Run(t, opts, setup(true)) // the rerun: record the seed
+			return
+		}
+		rec := &namedRecorder{recorder{TB: t}}
+		dsttest.Run(rec, opts, setup(true))
+		if len(rec.errs) != 1 || !strings.Contains(rec.errs[0], "plays differently in a new process") {
+			t.Fatalf("a run using the process ID wasn't reported: %v", rec.errs)
+		}
+	})
+}
