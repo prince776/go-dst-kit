@@ -44,6 +44,9 @@ type Options struct {
 	// StrictIdentity checks the caller's goroutine on every scheduling
 	// call (see sched.Options).
 	StrictIdentity bool
+	// PCTDepth and PCTHorizon select PCT scheduling (see sched.Options).
+	PCTDepth   int
+	PCTHorizon uint64
 }
 
 // Sim is one simulated run.
@@ -79,7 +82,8 @@ func New(opts Options) *Sim {
 	}
 	s := &Sim{
 		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
-			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep, StrictIdentity: opts.StrictIdentity}),
+			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep, StrictIdentity: opts.StrictIdentity,
+			PCTDepth: opts.PCTDepth, PCTHorizon: opts.PCTHorizon}),
 		machines: map[string]*Machine{},
 	}
 	s.Net = simnet.New(s.S, Epoch, opts.Net)

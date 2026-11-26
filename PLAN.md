@@ -183,6 +183,16 @@ each one.
   case ready, and fails fast instead of hanging if an arm is miswired;
   shown by swapping two branches). Mixing up two cases' values doesn't
   compile: each case has its own type parameter.
+- **PCT, as built (M13)**: priorities are floats (spawned goroutines get
+  a random one in (1, 2); the k-th drop sets 1 - k/d), so goroutines
+  spawned mid-run need no renumbering. The run length k that PCT's drops
+  should spread over isn't known in advance, so each seed draws a
+  log-uniform horizon over 100 to 100,000 steps. Starvation guard: 100
+  consecutive picks while others are runnable demotes the goroutine
+  (removing it makes the polling test spin to the step limit). Measured:
+  a bug needing one goroutine starved for 50 steps is found by uniform
+  choice in 0 of 1,000 seeds, by PCT in 20 of 50. Swarm draws PCT last,
+  so every earlier knob keeps its per-seed value.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
@@ -222,7 +232,7 @@ a step-back when done.
 | 10 | `dst.Cond` (**done**) | Wait/Signal/Broadcast over dst.Mutex/RWMutex; real = sync.Cond, sim = scheduler wait queue; dstlint points sync.Cond users to it | contract checks in both Worlds: Signal wakes exactly one, Broadcast all, Wait reacquires the lock, a Signal with no waiter is lost |
 | 11 | Goroutine-identity check (**done**, with the mutex fix) | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
 | 12 | `Select2` / `Select3` (**done**) | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
-| 13 | PCT scheduler | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
+| 13 | PCT scheduler (**done**) | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
 | 14 | Per-machine clocks | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
 | 15 | UDP | ListenPacket and Dial("udp"); per-datagram latency (so reordering); loss and duplication rates per seed; partitions and dead hosts drop; plus a heartbeat failure-detector example with a planted bug (approved) | contract checks against real loopback UDP; whole-or-nothing datagrams; no faults means exactly once; loss, duplication and reordering each occur in some seed |
 | 17 | Fault points (approved 2026-11-26) | `dst.Inject(w, name) Fault` returns None, Fail (didn't happen) or FailAfter (happened, caller sees an error), sleeping any injected latency itself; real World always None. Per-point rates and latency drawn per seed, some seeds off; only in the fault phase; counted as coverage; per-point random streams derived from the name. Service outages: the nemesis fails every point under a prefix for a window (`Faults.Services`). `Options.Points` overrides rates by prefix. `w.Buggify(name)` shares the registry. Example: fake object store with conditional writes and a client library; planted blind retry (duplicate) and timeout-as-failure (lost ack); correct version uses ETag-style conditional writes | real World never injects; nothing outside the fault phase; each point fails in some seeds and is off in others; adding a point leaves other points' decisions unchanged; replay holds; planted bugs caught, correct client passes |

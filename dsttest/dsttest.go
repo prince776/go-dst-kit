@@ -64,6 +64,7 @@ import (
 	"flag"
 	"fmt"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"os"
 	"runtime"
@@ -389,6 +390,9 @@ type Swarm struct {
 	MinLatency  time.Duration // network latency floor
 	MeanLatency time.Duration // mean of the latency tail
 	ResetProb   float64       // chance a segment resets its connection
+
+	PCTDepth   int    // 0: uniform scheduling; else PCT with this depth
+	PCTHorizon uint64 // steps PCT's priority drops are drawn from
 }
 
 func (s Swarm) disk() simfs.Options {
@@ -402,7 +406,14 @@ func (s Swarm) net() simnet.Options {
 func (s Swarm) String() string {
 	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
-		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb)
+		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched()
+}
+
+func (s Swarm) sched() string {
+	if s.PCTDepth == 0 {
+		return ", sched{uniform}"
+	}
+	return fmt.Sprintf(", sched{pct depth %d, horizon %d}", s.PCTDepth, s.PCTHorizon)
 }
 
 // sometimes returns v with probability 2/3 (swarm testing: whole fault
@@ -448,6 +459,14 @@ func newSwarm(seed uint64, f Faults) Swarm {
 			s.MeanLatency *= 20
 		}
 	}
+	// Scheduling (not a fault class: on for every test). Drawn last, so
+	// adding it left every earlier knob's value unchanged for each seed.
+	// Half the seeds use PCT; its horizon is log-uniform over 100 to
+	// 100,000 steps, since a run's length isn't known in advance.
+	if r.IntN(2) == 0 {
+		s.PCTDepth = 1 + r.IntN(3)
+		s.PCTHorizon = uint64(math.Pow(10, 2+3*r.Float64()))
+	}
 	return s
 }
 
@@ -485,6 +504,8 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		MaxSteps:       opts.MaxSteps,
 		Net:            swarm.net(),
 		StrictIdentity: strict || opts.StrictIdentity,
+		PCTDepth:       swarm.PCTDepth,
+		PCTHorizon:     swarm.PCTHorizon,
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {

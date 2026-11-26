@@ -431,9 +431,11 @@ func (s mstate) steps(gi int, o op) []next {
 
 // ---- the same program on the simulated World ----
 
-func runSim(p program, seed uint64) string {
+func runSim(p program, seed uint64) string { return runSimWith(p, simworld.Options{Seed: seed}) }
+
+func runSimWith(p program, opts simworld.Options) string {
 	obs := make([][]string, len(p.g))
-	res := simworld.Run(simworld.Options{Seed: seed}, func(w *dst.World) {
+	res := simworld.Run(opts, func(w *dst.World) {
 		chans := make([]dst.Chan[int], len(p.caps))
 		for i, c := range p.caps {
 			chans[i] = dst.MakeChan[int](w, c)

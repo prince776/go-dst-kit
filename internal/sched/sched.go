@@ -20,6 +20,12 @@
 //   - [panic-reported] A panic in a task fails the run with the task's name
 //     and the panic site.
 //   - [crash-is-final] A crashed machine's tasks never run again.
+//   - [pct-is-legal] PCT scheduling produces only outcomes Go's channel
+//     and select semantics allow.
+//   - [pct-finds-starvation] PCT finds a bug needing one goroutine starved
+//     for 50 steps, which uniform choice never does.
+//   - [pct-no-livelock] Under PCT a polling loop can't starve the goroutine
+//     it waits for: it is demoted after 100 steps.
 //   - [misuse-reported] A World operation from a goroutine the World
 //     didn't start, or from an invariant, fails the run with its stack.
 //   - [nothing-leaks] After Shutdown, no task goroutine is left running.
@@ -61,6 +67,17 @@ type Options struct {
 	// timer (for invariants). It must not use the World; returning an
 	// error fails the run.
 	AfterStep func() error
+	// PCTDepth, if positive, schedules by PCT (probabilistic concurrency
+	// testing) instead of uniformly: every task gets a random priority, the
+	// highest-priority runnable task always runs, and at PCTDepth-1 random
+	// steps the running task drops below all others. A bug that needs d
+	// specific orderings is found with probability at least about
+	// 1/(n*k^(d-1)) per run (n tasks, k steps), where uniform choice can
+	// make one long-starved task exponentially unlikely.
+	PCTDepth int
+	// PCTHorizon is the step range the priority drops are drawn from
+	// (default 10000).
+	PCTHorizon uint64
 	// StrictIdentity checks on every scheduling call that the caller is
 	// the goroutine holding the baton (about 1.8µs each). By default a
 	// cheap structural check runs on every call and the goroutine ID on
@@ -86,6 +103,12 @@ type Scheduler struct {
 	failure  error
 	machines []*Machine
 	calls    uint64 // scheduling calls, for sampling the identity check
+	// PCT state.
+	pctRng   *rand.Rand
+	drops    []uint64 // steps at which the running task's priority drops
+	dropped  int      // how many drops happened
+	lastPick *Task
+	streak   int // consecutive picks of lastPick while others could run
 	loopGoid int64
 	// abort is closed when a misuse breaks the baton protocol: the loop
 	// stops at once instead of waiting for a handoff that may never come.
@@ -141,6 +164,7 @@ type Task struct {
 	killed  bool
 	blocked string
 	goid    int64
+	prio    float64 // PCT priority (higher runs first)
 }
 
 // Sched returns the task's scheduler.
@@ -164,7 +188,71 @@ func New(opts Options) *Scheduler {
 		queues:  map[any][]*Task{},
 	}
 	s.rng = s.Rand("sched")
+	if opts.PCTDepth > 0 {
+		s.pctRng = s.Rand("pct")
+		h := opts.PCTHorizon
+		if h == 0 {
+			h = 10000
+		}
+		for range opts.PCTDepth - 1 {
+			s.drops = append(s.drops, 1+s.pctRng.Uint64N(h))
+		}
+		slices.Sort(s.drops)
+	}
 	return s
+}
+
+// starveLimit is how many steps in a row PCT lets one task run while
+// others are runnable before demoting it, so a polling loop with the
+// highest priority can't starve the goroutine it waits for.
+const starveLimit = 100
+
+// pick removes and returns the next task to run.
+func (s *Scheduler) pick() *Task {
+	n := len(s.runnable)
+	if s.pctRng == nil {
+		i := s.rng.IntN(n)
+		t := s.runnable[i]
+		s.runnable = slices.Delete(s.runnable, i, i+1)
+		return t
+	}
+	best := func() int {
+		b := 0
+		for i, t := range s.runnable {
+			if t.prio > s.runnable[b].prio {
+				b = i
+			}
+		}
+		return b
+	}
+	i := best()
+	t := s.runnable[i]
+	if s.dropped < len(s.drops) && s.steps+1 >= s.drops[s.dropped] {
+		// A priority drop: the task about to run falls below every
+		// starting priority (they are in (1, 2)).
+		s.dropped++
+		t.prio = 1 - float64(s.dropped)/float64(len(s.drops)+1)
+		i = best()
+		t = s.runnable[i]
+	}
+	if t == s.lastPick && n > 1 {
+		s.streak++
+		if s.streak >= starveLimit {
+			low := t.prio
+			for _, u := range s.runnable {
+				low = min(low, u.prio)
+			}
+			t.prio = low - 1
+			s.streak = 0
+			i = best()
+			t = s.runnable[i]
+		}
+	} else {
+		s.streak = 0
+	}
+	s.lastPick = t
+	s.runnable = slices.Delete(s.runnable, i, i+1)
+	return t
 }
 
 // Rand returns a generator for one named consumer, derived from the seed
@@ -249,6 +337,9 @@ func (s *Scheduler) failed() bool { return s.Err() != nil }
 // it; Spawn itself doesn't yield.
 func (s *Scheduler) Spawn(m *Machine, name string, fn func()) *Task {
 	t := &Task{ID: len(s.tasks), Name: name, Machine: m, Parent: s.cur, s: s, wake: make(chan struct{}), state: runnable}
+	if s.pctRng != nil {
+		t.prio = 1 + s.pctRng.Float64()
+	}
 	s.tasks = append(s.tasks, t)
 	s.runnable = append(s.runnable, t)
 	s.Logf("spawn %s", t)
@@ -532,10 +623,8 @@ func (s *Scheduler) Run(done func() bool) error {
 			s.Fail(&LimitError{fmt.Sprintf("the run didn't finish within %d steps (t=%v)", s.opts.MaxSteps, s.now)})
 			break
 		}
-		if n := len(s.runnable); n > 0 {
-			i := s.rng.IntN(n)
-			t := s.runnable[i]
-			s.runnable = slices.Delete(s.runnable, i, i+1)
+		if len(s.runnable) > 0 {
+			t := s.pick()
 			s.Trace(uint64(t.ID))
 			s.steps++
 			if s.steps%s.opts.CheckpointEvery == 0 {

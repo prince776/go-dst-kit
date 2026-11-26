@@ -14,6 +14,13 @@ a law in the package that implements it, with a test.
   separate critical sections are explored. Plain memory and `sync/atomic`
   accesses between World operations are not interleaved (use `-race` for
   data races).
+- Half the seeds choose uniformly among runnable goroutines; the other
+  half use PCT (probabilistic concurrency testing): random priorities,
+  the highest runnable goroutine runs, and at 0 to 2 random steps the
+  running one drops to the bottom. PCT reaches orderings where one
+  goroutine is starved for a long stretch, which uniform choice almost
+  never does. A goroutine picked 100 times in a row while others wait is
+  demoted, so a polling loop can't starve the one it waits for.
 - Channels, `select`, locks, wait groups and contexts behave as Go
   specifies. The channel and select model is checked against a
   brute-force enumeration of Go's semantics, in both directions: every
