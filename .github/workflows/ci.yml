@@ -55,4 +55,5 @@ jobs:
         with:
           go-version-file: examples/go.mod
       - working-directory: examples
-        run: go test -timeout 2h ./... -dst.seeds=20000
+        # A fresh range of seeds every night; a failure prints its exact replay.
+        run: go test -timeout 2h ./... -dst.seeds=20000 -dst.first=random

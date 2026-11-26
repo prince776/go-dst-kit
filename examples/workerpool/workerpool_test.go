@@ -79,7 +79,7 @@ func TestPlantedBugs(t *testing.T) {
 		want []string // any of these symptoms
 	}{
 		"AddInWorker":   {workerpool.Bugs{AddInWorker: true}, []string{"want", "send on closed channel"}},
-		"ReturnOnError": {workerpool.Bugs{ReturnOnError: true}, []string{"never finished"}},
+		"ReturnOnError": {workerpool.Bugs{ReturnOnError: true}, []string{"goroutines stuck"}},
 		"CloseEarly":    {workerpool.Bugs{CloseEarly: true}, []string{"want", "send on closed channel"}},
 	} {
 		t.Run(name, func(t *testing.T) {

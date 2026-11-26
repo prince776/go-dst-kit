@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -271,7 +273,117 @@ func TestLeakedGoroutineReported(t *testing.T) {
 	}
 	r := dsttest.RunSeed(1, dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, leak, nil)
 	var se *dsttest.StuckError
-	if !errors.As(r.Err, &se) || len(se.Goroutines) != 1 || !strings.Contains(se.Goroutines[0], "leaker (started by workload1)") {
+	if !errors.As(r.Err, &se) || len(se.Stuck) != 1 || len(se.Slow) != 0 || !strings.Contains(se.Stuck[0], "leaker (started by workload1)") {
 		t.Fatalf("got %v", r.Err)
+	}
+}
+
+// Verifies: [slow-is-not-stuck]
+// Fails if: a goroutine that finishes late is called stuck, one blocked
+// forever is called slow, or the lateness isn't reported.
+func TestSlowIsNotStuck(t *testing.T) {
+	r := dsttest.RunSeed(1, dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		h.Go(func(w *dst.World) { w.Sleep(2500 * time.Millisecond) }) // ends 0.5s after recovery
+		h.Go(func(w *dst.World) {
+			dst.MakeChan[int](w, 0).Recv() // never
+		})
+		h.Go(func(w *dst.World) { w.Sleep(time.Millisecond) }) // finishes in time
+	}, nil)
+	var se *dsttest.StuckError
+	if !errors.As(r.Err, &se) {
+		t.Fatalf("got %v", r.Err)
+	}
+	if len(se.Slow) != 1 || !strings.Contains(se.Slow[0], "workload1: finished ~500ms after") {
+		t.Fatalf("slow = %q", se.Slow)
+	}
+	if len(se.Stuck) != 1 || !strings.Contains(se.Stuck[0], "workload2") {
+		t.Fatalf("stuck = %q", se.Stuck)
+	}
+	if !dsttest.IsDeadlock(r.Err) {
+		t.Fatal("a stuck goroutine isn't reported as a deadlock")
+	}
+	// Only slow: not a deadlock.
+	r = dsttest.RunSeed(1, dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		h.Go(func(w *dst.World) { w.Sleep(2500 * time.Millisecond) })
+	}, nil)
+	if !errors.As(r.Err, &se) || len(se.Stuck) != 0 || len(se.Slow) != 1 || dsttest.IsDeadlock(r.Err) {
+		t.Fatalf("got %v", r.Err)
+	}
+}
+
+// Verifies: [never-crash]
+// Fails if: the runner crashes a NeverCrash machine, or stops crashing the
+// others.
+func TestNeverCrash(t *testing.T) {
+	crashes := map[string]int{}
+	var mu sync.Mutex
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 50, Faults: dsttest.Faults{Crash: true, Disk: true}, FaultPhase: 5 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		boots := map[string]int{}
+		for _, n := range []string{"safe", "a", "b"} {
+			var opts []dsttest.MachineOption
+			if n == "safe" {
+				opts = append(opts, dsttest.NeverCrash)
+			}
+			h.Machine(n, func(w *dst.World) {
+				boots[n]++
+				f, _ := w.FS().OpenFile("f", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+				for {
+					f.Write([]byte("x"))
+					f.Sync()
+					w.Sleep(time.Millisecond)
+				}
+			}, opts...)
+		}
+		h.Final("count", func(*dst.World) error {
+			mu.Lock()
+			defer mu.Unlock()
+			for n, b := range boots {
+				crashes[n] += b - 1
+			}
+			return nil
+		})
+	})
+	if !rep.OK() {
+		t.Fatalf("%+v", rep.Failed)
+	}
+	if crashes["safe"] != 0 || crashes["a"] == 0 || crashes["b"] == 0 {
+		t.Fatalf("restarts per machine: %v", crashes)
+	}
+}
+
+// firstSeedHelper reports the sweep's first seed when run as a subprocess.
+func TestFirstSeedHelper(t *testing.T) {
+	if os.Getenv("DSTTEST_HELPER") != "1" {
+		t.Skip("subprocess helper for TestFirstSeedFlag")
+	}
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 1}, func(h *dsttest.Harness) {})
+	fmt.Printf("first=%d\n", rep.FirstSeed)
+}
+
+// Verifies: [fresh-seeds]
+// Fails if: -dst.first=random repeats the same seed, or -dst.first=N is
+// ignored.
+func TestFirstSeedFlag(t *testing.T) {
+	first := func(arg string) string {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestFirstSeedHelper$", "-dst.first="+arg)
+		cmd.Env = append(os.Environ(), "DSTTEST_HELPER=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		for _, l := range strings.Split(string(out), "\n") {
+			if v, ok := strings.CutPrefix(l, "first="); ok {
+				return v
+			}
+		}
+		t.Fatalf("no first seed in %s", out)
+		return ""
+	}
+	if got := first("77"); got != "77" {
+		t.Fatalf("-dst.first=77 started at %s", got)
+	}
+	a, b := first("random"), first("random")
+	if a == b || a == "1" {
+		t.Fatalf("random first seeds %s and %s", a, b)
 	}
 }

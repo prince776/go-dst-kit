@@ -37,7 +37,8 @@ state the run uses must be created inside it.
 - `h.Machine(name, start)` adds a machine and boots it. `start` runs on
   every boot, again after each restart, with a World whose disk keeps what
   was durable and whose network host is `name`. Other machines reach it at
-  `name:port`.
+  `name:port`. Pass `dsttest.NeverCrash` to keep the runner from crashing
+  it (it can still be partitioned).
 - `h.Go(fn)` starts a **workload** goroutine on the `test` machine, which
   never crashes. Workload goroutines, and any goroutines they start, must
   finish by the end of the run: one still blocked is reported as a
@@ -68,6 +69,12 @@ Each seed runs:
    make progress here; this is where liveness bugs show up as stuck
    workload.
 3. **Final checks**, if the workload finished.
+
+If workload goroutines are still running when recovery ends, the runner
+gives the fault-free system one more recovery phase to tell two cases
+apart. Goroutines that finish then are reported as **slow**, with how
+late they were: the phase is too short, or progress is too slow. Those
+still blocked are **stuck**: a deadlock, a leak or lost liveness.
 
 A workload with a fixed amount of work and long timeouts may not fit in
 the run. Stop starting operations once the fault phase is over:
@@ -105,7 +112,7 @@ effect later, and the checker allows exactly that.
 
 ```sh
 go test -run TestKV                          # the sweep (10 seeds with -short)
-go test -run TestKV -dst.seeds=20000         # a long sweep (nightly)
+go test -run TestKV -dst.seeds=20000 -dst.first=random   # a long sweep from fresh seeds (nightly)
 go test -run TestKV -dst.seed=2891 -dst.v    # replay one seed with its event log
 ```
 

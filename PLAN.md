@@ -154,6 +154,12 @@ each one.
   timeout with its backoff already at the 1s cap, and didn't finish. Not
   a system bug; the recovery phase is now 10s, and `StuckError` says that
   a goroutine waiting on a timeout may just be slow.
+- **Stuck versus slow, as built**: instead of guessing from pending
+  timers (a goroutine woken by a timer through a channel looks blocked),
+  the runner gives the fault-free system one more recovery phase when the
+  workload hasn't finished, and reports what finished then as slow (with
+  how late) and the rest as stuck. Exact, deterministic, and it costs
+  extra only on failing seeds.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.

@@ -28,7 +28,8 @@
 //
 // which reruns exactly that seed with an event log.
 //
-// Flags: -dst.seed=N (one seed), -dst.seeds=N, -dst.v (event log),
+// Flags: -dst.seed=N (one seed), -dst.seeds=N, -dst.first=N|random (where
+// the sweep starts; nightly runs use random), -dst.v (event log),
 // -dst.parallel=N.
 //
 // Verified:
@@ -49,6 +50,11 @@
 //     ends fail the seed. That covers h.Go goroutines and those they
 //     started; the report names what each waits for, and Final checks run
 //     only after the workload is done.
+//   - [slow-is-not-stuck] Unfinished workload is reported as slow if it
+//     finishes during one more fault-free recovery phase, else stuck.
+//   - [never-crash] The runner never crashes a NeverCrash machine.
+//   - [fresh-seeds] -dst.first=random starts each sweep from a new seed,
+//     and -dst.first=N from N.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -62,6 +68,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -77,6 +84,7 @@ import (
 var (
 	flagSeed     = flag.Uint64("dst.seed", 0, "run only this seed")
 	flagSeeds    = flag.Int("dst.seeds", 0, "number of seeds to sweep (overrides Options.Seeds)")
+	flagFirst    = flag.String("dst.first", "", `first seed of the sweep: a number, or "random" for a fresh one (printed)`)
 	flagVerbose  = flag.Bool("dst.v", false, "print the event log (with -dst.seed)")
 	flagParallel = flag.Int("dst.parallel", 0, "seeds run at once (default GOMAXPROCS)")
 )
@@ -127,6 +135,9 @@ func (o *Options) defaults() {
 	if *flagSeeds > 0 {
 		o.Seeds = *flagSeeds
 	}
+	if *flagFirst != "" {
+		o.FirstSeed = firstSeedFlag()
+	}
 	if o.FirstSeed == 0 {
 		o.FirstSeed = 1
 	}
@@ -148,6 +159,30 @@ func (o *Options) defaults() {
 	if *flagParallel > 0 {
 		o.Parallel = *flagParallel
 	}
+}
+
+var (
+	firstOnce sync.Once
+	firstSeed uint64
+)
+
+// firstSeedFlag parses -dst.first once per process, so every sweep in a
+// test binary starts from the same (possibly random) seed.
+func firstSeedFlag() uint64 {
+	firstOnce.Do(func() {
+		if *flagFirst == "random" {
+			// Wall-clock randomness is fine here: it only picks where the
+			// sweep starts, and the seed is printed so the sweep repeats.
+			firstSeed = 1 + rand.Uint64()%(1<<53)
+			return
+		}
+		n, err := strconv.ParseUint(*flagFirst, 10, 64)
+		if err != nil || n == 0 {
+			panic(fmt.Sprintf("dsttest: -dst.first=%q: want a positive number or \"random\"", *flagFirst))
+		}
+		firstSeed = n
+	})
+	return firstSeed
 }
 
 // Phase is where a run is.
@@ -187,14 +222,31 @@ type named[T any] struct {
 // Machine is a simulated machine (a process) the runner may crash,
 // restart and partition.
 type Machine struct {
-	m *simworld.Machine
-	h *Harness
+	m          *simworld.Machine
+	h          *Harness
+	neverCrash bool
 }
+
+// MachineOption configures a machine.
+type MachineOption func(*Machine)
+
+// NeverCrash exempts a machine from the runner's crashes: the nemesis never
+// crashes it and its disk never loses power inside an I/O call. It can
+// still be partitioned, and the test can still crash it with m.Crash.
+var NeverCrash MachineOption = func(m *Machine) { m.neverCrash = true }
 
 // Machine adds a machine running start (again after each restart), and
 // boots it. Its network address is its name ("db1:8080").
-func (h *Harness) Machine(name string, start func(w *dst.World)) *Machine {
-	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: h.swarm.disk()})
+func (h *Harness) Machine(name string, start func(w *dst.World), opts ...MachineOption) *Machine {
+	m := &Machine{h: h}
+	for _, o := range opts {
+		o(m)
+	}
+	disk := h.swarm.disk()
+	if m.neverCrash {
+		disk.IOCrashProb = 0
+	}
+	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: disk})
 	sm.Disk.OnCrashLoss = func(_ int, torn bool) {
 		h.Sometimes("disk lost unsynced writes")
 		if torn {
@@ -202,7 +254,7 @@ func (h *Harness) Machine(name string, start func(w *dst.World)) *Machine {
 		}
 	}
 	sm.Start = start
-	m := &Machine{m: sm, h: h}
+	m.m = sm
 	h.machines = append(h.machines, m)
 	sm.Boot()
 	return m
@@ -444,24 +496,8 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		w.Sleep(opts.RecoveryPhase)
 		// The workload had the recovery phase to finish; Final checks then
 		// look at a quiet end state.
-		var stuck []string
-		for _, t := range h.sim.S.Tasks() {
-			if t.Done() {
-				continue
-			}
-			for _, wl := range h.workload {
-				if t.DescendsFrom(wl) {
-					name := t.Name
-					if t != wl {
-						name = fmt.Sprintf("%s (started by %s)", t.Name, wl.Name)
-					}
-					stuck = append(stuck, fmt.Sprintf("%s: %s", name, t.Blocked()))
-					break
-				}
-			}
-		}
-		if len(stuck) > 0 {
-			h.Fail(&StuckError{Goroutines: stuck})
+		if err := h.unfinished(w); err != nil {
+			h.Fail(err)
 			return
 		}
 		h.phase = Checking
@@ -474,6 +510,67 @@ func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
 		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect}
+}
+
+// unfinished reports workload goroutines (and goroutines they started)
+// still running when the recovery phase ends. To tell slow from stuck, it
+// lets the fault-free system run for one more recovery phase: goroutines
+// that finish then were slow (reported with how late), the rest are stuck.
+func (h *Harness) unfinished(w *dst.World) error {
+	type late struct {
+		t      *sched.Task
+		name   string
+		why    string
+		doneAt time.Duration
+	}
+	var pending []*late
+	for _, t := range h.sim.S.Tasks() {
+		if t.Done() {
+			continue
+		}
+		for _, wl := range h.workload {
+			if t.DescendsFrom(wl) {
+				name := t.Name
+				if t != wl {
+					name = fmt.Sprintf("%s (started by %s)", t.Name, wl.Name)
+				}
+				pending = append(pending, &late{t: t, name: name, why: t.Blocked(), doneAt: -1})
+				break
+			}
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	start := w.Now()
+	for w.Since(start) < h.opts.RecoveryPhase {
+		left := 0
+		for _, p := range pending {
+			if p.doneAt < 0 {
+				if p.t.Done() {
+					p.doneAt = w.Since(start)
+				} else {
+					left++
+				}
+			}
+		}
+		if left == 0 {
+			break
+		}
+		w.Sleep(10 * time.Millisecond)
+	}
+	e := &StuckError{}
+	for _, p := range pending {
+		if p.doneAt < 0 && p.t.Done() {
+			p.doneAt = w.Since(start)
+		}
+		if p.doneAt >= 0 {
+			e.Slow = append(e.Slow, fmt.Sprintf("%s: finished ~%v after the recovery phase ended (was: %s)", p.name, p.doneAt.Round(10*time.Millisecond), p.why))
+		} else {
+			e.Stuck = append(e.Stuck, fmt.Sprintf("%s: %s", p.name, p.t.Blocked()))
+		}
+	}
+	return e
 }
 
 // nemesis injects faults until the fault phase ends.
@@ -494,7 +591,7 @@ func (h *Harness) nemesis(w *dst.World) {
 	}
 	var crash, partition func()
 	crash = func() {
-		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() })
+		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.neverCrash })
 		if len(alive) > 0 {
 			m := alive[r.IntN(len(alive))]
 			h.Logf("nemesis: crash %s", m.Name())
@@ -527,7 +624,7 @@ func (h *Harness) nemesis(w *dst.World) {
 		schedule(exp(sw.PartitionFor), func() { h.Heal() })
 		schedule(exp(sw.PartitionEvery), partition)
 	}
-	if sw.CrashEvery > 0 && len(h.machines) > 0 {
+	if sw.CrashEvery > 0 && slices.ContainsFunc(h.machines, func(m *Machine) bool { return !m.neverCrash }) {
 		schedule(exp(sw.CrashEvery), crash)
 	}
 	if sw.PartitionEvery > 0 && len(h.machines) > 0 {
@@ -562,12 +659,29 @@ type InvariantError struct {
 func (e *InvariantError) Error() string { return fmt.Sprintf("invariant %q broken: %v", e.Name, e.Err) }
 func (e *InvariantError) Unwrap() error { return e.Err }
 
-// StuckError reports workload goroutines that never finished: a deadlock,
-// or an operation that never completes even after the system recovered.
-type StuckError struct{ Goroutines []string }
+// StuckError reports workload goroutines still running when the recovery
+// phase ended. Slow ones finished when the system was given another
+// recovery phase (the phase is too short for them, or progress is too
+// slow); stuck ones didn't (a deadlock, a leak, or lost liveness).
+type StuckError struct {
+	Stuck []string
+	Slow  []string
+}
 
 func (e *StuckError) Error() string {
-	return "workload goroutines never finished (deadlock, leak or lost liveness; one waiting on a timeout may just be slow: replay with -dst.v, or lengthen RecoveryPhase):\n  " + strings.Join(e.Goroutines, "\n  ")
+	var b strings.Builder
+	if len(e.Stuck) > 0 {
+		b.WriteString("workload goroutines stuck (deadlock, leak or lost liveness: still blocked after a further recovery phase):\n  ")
+		b.WriteString(strings.Join(e.Stuck, "\n  "))
+	}
+	if len(e.Slow) > 0 {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("workload goroutines too slow (finished only after the recovery phase: lengthen RecoveryPhase if that's expected):\n  ")
+		b.WriteString(strings.Join(e.Slow, "\n  "))
+	}
+	return b.String()
 }
 
 // FinalError is a failed Final check.
@@ -581,6 +695,7 @@ func (e *FinalError) Unwrap() error { return e.Err }
 
 // Report is the outcome of a sweep.
 type Report struct {
+	FirstSeed        uint64
 	Runs             int
 	Failed           []Result
 	Nondeterministic []Divergence
@@ -672,7 +787,7 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 		}()
 	}
 	wg.Wait()
-	rep := Report{Coverage: map[string]int{}}
+	rep := Report{FirstSeed: opts.FirstSeed, Coverage: map[string]int{}}
 	expect := map[string]bool{}
 	for i, r := range results {
 		if r.Seed == 0 {
@@ -723,7 +838,7 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 		return Report{Runs: 1, Coverage: r.Coverage}
 	}
 	rep := Sweep(opts, setup)
-	t.Logf("%d seeds: %v simulated in %v (%.0fx), %d steps", rep.Runs, rep.SimTime.Round(time.Millisecond), rep.Wall.Round(time.Millisecond), float64(rep.SimTime)/float64(max(rep.Wall, 1)), rep.Steps)
+	t.Logf("%d seeds from %d: %v simulated in %v (%.0fx), %d steps", rep.Runs, rep.FirstSeed, rep.SimTime.Round(time.Millisecond), rep.Wall.Round(time.Millisecond), float64(rep.SimTime)/float64(max(rep.Wall, 1)), rep.Steps)
 	if len(rep.Coverage) > 0 {
 		var b strings.Builder
 		for _, k := range slices.Sorted(maps.Keys(rep.Coverage)) {
@@ -752,9 +867,9 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 }
 
 // IsDeadlock reports whether err is a deadlock report: every goroutine
-// blocked, or workload goroutines that never finished.
+// blocked, or workload goroutines stuck for good (not merely slow).
 func IsDeadlock(err error) bool {
 	var d *sched.DeadlockError
 	var s *StuckError
-	return errors.As(err, &d) || errors.As(err, &s)
+	return errors.As(err, &d) || (errors.As(err, &s) && len(s.Stuck) > 0)
 }
