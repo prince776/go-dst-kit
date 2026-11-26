@@ -20,6 +20,8 @@
 //   - [panic-reported] A panic in a task fails the run with the task's name
 //     and the panic site.
 //   - [crash-is-final] A crashed machine's tasks never run again.
+//   - [misuse-reported] A World operation from a goroutine the World
+//     didn't start, or from an invariant, fails the run with its stack.
 //   - [nothing-leaks] After Shutdown, no task goroutine is left running.
 //
 // This package is single-threaded by construction: every exported method is
@@ -32,8 +34,10 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -57,6 +61,11 @@ type Options struct {
 	// timer (for invariants). It must not use the World; returning an
 	// error fails the run.
 	AfterStep func() error
+	// StrictIdentity checks on every scheduling call that the caller is
+	// the goroutine holding the baton (about 1.8µs each). By default a
+	// cheap structural check runs on every call and the goroutine ID on
+	// every 16th.
+	StrictIdentity bool
 }
 
 // Scheduler runs tasks one at a time in an order decided by the seed.
@@ -73,11 +82,18 @@ type Scheduler struct {
 	hash     uint64
 	steps    uint64
 	checks   []uint64
+	failMu   sync.Mutex // a goroutine outside the World may report misuse
 	failure  error
 	machines []*Machine
-	queues   map[any][]*Task
-	ids      int
-	stopped  bool
+	calls    uint64 // scheduling calls, for sampling the identity check
+	loopGoid int64
+	// abort is closed when a misuse breaks the baton protocol: the loop
+	// stops at once instead of waiting for a handoff that may never come.
+	abort     chan struct{}
+	abortOnce sync.Once
+	queues    map[any][]*Task
+	ids       int
+	stopped   bool
 }
 
 // Machine is a group of tasks that live and die together: one process.
@@ -143,6 +159,7 @@ func New(opts Options) *Scheduler {
 	s := &Scheduler{
 		opts:    opts,
 		handoff: make(chan struct{}),
+		abort:   make(chan struct{}),
 		hash:    14695981039346656037,
 		queues:  map[any][]*Task{},
 	}
@@ -212,13 +229,21 @@ func (s *Scheduler) Verbose() bool { return s.opts.Logf != nil }
 
 // Fail ends the run with err (the first failure wins).
 func (s *Scheduler) Fail(err error) {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
 	if s.failure == nil {
 		s.failure = err
 	}
 }
 
 // Err returns the run's failure, if any.
-func (s *Scheduler) Err() error { return s.failure }
+func (s *Scheduler) Err() error {
+	s.failMu.Lock()
+	defer s.failMu.Unlock()
+	return s.failure
+}
+
+func (s *Scheduler) failed() bool { return s.Err() != nil }
 
 // Spawn starts fn as a new task on machine m. It runs when the seed picks
 // it; Spawn itself doesn't yield.
@@ -250,7 +275,7 @@ func (t *Task) main(fn func()) {
 			}
 		}
 		t.state = finished
-		t.s.handoff <- struct{}{}
+		t.s.handOff()
 	}()
 	if t.killed {
 		return
@@ -269,17 +294,75 @@ func (e *PanicError) Error() string {
 	return fmt.Sprintf("goroutine %s panicked: %v\n%s", e.Task, e.Value, e.Stack)
 }
 
-// Current returns the task holding the baton. It panics if called from
-// outside a task.
+// Current returns the task holding the baton, for an operation it is
+// about to make. It checks that the caller is that task's goroutine: a
+// World operation from anywhere else (a raw go statement, an Always
+// invariant, the test's own goroutine) fails the run with a MisuseError.
+//
+// The check is cheap by default: the task must still be in the running
+// state (an operation made on its behalf by another goroutine changes
+// that), and every 16th call compares goroutine IDs. StrictIdentity
+// compares them on every call.
 func (s *Scheduler) Current() *Task {
 	t := s.cur
 	if t == nil {
-		panic("dst: World used outside a goroutine started by the World")
+		s.misuse(nil)
 	}
 	if t.killed {
 		panic(killSignal{})
 	}
+	s.calls++
+	if t.state != running || s.opts.StrictIdentity || s.calls%16 == 0 {
+		if goid() != t.goid {
+			s.misuse(t)
+		}
+		if t.state != running {
+			// Our caller is the task, but another goroutine made an
+			// operation on its behalf earlier in this step.
+			s.misuse(t)
+		}
+	}
 	return t
+}
+
+// handOff gives the baton back to the loop (unless the run was aborted).
+func (s *Scheduler) handOff() {
+	select {
+	case s.handoff <- struct{}{}:
+	case <-s.abort:
+	}
+}
+
+// MisuseError reports a World operation made from a goroutine the World
+// didn't start, or from an invariant run between steps.
+type MisuseError struct {
+	msg   string
+	Stack string
+}
+
+func (e *MisuseError) Error() string { return e.msg + "\n" + e.Stack }
+
+// misuse reports a World operation from the wrong goroutine. holder is
+// the task holding the baton (nil between steps). It doesn't return.
+func (s *Scheduler) misuse(holder *Task) {
+	stack := callerStack()
+	if holder == nil && goid() == s.loopGoid {
+		// An invariant (or another callback run between steps) used the
+		// World; afterStep turns this into the run's failure.
+		panic(&MisuseError{msg: "an invariant (Always) or a callback run between steps used the World: it may only read state", Stack: stack})
+	}
+	msg := "a World operation was made from a goroutine this World didn't start (a raw go statement, or the test's own goroutine?)"
+	if holder != nil {
+		msg += fmt.Sprintf(" while %s was running", holder)
+	}
+	s.Fail(&MisuseError{msg: msg, Stack: stack})
+	s.abortOnce.Do(func() { close(s.abort) })
+	if holder != nil && goid() == holder.goid {
+		// The real task noticed; the foreign goroutine already ran. End
+		// this step cleanly: the run stops at the next handoff.
+		panic(killSignal{})
+	}
+	runtime.Goexit() // a foreign goroutine: stop it before it touches the run
 }
 
 // InTask reports whether a task holds the baton (false inside timer
@@ -292,7 +375,7 @@ func (s *Scheduler) Park(why string) {
 	t := s.Current()
 	t.state = parked
 	t.blocked = why
-	s.handoff <- struct{}{}
+	s.handOff()
 	<-t.wake
 	t.blocked = ""
 	if t.killed {
@@ -306,7 +389,7 @@ func (s *Scheduler) Yield() {
 	t := s.Current()
 	t.state = runnable
 	s.runnable = append(s.runnable, t)
-	s.handoff <- struct{}{}
+	s.handOff()
 	<-t.wake
 	if t.killed {
 		panic(killSignal{})
@@ -420,7 +503,7 @@ func (s *Scheduler) Crash(m *Machine) {
 		t := s.cur
 		t.state = parked
 		t.blocked = "crashed"
-		s.handoff <- struct{}{}
+		s.handOff()
 		<-t.wake
 		panic(killSignal{})
 	}
@@ -443,7 +526,8 @@ func (s *Scheduler) Restart(m *Machine) {
 func (s *Scheduler) Run(done func() bool) error {
 	wd := time.NewTimer(time.Hour)
 	defer wd.Stop()
-	for s.failure == nil && !done() {
+	s.loopGoid = goid()
+	for !s.failed() && !done() {
 		if s.opts.MaxSteps > 0 && s.steps >= s.opts.MaxSteps {
 			s.Fail(&LimitError{fmt.Sprintf("the run didn't finish within %d steps (t=%v)", s.opts.MaxSteps, s.now)})
 			break
@@ -459,15 +543,23 @@ func (s *Scheduler) Run(done func() bool) error {
 			}
 			t.state = running
 			s.cur = t
-			t.wake <- struct{}{}
+			select {
+			case t.wake <- struct{}{}:
+			case <-s.abort:
+				s.stopped, s.cur = true, nil
+				return s.Err()
+			}
 			wd.Reset(s.opts.Watchdog)
 			select {
+			case <-s.abort:
+				s.stopped, s.cur = true, nil
+				return s.Err()
 			case <-s.handoff:
 			case <-wd.C:
 				s.Fail(fmt.Errorf("goroutine %s kept running for %v of real time without reaching a World operation: it is probably blocked outside the World (a raw channel, sync primitive, time.Sleep, or I/O) or looping forever", t, s.opts.Watchdog))
 				s.stopped = true // it may still hold the baton; Shutdown must not wait for it
 				s.cur = nil
-				return s.failure
+				return s.Err()
 			}
 			wd.Stop()
 			s.cur = nil
@@ -493,14 +585,24 @@ func (s *Scheduler) Run(done func() bool) error {
 		}
 		s.Fail(s.deadlock())
 	}
-	return s.failure
+	return s.Err()
 }
 
 func (s *Scheduler) afterStep() {
-	if s.opts.AfterStep != nil && s.failure == nil {
-		if err := s.opts.AfterStep(); err != nil {
-			s.Fail(err)
+	if s.opts.AfterStep == nil || s.failed() {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			if m, ok := r.(*MisuseError); ok {
+				s.Fail(m) // an invariant used the World
+				return
+			}
+			panic(r)
 		}
+	}()
+	if err := s.opts.AfterStep(); err != nil {
+		s.Fail(err)
 	}
 }
 

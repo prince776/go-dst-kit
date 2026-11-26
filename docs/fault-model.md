@@ -10,7 +10,10 @@ a law in the package that implements it, with a test.
 - Every simulated goroutine is a real goroutine, but only one runs at a
   time. Each World operation (channel op, lock, sleep, I/O, `Select`) is a
   point where the scheduler may switch to another runnable goroutine,
-  chosen by the seed.
+  chosen by the seed. That includes `Lock` and `RLock`, so races between
+  separate critical sections are explored. Plain memory and `sync/atomic`
+  accesses between World operations are not interleaved (use `-race` for
+  data races).
 - Channels, `select`, locks, wait groups and contexts behave as Go
   specifies. The channel and select model is checked against a
   brute-force enumeration of Go's semantics, in both directions: every
@@ -23,7 +26,10 @@ a law in the package that implements it, with a test.
   goroutines, or goroutines they started, never finishing (deadlock, leak,
   or lost liveness); a panic in any goroutine (with your stack); a
   goroutine blocked outside the World for 10s of wall time (watchdog); a
-  run exceeding its step or time limit.
+  run exceeding its step or time limit; a World operation from a goroutine
+  the World didn't start, or from an `Always` invariant (checked strictly
+  on the determinism-checked seeds and replays, by sampling elsewhere, or
+  always with `Options.StrictIdentity`).
 
 ## Machines (`internal/simworld`)
 

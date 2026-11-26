@@ -123,6 +123,12 @@ type Options struct {
 	// KeepGoing reports every failing seed instead of stopping after the
 	// first few.
 	KeepGoing bool
+	// StrictIdentity checks on every scheduling call that the World is
+	// used only from goroutines it started (about 1.8µs per call). Without
+	// it, the determinism-checked seeds and replays are checked strictly
+	// and the rest by sampling: a leftover raw goroutine misuses the World
+	// in nearly every seed, so a few strict seeds catch it.
+	StrictIdentity bool
 }
 
 func (o *Options) defaults() {
@@ -463,15 +469,22 @@ type Result struct {
 // RunSeed runs one seed and returns its result. logf, if set, receives the
 // event log.
 func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any)) Result {
+	return runSeed(seed, opts, setup, logf, true)
+}
+
+// runSeed runs one seed; strict checks goroutine identity on every
+// scheduling call (always with Options.StrictIdentity).
+func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any), strict bool) Result {
 	opts.defaults()
 	swarm := newSwarm(seed, opts.Faults)
 	h := &Harness{opts: opts, swarm: swarm, cover: map[string]int{}}
 	h.sim = simworld.New(simworld.Options{
-		Seed:     seed,
-		Logf:     logf,
-		MaxTime:  opts.FaultPhase + opts.RecoveryPhase + time.Hour,
-		MaxSteps: opts.MaxSteps,
-		Net:      swarm.net(),
+		Seed:           seed,
+		Logf:           logf,
+		MaxTime:        opts.FaultPhase + opts.RecoveryPhase + time.Hour,
+		MaxSteps:       opts.MaxSteps,
+		Net:            swarm.net(),
+		StrictIdentity: strict || opts.StrictIdentity,
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
@@ -773,9 +786,11 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 				i := next
 				next++
 				mu.Unlock()
-				r := RunSeed(seeds[i], opts, setup, nil)
-				if r.Err != nil || i < opts.DeterminismChecks {
-					divs[i] = compare(r, RunSeed(seeds[i], opts, setup, nil))
+				checked := i < opts.DeterminismChecks
+				r := runSeed(seeds[i], opts, setup, nil, checked)
+				if r.Err != nil || checked {
+					// The rerun is strict too: a misuse may explain a failure.
+					divs[i] = compare(r, runSeed(seeds[i], opts, setup, nil, true))
 				}
 				results[i] = r
 				if r.Err != nil && !opts.KeepGoing {

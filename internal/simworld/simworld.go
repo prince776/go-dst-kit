@@ -41,6 +41,9 @@ type Options struct {
 	Net simnet.Options
 	// AfterStep runs after every scheduling step (see sched.Options).
 	AfterStep func() error
+	// StrictIdentity checks the caller's goroutine on every scheduling
+	// call (see sched.Options).
+	StrictIdentity bool
 }
 
 // Sim is one simulated run.
@@ -76,7 +79,7 @@ func New(opts Options) *Sim {
 	}
 	s := &Sim{
 		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
-			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep}),
+			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep, StrictIdentity: opts.StrictIdentity}),
 		machines: map[string]*Machine{},
 	}
 	s.Net = simnet.New(s.S, Epoch, opts.Net)

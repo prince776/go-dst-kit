@@ -387,3 +387,18 @@ func TestFirstSeedFlag(t *testing.T) {
 		t.Fatalf("random first seeds %s and %s", a, b)
 	}
 }
+
+// Verifies: [misuse-reported] (from an invariant)
+// Fails if: an Always invariant that uses the World isn't reported as such.
+func TestAlwaysMisuse(t *testing.T) {
+	r := dsttest.RunSeed(1, dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		h.Go(func(w *dst.World) { w.Sleep(time.Millisecond) })
+		h.Always("sleeps", func() error {
+			h.World().Sleep(time.Millisecond) // wrong: invariants only read state
+			return nil
+		})
+	}, nil)
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "an invariant (Always)") || !strings.Contains(r.Err.Error(), "dsttest_test.go") {
+		t.Fatalf("got %v", r.Err)
+	}
+}

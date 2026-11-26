@@ -102,6 +102,8 @@ otherwise waits.
   for it, `time.Sleep`, real I/O) stalls the simulator's single baton. It
   reports this after 10s of wall time (the watchdog) with the goroutine's
   stack, rather than hanging.
+- **A leftover `go` statement** whose goroutine uses the World is reported
+  as a misuse, with that goroutine's stack.
 
 ## 4. Do it a package at a time
 

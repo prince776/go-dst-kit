@@ -95,3 +95,22 @@ func isLibraryFrame(fn string) bool {
 	}
 	return false
 }
+
+// callerStack is the current goroutine's stack from the first frame
+// outside this library (for misuse reports).
+func callerStack() string {
+	lines := strings.Split(strings.TrimSpace(string(debug.Stack())), "\n")
+	var out []string
+	for i := 1; i+1 < len(lines); i += 2 {
+		fn := lines[i]
+		if len(out) == 0 && (isLibraryFrame(fn) || strings.HasPrefix(fn, "runtime/debug.") || strings.HasPrefix(fn, "runtime.")) {
+			continue
+		}
+		out = append(out, fn, lines[i+1])
+	}
+	return strings.Join(out, "\n")
+}
+
+// Active reports whether any simulated goroutine exists in this process:
+// zero-value primitives check it before paying for a goroutine lookup.
+func Active() bool { return active.Load() > 0 }

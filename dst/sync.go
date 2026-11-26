@@ -12,7 +12,13 @@ import (
 // World a contended Lock waits through the scheduler instead of blocking
 // the baton.
 //
-// An uncontended Lock is not a scheduling point.
+// In a simulated World, Lock (like RWMutex's Lock and RLock) is a
+// scheduling point: another goroutine may run before it acquires, as in
+// real Go, so races between separate critical sections are explored.
+//
+// Verified:
+//   - [lock-is-a-scheduling-point] Another goroutine may run before Lock
+//     acquires. So a lost update across two locked sections is found.
 type Mutex struct {
 	mu      sync.Mutex
 	waiters atomic.Int32 // simulated goroutines parked on this mutex
@@ -20,11 +26,9 @@ type Mutex struct {
 
 // Lock is (*sync.Mutex).Lock.
 func (m *Mutex) Lock() {
-	if m.mu.TryLock() {
-		return
-	}
-	if t := sched.CurrentTask(); t != nil {
+	if t := simTask(); t != nil {
 		s := t.Sched()
+		s.Yield() // another goroutine may get here first, as in real Go
 		for !m.mu.TryLock() {
 			m.waiters.Add(1)
 			s.ParkOn(m, "lock")
@@ -33,6 +37,15 @@ func (m *Mutex) Lock() {
 		return
 	}
 	m.mu.Lock()
+}
+
+// simTask is the calling simulated goroutine, or nil. Outside any
+// simulation it costs one (inlined) atomic load.
+func simTask() *sched.Task {
+	if !sched.Active() {
+		return nil
+	}
+	return sched.CurrentTask()
 }
 
 // TryLock is (*sync.Mutex).TryLock.
@@ -58,11 +71,9 @@ type RWMutex struct {
 
 // Lock is (*sync.RWMutex).Lock.
 func (m *RWMutex) Lock() {
-	if m.mu.TryLock() {
-		return
-	}
-	if t := sched.CurrentTask(); t != nil {
+	if t := simTask(); t != nil {
 		s := t.Sched()
+		s.Yield()
 		m.writersWaiting.Add(1)
 		for !m.mu.TryLock() {
 			m.waiters.Add(1)
@@ -83,11 +94,9 @@ func (m *RWMutex) Unlock() {
 
 // RLock is (*sync.RWMutex).RLock.
 func (m *RWMutex) RLock() {
-	if m.writersWaiting.Load() == 0 && m.mu.TryRLock() {
-		return
-	}
-	if t := sched.CurrentTask(); t != nil {
+	if t := simTask(); t != nil {
 		s := t.Sched()
+		s.Yield()
 		for m.writersWaiting.Load() > 0 || !m.mu.TryRLock() {
 			m.waiters.Add(1)
 			s.ParkOn(m, "lock (read)")

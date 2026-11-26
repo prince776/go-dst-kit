@@ -160,6 +160,18 @@ each one.
   workload hasn't finished, and reports what finished then as slow (with
   how late) and the rest as stuck. Exact, deterministic, and it costs
   extra only on failing seeds.
+- **Identity check, as built (M11)**: a goroutine ID costs 1.8µs (Go has
+  no cheaper way), against ~0.9µs per scheduling step, so checking every
+  call would make simulations ~3x slower. A cheap structural check (the
+  task must still be running) missed a real case in testing: a raw
+  goroutine that steals one grant and exits leaves every state
+  consistent. So the check is strict on the determinism-checked seeds,
+  failing seeds' reruns and replays (a leftover raw goroutine misuses the
+  World in nearly every seed), sampled 1 in 16 elsewhere, and strict
+  everywhere with `Options.StrictIdentity`. A misuse aborts the run at
+  once (no waiting for the watchdog). An Always invariant that uses the
+  World is always caught. The raw-goroutine test can't run under -race:
+  the misuse is a data race, which -race reports itself.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
@@ -197,7 +209,7 @@ a step-back when done.
 | # | Item | Design | Verification goals |
 |---|---|---|---|
 | 10 | `dst.Cond` (**done**) | Wait/Signal/Broadcast over dst.Mutex/RWMutex; real = sync.Cond, sim = scheduler wait queue; dstlint points sync.Cond users to it | contract checks in both Worlds: Signal wakes exactly one, Broadcast all, Wait reacquires the lock, a Signal with no waiter is lost |
-| 11 | Goroutine-identity check | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
+| 11 | Goroutine-identity check (**done**, with the mutex fix) | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
 | 12 | `Select2` / `Select3` | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
 | 13 | PCT scheduler | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
 | 14 | Per-machine clocks | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
@@ -217,7 +229,7 @@ a step-back when done.
 | channel round trip | 266ns | 295ns | 3.7µs |
 | select (2 ready cases) | 54ns | 225ns | - |
 | spawn + wait | 344ns | 390ns | 6.3µs |
-| mutex, 4 goroutines contending | 67ns | 52ns | 14ns (never contends: see finding) |
+| mutex, 4 goroutines contending | 67ns | 66ns | 3.1µs (Lock now yields) |
 | context WithTimeout + cancel | 298ns | 295ns | 347ns |
 | timer arm + stop | 131ns | 156ns | 166ns |
 | 4 KiB write + read | 1.7µs | 1.6µs | 2.2µs |
@@ -226,10 +238,14 @@ a step-back when done.
 | TCP 64 B round trip | 16.6µs | 18.4µs | 3.9µs |
 | HTTP GET | 37.7µs | 37.7µs | 33.3µs |
 
-Finding: `dst.Mutex.Lock` on a free mutex isn't a scheduling point, so in
-simulation two critical sections with no other World operation between
-them are never interleaved (a lost update across two locked sections
-can't be found). Fix proposed to Prince, not yet approved.
+Finding (fixed in M11): `dst.Mutex.Lock` on a free mutex wasn't a
+scheduling point, so in simulation two critical sections with no other
+World operation between them were never interleaved, and a lost update
+across them couldn't be found (200 of 200 seeds missed it; now both
+outcomes occur). Lock and RLock now yield first in simulation; the real
+World checks an inlined atomic and matches bare Go (66ns contended,
+13.8ns uncontended). A first version called the non-inlined lookup and
+cost 110ns contended; the benchmark caught it.
 
 ## Deferred
 
