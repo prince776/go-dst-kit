@@ -444,3 +444,33 @@ func TestSkewExplores(t *testing.T) {
 		}
 	}
 }
+
+// Verifies: [pauses-explore]
+// Fails if: Pause faults never pause a machine, or one is still paused in
+// the recovery phase.
+func TestPausesExplore(t *testing.T) {
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 30, Faults: dsttest.Faults{Pause: true}, FaultPhase: 5 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		for _, n := range []string{"a", "b"} {
+			h.Machine(n, func(w *dst.World) {
+				for {
+					w.Sleep(10 * time.Millisecond)
+				}
+			})
+		}
+		h.Always("nothing paused during recovery", func() error {
+			if h.Phase() < dsttest.Recovery {
+				return nil
+			}
+			for _, m := range h.Machines() {
+				if m.Paused() {
+					return fmt.Errorf("%s is paused in phase %v", m.Name(), h.Phase())
+				}
+			}
+			return nil
+		})
+		h.Expect("machine paused")
+	})
+	if !rep.OK() {
+		t.Fatalf("%+v %v %v", rep.Failed, rep.Nondeterministic, rep.NeverHappened)
+	}
+}

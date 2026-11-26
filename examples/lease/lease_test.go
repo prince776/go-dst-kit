@@ -40,6 +40,24 @@ func harness(bugs lease.Bugs, drift float64) func(h *dsttest.Harness) {
 			}
 			s.Serve(ln)
 		})
+		// The store plays a reliable storage service: never crashed (it can
+		// still be paused and partitioned).
+		var store *lease.Store
+		h.Machine("store", func(w *dst.World) {
+			store = lease.NewStore(w, bugs)
+			ln, err := w.Net().Listen("tcp", "store:2")
+			if err != nil {
+				h.Failf("listen: %v", err)
+				return
+			}
+			store.Serve(ln)
+		}, dsttest.NeverCrash)
+		h.Always("the store never accepts a stale holder's write", func() error {
+			if store != nil && store.Regressed != "" {
+				return fmt.Errorf("%s", store.Regressed)
+			}
+			return nil
+		})
 		clients := map[string]*lease.Client{}
 		var machines []*dsttest.Machine
 		for i := range 3 {
@@ -47,6 +65,7 @@ func harness(bugs lease.Bugs, drift float64) func(h *dsttest.Harness) {
 			machines = append(machines, h.Machine(name, func(w *dst.World) {
 				c := lease.NewClient(w, name, "lock:1", bugs)
 				c.MaxDrift = drift
+				c.Store = "store:2"
 				clients[name] = c // a restarted client starts with no lease
 				c.Run()
 			}))
@@ -77,14 +96,14 @@ func harness(bugs lease.Bugs, drift float64) func(h *dsttest.Harness) {
 func optsFor(drift float64) dsttest.Options {
 	return dsttest.Options{
 		Seeds:         300,
-		Faults:        dsttest.Faults{Crash: true, Partition: true, Network: true},
+		Faults:        dsttest.Faults{Crash: true, Partition: true, Network: true, Pause: true},
 		FaultPhase:    5 * time.Second,
 		RecoveryPhase: 2 * time.Second,
 		Clock:         dsttest.ClockOptions{MaxDrift: drift},
 	}
 }
 
-// Verifies: [one-holder], [lease-is-granted]
+// Verifies: [one-holder], [lease-is-granted], [writes-are-fenced]
 // Fails if: two clients ever believe they hold the lease at once, or no
 // one gets it after faults stop.
 func TestLease(t *testing.T) {
@@ -95,7 +114,8 @@ func TestLease(t *testing.T) {
 	}
 }
 
-// Each planted bug must be caught as two simultaneous holders.
+// Each planted bug must be caught: as two simultaneous holders, or as a
+// stale holder's write getting into the store.
 func TestPlantedBugs(t *testing.T) {
 	for name, c := range map[string]struct {
 		bugs  lease.Bugs
@@ -106,6 +126,7 @@ func TestPlantedBugs(t *testing.T) {
 		"ServerForgets":  {lease.Bugs{ServerForgets: true}, realistic},
 		"NoDriftMargin":  {lease.Bugs{NoDriftMargin: true}, exaggerated},
 		"AbsoluteExpiry": {lease.Bugs{AbsoluteExpiry: true}, realistic},
+		"NoFencing":      {lease.Bugs{NoFencing: true}, realistic},
 	} {
 		t.Run(name, func(t *testing.T) {
 			o := optsFor(c.drift)
@@ -114,7 +135,7 @@ func TestPlantedBugs(t *testing.T) {
 			if len(rep.Failed) == 0 {
 				t.Fatalf("%d seeds never caught %s", rep.Runs, name)
 			}
-			if err := rep.Failed[0].Err.Error(); !strings.Contains(err, "all believe they hold it") {
+			if err := rep.Failed[0].Err.Error(); !strings.Contains(err, "all believe they hold it") && !strings.Contains(err, "stale holder's write") {
 				t.Fatalf("%s caught for the wrong reason: %v", name, err)
 			}
 			t.Logf("caught at seed %d: %v", rep.Failed[0].Seed, rep.Failed[0].Err)

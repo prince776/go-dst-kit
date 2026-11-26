@@ -61,9 +61,10 @@ state the run uses must be created inside it.
 Each seed runs:
 
 1. **Faults** (`FaultPhase`, default 10s of simulated time): the runner
-   crashes and restarts machines, partitions the network (symmetric or
-   one way), and lets disks tear writes or lose power mid-I/O, at rates
-   drawn per seed. `Options.Faults` chooses the classes.
+   crashes and restarts machines, pauses them, partitions the network
+   (symmetric or one way), and lets disks tear writes or lose power
+   mid-I/O, at rates drawn per seed. `Options.Faults` chooses the classes.
+   Every machine also has its own clock, skewed within `Options.Clock`.
 2. **Recovery** (`RecoveryPhase`, default 10s): every machine is up, the
    network is whole, and no more faults happen. A correct system must
    make progress here; this is where liveness bugs show up as stuck

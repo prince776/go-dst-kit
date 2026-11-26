@@ -218,6 +218,15 @@ each one.
   (documented). The contended-mutex benchmark was also unfair (mutex and
   counter as separate allocations); side by side, dst.Mutex equals
   sync.Mutex.
+- **Pauses, as built (M15)**: the scheduler simply skips a paused
+  machine's goroutines; sleeps, timers and socket buffers then behave
+  like a stopped process with no extra code. The nemesis schedules pauses
+  after crashes and partitions so turning them on doesn't shift those.
+  The lease example gained Kleppmann's fencing: tokens of
+  generation<<32|grant, with the generation bumped on disk by atomic
+  replace before any grant, and a NeverCrash store. NoFencing is caught
+  in 16 of 300 seeds with pauses and 0 of 300 without: pauses find what
+  partitions and latency didn't.
 - **Real gRPC races on deadline**: a server's context ends with
   `DeadlineExceeded` or `Canceled` depending on whether the client's reset
   arrives first. The law is that the deadline reaches the server.
@@ -263,7 +272,7 @@ a step-back when done.
 | 17 | Fault points (approved 2026-11-26) | `dst.Inject(w, name) Fault` returns None, Fail (didn't happen) or FailAfter (happened, caller sees an error), sleeping any injected latency itself; real World always None. Per-point rates and latency drawn per seed, some seeds off; only in the fault phase; counted as coverage; per-point random streams derived from the name. Service outages: the nemesis fails every point under a prefix for a window (`Faults.Services`). `Options.Points` overrides rates by prefix. `w.Buggify(name)` shares the registry. Example: fake object store with conditional writes and a client library; planted blind retry (duplicate) and timeout-as-failure (lost ack); correct version uses ETag-style conditional writes | real World never injects; nothing outside the fault phase; each point fails in some seeds and is off in others; adding a point leaves other points' decisions unchanged; replay holds; planted bugs caught, correct client passes |
 | - | Fresh nightly seeds | `-dst.first=random` picks and prints a random first seed; the nightly CI sweep uses it, so each night explores new seeds (failures still print an exact replay) | flag test: random first seed differs across runs and is reported |
 | - | BUGGIFY | `w.Buggify(name)`: false in the real World; in simulation true at a per-seed rate for each named point, only during the fault phase, counted as coverage | real World always false; no firing outside the fault phase; each point fires in some seeds and is off in others; replay holds |
-| - | Process pauses | the nemesis freezes a machine for a drawn duration (GC pause, VM stall): its goroutines don't run, its timers fire late at resume, data sent to it queues, its clock keeps going. Lease example gains a storage server and a planted NoFencing bug | a paused machine takes no steps while paused; its timers fire at resume, not before; other machines run normally; NoFencing caught, the fenced version passes |
+| - | Process pauses (**done**, as M15) | the nemesis freezes a machine for a drawn duration (GC pause, VM stall): its goroutines don't run, its timers fire late at resume, data sent to it queues, its clock keeps going. Lease example gains a storage server and a planted NoFencing bug | a paused machine takes no steps while paused; its timers fire at resume, not before; other machines run normally; NoFencing caught, the fenced version passes |
 | - | Stuck versus slow | the stuck-workload report splits goroutines waiting on a timer or deadline (likely slow) from those with nothing left to wake them (stuck) | a test with one of each classifies both correctly |
 | - | Mutex as a scheduling point | in simulation `Lock`/`RLock` yield before acquiring (a process-wide "simulation running" flag keeps the real World free); folded into the identity-check milestone (11) | a lost update across two locked sections is found; real-World mutex benchmark unchanged |
 | - | `NeverCrash` machine option | `h.Machine(name, start, dsttest.NeverCrash)` exempts a machine from the nemesis's crashes (still partitionable) | a NeverCrash machine is never crashed across a crash-heavy sweep; others still are |

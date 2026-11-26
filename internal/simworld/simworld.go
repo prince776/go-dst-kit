@@ -143,6 +143,15 @@ func (m *Machine) Restart() {
 	m.Boot()
 }
 
+// Pause stops the machine without crashing it; Resume lets it run again.
+func (m *Machine) Pause() { m.sim.S.Pause(m.M) }
+
+// Resume lets a paused machine run again.
+func (m *Machine) Resume() { m.sim.S.Resume(m.M) }
+
+// Paused reports whether the machine is paused.
+func (m *Machine) Paused() bool { return m.M.Paused() }
+
 // Dead reports whether the machine is crashed.
 func (m *Machine) Dead() bool { return m.M.Dead() }
 

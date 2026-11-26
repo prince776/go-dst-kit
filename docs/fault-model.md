@@ -54,6 +54,12 @@ a law in the package that implements it, with a test.
 - **Restart** runs the machine's start function again on what its disk
   kept. It's a new incarnation: nothing in memory survives.
 - A machine can also lose power inside an I/O call (below).
+- **Pause** stops a machine without crashing it, like SIGSTOP, a long GC
+  pause or a VM stall: its goroutines don't run, so its sleeps and timers
+  return late, while its clock keeps going and data sent to it waits in
+  its socket buffers. On resume it carries on as if nothing happened,
+  except that time has jumped. Pause lengths are drawn per seed from 10ms
+  to 2s.
 
 ## Disk (`internal/simfs`)
 

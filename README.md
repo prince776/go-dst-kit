@@ -37,9 +37,10 @@ writes, a partition during a handover, a retry that arrives after a
 timeout. Ordinary tests don't reach them, and when a flaky test does, you
 can't reproduce it. Under simulation:
 
-- **Everything is explored**: goroutine order, network latency,
-  partitions, resets, process crashes, power loss that drops unsynced
-  writes or tears them. Each seed draws its own mix of faults (swarm
+- **Everything is explored**: goroutine order (uniform and PCT), network
+  latency, partitions, resets, process crashes and pauses, power loss
+  that drops unsynced writes or tears them, and clock skew between
+  machines. Each seed draws its own mix of faults (swarm
   testing).
 - **Everything replays**: same seed, same run, step for step, with an
   event log (`-dst.v`).
@@ -102,7 +103,7 @@ every planted bug is caught, for the right reason.
 |---|---|
 | [wal](examples/wal): checksummed write-ahead log | no fsync, no directory fsync, appending after a torn tail |
 | [dedupe](examples/dedupe): exactly-once over retries | dedupe set in memory, "seen" logged separately from the effect |
-| [lease](examples/lease): lock service with leases | lease timed from the reply, no step-down, restarted server forgets |
+| [lease](examples/lease): lock service with leases and fenced writes | lease timed from the reply, no step-down, restarted server forgets, no drift margin, trusting the server's timestamp, no fencing (found only with pauses) |
 | [gcounter](examples/gcounter): gossiped CRDT counter | merge by sum, rename without fsync |
 | [twophase](examples/twophase): two-phase commit | participant decides alone, decision sent before logged, prepare not logged |
 | [workerpool](examples/workerpool): bounded parallel map | `wg.Add` in the worker, goroutine leak on error, channel closed early |

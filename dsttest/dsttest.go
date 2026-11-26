@@ -18,8 +18,8 @@
 // seeds: keep every piece of state the run uses inside it.
 //
 // Each seed runs in phases. During the fault phase the runner crashes and
-// restarts machines, partitions the network and lets disks lose unsynced
-// data, at rates chosen per seed (swarm testing: some seeds turn whole
+// restarts machines, pauses them, partitions the network and lets disks
+// lose unsynced data, at rates chosen per seed (swarm testing: some seeds turn whole
 // fault classes off). During the recovery phase every machine is back and
 // the network is whole: a correct system must recover. Then the Final
 // checks run. A failing seed prints:
@@ -57,6 +57,8 @@
 //     and -dst.first=N from N.
 //   - [skew-explores] Machine clocks stay within the Clock bounds; fast,
 //     slow and at-bound clocks all occur.
+//   - [pauses-explore] With Pause faults the runner pauses machines and
+//     resumes every one by the recovery phase.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -99,10 +101,11 @@ type Faults struct {
 	Partition bool // partition the network, symmetrically or one way
 	Disk      bool // torn writes and power loss inside I/O calls
 	Network   bool // connection resets and latency spikes
+	Pause     bool // pause machines without crashing them (GC pauses, VM stalls)
 }
 
 // AllFaults enables every fault class.
-var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true}
+var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true}
 
 // Options configure a sweep.
 type Options struct {
@@ -336,6 +339,21 @@ func (m *Machine) Crash() {
 	}
 }
 
+// Pause stops the machine without crashing it: its goroutines don't run,
+// its timers fire late, while its clock and the network carry on.
+func (m *Machine) Pause() {
+	if !m.m.Dead() && !m.m.Paused() {
+		m.h.Sometimes("machine paused")
+		m.m.Pause()
+	}
+}
+
+// Resume lets a paused machine run again.
+func (m *Machine) Resume() { m.m.Resume() }
+
+// Paused reports whether the machine is paused.
+func (m *Machine) Paused() bool { return m.m.Paused() }
+
 // Restart restarts a crashed machine.
 func (m *Machine) Restart() {
 	if m.m.Dead() {
@@ -445,6 +463,9 @@ type Swarm struct {
 
 	PCTDepth   int    // 0: uniform scheduling; else PCT with this depth
 	PCTHorizon uint64 // steps PCT's priority drops are drawn from
+
+	PauseEvery time.Duration // mean time between machine pauses (0: none)
+	PauseFor   time.Duration // mean pause length
 }
 
 func (s Swarm) disk() simfs.Options {
@@ -458,7 +479,8 @@ func (s Swarm) net() simnet.Options {
 func (s Swarm) String() string {
 	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
-		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched()
+		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
+		fmt.Sprintf(", pause every ~%v (for ~%v)", s.PauseEvery, s.PauseFor)
 }
 
 func (s Swarm) sched() string {
@@ -519,6 +541,13 @@ func newSwarm(seed uint64, f Faults) Swarm {
 		s.PCTDepth = 1 + r.IntN(3)
 		s.PCTHorizon = uint64(math.Pow(10, 2+3*r.Float64()))
 	}
+	// Pauses, drawn after everything above for the same reason. Lengths
+	// are log-uniform from 10ms (a GC pause) to 2s (a VM stall).
+	pauseEvery := sometimes(r, time.Duration(500+r.IntN(4000))*time.Millisecond)
+	pauseFor := time.Duration(math.Pow(10, 1+2.3*r.Float64())) * time.Millisecond
+	if f.Pause {
+		s.PauseEvery, s.PauseFor = pauseEvery, pauseFor
+	}
 	return s
 }
 
@@ -577,6 +606,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		h.sim.Net.StopFaults()
 		for _, m := range h.machines {
 			m.m.Disk.StopFaults() // no more power loss inside I/O
+			m.Resume()
 			m.Restart()
 		}
 		w.Sleep(opts.RecoveryPhase)
@@ -675,7 +705,7 @@ func (h *Harness) nemesis(w *dst.World) {
 	schedule := func(after time.Duration, fn func()) {
 		events = append(events, event{w.Now().Add(after), fn})
 	}
-	var crash, partition func()
+	var crash, partition, pause func()
 	crash = func() {
 		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.neverCrash })
 		if len(alive) > 0 {
@@ -710,11 +740,28 @@ func (h *Harness) nemesis(w *dst.World) {
 		schedule(exp(sw.PartitionFor), func() { h.Heal() })
 		schedule(exp(sw.PartitionEvery), partition)
 	}
+	pause = func() {
+		up := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.Paused() })
+		if len(up) > 0 {
+			m := up[r.IntN(len(up))]
+			h.Logf("nemesis: pause %s", m.Name())
+			m.Pause()
+			schedule(exp(sw.PauseFor), func() {
+				h.Logf("nemesis: resume %s", m.Name())
+				m.Resume()
+			})
+		}
+		schedule(exp(sw.PauseEvery), pause)
+	}
 	if sw.CrashEvery > 0 && slices.ContainsFunc(h.machines, func(m *Machine) bool { return !m.neverCrash }) {
 		schedule(exp(sw.CrashEvery), crash)
 	}
 	if sw.PartitionEvery > 0 && len(h.machines) > 0 {
 		schedule(exp(sw.PartitionEvery), partition)
+	}
+	// Last, so turning pauses on leaves crash and partition timing as it was.
+	if sw.PauseEvery > 0 && len(h.machines) > 0 {
+		schedule(exp(sw.PauseEvery), pause)
 	}
 	for {
 		next := end

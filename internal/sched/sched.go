@@ -110,6 +110,8 @@ type Scheduler struct {
 	dropped  int      // how many drops happened
 	lastPick *Task
 	streak   int // consecutive picks of lastPick while others could run
+	pausedN  int // machines paused now
+	eligible []int
 	loopGoid int64
 	// abort is closed when a misuse breaks the baton protocol: the loop
 	// stops at once instead of waiting for a handoff that may never come.
@@ -130,7 +132,11 @@ type Machine struct {
 	s           *Scheduler
 	onCrash     []func()
 	clock       Clock
+	paused      bool
 }
+
+// Paused reports whether the machine is paused.
+func (m *Machine) Paused() bool { return m.paused }
 
 // Clock is a machine's clock: its local time is Offset + Rate x the
 // simulation's true time. It belongs to the machine, not the process, so
@@ -265,19 +271,30 @@ func New(opts Options) *Scheduler {
 // highest priority can't starve the goroutine it waits for.
 const starveLimit = 100
 
-// pick removes and returns the next task to run.
+// pick removes and returns the next task to run, or nil if every
+// runnable task is on a paused machine.
 func (s *Scheduler) pick() *Task {
-	n := len(s.runnable)
+	// The candidates: runnable tasks whose machine isn't paused.
+	s.eligible = s.eligible[:0]
+	for i, t := range s.runnable {
+		if s.pausedN == 0 || !t.Machine.paused {
+			s.eligible = append(s.eligible, i)
+		}
+	}
+	n := len(s.eligible)
+	if n == 0 {
+		return nil
+	}
 	if s.pctRng == nil {
-		i := s.rng.IntN(n)
+		i := s.eligible[s.rng.IntN(n)]
 		t := s.runnable[i]
 		s.runnable = slices.Delete(s.runnable, i, i+1)
 		return t
 	}
 	best := func() int {
-		b := 0
-		for i, t := range s.runnable {
-			if t.prio > s.runnable[b].prio {
+		b := s.eligible[0]
+		for _, i := range s.eligible {
+			if s.runnable[i].prio > s.runnable[b].prio {
 				b = i
 			}
 		}
@@ -297,8 +314,8 @@ func (s *Scheduler) pick() *Task {
 		s.streak++
 		if s.streak >= starveLimit {
 			low := t.prio
-			for _, u := range s.runnable {
-				low = min(low, u.prio)
+			for _, j := range s.eligible {
+				low = min(low, s.runnable[j].prio)
 			}
 			t.prio = low - 1
 			s.streak = 0
@@ -640,6 +657,10 @@ func (s *Scheduler) Crash(m *Machine) {
 		return
 	}
 	m.dead = true
+	if m.paused { // a crash ends a pause (and Restart starts unpaused)
+		m.paused = false
+		s.pausedN--
+	}
 	s.Logf("crash %s", m.Name)
 	s.Trace(0xc7a5, uint64(m.ID))
 	s.runnable = slices.DeleteFunc(s.runnable, func(t *Task) bool { return t.Machine == m })
@@ -674,6 +695,31 @@ func (s *Scheduler) Restart(m *Machine) {
 	s.Trace(0x2e57, uint64(m.ID))
 }
 
+// Pause stops a machine without crashing it (SIGSTOP, a long GC pause, a
+// VM stall): its goroutines don't run until Resume, so its timers fire
+// late, while its clock, its disk and the network carry on (data sent to
+// it waits in its socket buffers).
+func (s *Scheduler) Pause(m *Machine) {
+	if m.dead || m.paused {
+		return
+	}
+	m.paused = true
+	s.pausedN++
+	s.Logf("pause %s", m.Name)
+	s.Trace(0x9a05e, uint64(m.ID))
+}
+
+// Resume lets a paused machine run again.
+func (s *Scheduler) Resume(m *Machine) {
+	if !m.paused {
+		return
+	}
+	m.paused = false
+	s.pausedN--
+	s.Logf("resume %s", m.Name)
+	s.Trace(0x7e50e, uint64(m.ID))
+}
+
 // Run runs tasks until done reports true, a task fails, or the run
 // deadlocks. done is checked between steps.
 func (s *Scheduler) Run(done func() bool) error {
@@ -685,8 +731,7 @@ func (s *Scheduler) Run(done func() bool) error {
 			s.Fail(&LimitError{fmt.Sprintf("the run didn't finish within %d steps (t=%v)", s.opts.MaxSteps, s.now)})
 			break
 		}
-		if len(s.runnable) > 0 {
-			t := s.pick()
+		if t := s.pick(); t != nil {
 			s.Trace(uint64(t.ID))
 			s.steps++
 			if s.steps%s.opts.CheckpointEvery == 0 {
@@ -762,7 +807,11 @@ func (s *Scheduler) deadlock() error {
 	fmt.Fprintf(&b, "deadlock at t=%v: no goroutine can run and no timer is pending", s.now)
 	for _, t := range s.tasks {
 		if t.state != finished && !t.killed {
-			fmt.Fprintf(&b, "\n  %s: %s", t, t.blocked)
+			why := t.blocked
+			if t.Machine.paused {
+				why = "paused machine (never resumed)"
+			}
+			fmt.Fprintf(&b, "\n  %s: %s", t, why)
 		}
 	}
 	return &DeadlockError{msg: b.String()}
