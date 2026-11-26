@@ -53,13 +53,17 @@ type bug struct {
 }
 
 type record struct {
-	Seed     uint64         `json:"seed"`
-	Index    int            `json:"index"`
-	Failed   bool           `json:"failed"`
-	Error    string         `json:"error"`
-	WallNS   int64          `json:"wall_ns"`
-	Coverage map[string]int `json:"coverage"`
+	Seed     uint64          `json:"seed"`
+	Index    int             `json:"index"`
+	Failed   bool            `json:"failed"`
+	Error    string          `json:"error"`
+	WallNS   int64           `json:"wall_ns"`
+	Coverage map[string]int  `json:"coverage"`
+	Features map[string]bool `json:"features"`
 }
+
+// split is a cell's failures among seeds with a feature on and off.
+type split struct{ FailOn, On, FailOff, Off int }
 
 // cell is one (bug, sweep) measurement.
 type cell struct {
@@ -72,7 +76,8 @@ type cell struct {
 	FirstError       string
 	Wall             float64 // the cell's wall-clock seconds
 	HeldOut          bool
-	ExpectedFailures bool // false for the baseline
+	ExpectedFailures bool             // false for the baseline
+	Features         map[string]split // per workload feature (Harness.Feature)
 }
 
 func main() {
@@ -202,6 +207,24 @@ func measure(dir string, cfg config, bugName, test, reached string, seeds int, f
 		if reached != "" && r.Coverage[reached] > 0 {
 			reachedN++
 		}
+		for f, on := range r.Features {
+			if c.Features == nil {
+				c.Features = map[string]split{}
+			}
+			sp := c.Features[f]
+			if on {
+				sp.On++
+				if r.Failed {
+					sp.FailOn++
+				}
+			} else {
+				sp.Off++
+				if r.Failed {
+					sp.FailOff++
+				}
+			}
+			c.Features[f] = sp
+		}
 	}
 	if reached != "" {
 		c.Reached = float64(reachedN) / float64(len(recs))
@@ -248,6 +271,27 @@ func report(cells []cell, seeds int) {
 		}
 	}
 	w.Flush()
+	// Features that change a bug's rate a lot: one that hides a bug needs
+	// the seeds without it; one that exposes it, a larger share of seeds.
+	var notes []string
+	for _, c := range cells {
+		for _, f := range sortedKeys(c.Features) {
+			sp := c.Features[f]
+			if sp.On == 0 || sp.Off == 0 || sp.FailOn+sp.FailOff < 3 {
+				continue
+			}
+			on, off := float64(sp.FailOn)/float64(sp.On), float64(sp.FailOff)/float64(sp.Off)
+			lo, hi := math.Min(on, off), math.Max(on, off)
+			if hi >= 3*lo { // 3x either way (or one side never fails)
+				notes = append(notes, fmt.Sprintf("  %s under %s: with %s on %d/%d failed, off %d/%d",
+					orBaseline(c.Bug), c.Test, f, sp.FailOn, sp.On, sp.FailOff, sp.Off))
+			}
+		}
+	}
+	if len(notes) > 0 {
+		fmt.Println("\nworkload features that change a bug's rate 3x or more:")
+		fmt.Println(strings.Join(notes, "\n"))
+	}
 	byBug := map[string]bool{}
 	for _, c := range cells {
 		if c.ExpectedFailures {
@@ -276,6 +320,15 @@ func report(cells []cell, seeds int) {
 	if len(missed) > 0 {
 		fmt.Printf("never found: %s\n", strings.Join(missed, ", "))
 	}
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func fatal(err error) {
