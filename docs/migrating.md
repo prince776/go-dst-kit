@@ -108,7 +108,9 @@ dst.Select2(w,
 - **Libraries that wait on their own**: anything that starts goroutines,
   sleeps, or does I/O inside. Wrap them behind an interface and give the
   simulation a World-based implementation, or use an adapter (`dsthttp`,
-  `dstgrpc`). A receive-only channel a library hands you can be used in
+  `dstgrpc`). For a client of a service you don't run (cloud storage, a
+  managed database), the implementation is a fake: give it fault points
+  (`dst.Inject`) so the runner can make the service fail. A receive-only channel a library hands you can be used in
   the real World with `dst.RecvOnly`, not in a simulated one.
 - **Raw blocking** (a plain channel, `sync.Mutex` held while someone waits
   for it, `time.Sleep`, real I/O) stalls the simulator's single baton. It

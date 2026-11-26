@@ -59,6 +59,14 @@
 //     slow and at-bound clocks all occur.
 //   - [pauses-explore] With Pause faults the runner pauses machines and
 //     resumes every one by the recovery phase.
+//   - [points-only-in-fault-phase] Fault points fail and Buggify points
+//     fire only during the fault phase, and never with Faults.Points and
+//     Faults.Services off.
+//   - [outages-explore] With Services faults the runner takes whole
+//     services down: every point of the service fails together.
+//   - [fault-classes-independent] Turning on pauses, outages or fault
+//     points leaves the times of each seed's crashes and partitions as
+//     they were.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -80,6 +88,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/internal/points"
 	"github.com/prince776/go-dst-kit/internal/sched"
 	"github.com/prince776/go-dst-kit/internal/simfs"
 	"github.com/prince776/go-dst-kit/internal/simnet"
@@ -102,10 +111,22 @@ type Faults struct {
 	Disk      bool // torn writes and power loss inside I/O calls
 	Network   bool // connection resets, latency spikes, datagram loss and duplication
 	Pause     bool // pause machines without crashing them (GC pauses, VM stalls)
+	Points    bool // fault points (dst.Inject) and Buggify points fire
+	Services  bool // service outages: every point of a service fails for a while
 }
 
 // AllFaults enables every fault class.
-var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true}
+var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true}
+
+// Point sets a fault point's behaviour for every seed, replacing the
+// per-seed draw (see Options.Points). The zero Point never fires.
+type Point struct {
+	Fail      float64       // chance a call fails without the operation happening
+	FailAfter float64       // chance a call fails after the operation happened
+	Slow      float64       // chance a call is slowed
+	Latency   time.Duration // mean added latency of a slowed call
+	Fire      float64       // for Buggify points: chance a call returns true
+}
 
 // Options configure a sweep.
 type Options struct {
@@ -131,6 +152,13 @@ type Options struct {
 	KeepGoing bool
 	// Clock bounds the machines' clocks (see ClockOptions).
 	Clock ClockOptions
+	// Points overrides fault points by name prefix, the longest matching
+	// prefix winning: {"objstore.": {}} silences the objstore points,
+	// {"objstore.put": {FailAfter: 0.1}} makes 10% of puts lose their
+	// reply. Points no prefix matches keep their per-seed draw: quiet in a
+	// third of seeds, else failing 0.1% to 20% of calls (a random share of
+	// those after acting), sometimes slowed by 1ms to 1s.
+	Points map[string]Point
 	// StrictIdentity checks on every scheduling call that the World is
 	// used only from goroutines it started (about 1.8µs per call). Without
 	// it, the determinism-checked seeds and replays are checked strictly
@@ -244,6 +272,7 @@ type Harness struct {
 	always   []named[func() error]
 	final    []named[func(w *dst.World) error]
 	cover    map[string]int
+	points   *points.Registry
 	expect   []string
 	workload []*sched.Task
 }
@@ -469,6 +498,9 @@ type Swarm struct {
 
 	UDPLossProb float64 // chance a datagram is lost
 	UDPDupProb  float64 // chance a datagram is delivered twice
+
+	OutageEvery time.Duration // mean time between service outages (0: none)
+	OutageFor   time.Duration // mean outage length
 }
 
 func (s Swarm) disk() simfs.Options {
@@ -483,7 +515,7 @@ func (s Swarm) String() string {
 	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
 		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
-		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}", s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb)
+		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v)", s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor)
 }
 
 func (s Swarm) sched() string {
@@ -558,6 +590,14 @@ func newSwarm(seed uint64, f Faults) Swarm {
 	if f.Network {
 		s.UDPLossProb, s.UDPDupProb = udpLoss, udpDup
 	}
+	// Service outages, last again; lengths log-uniform from 10ms to 3s.
+	// (Fault points draw their own settings, from streams named after
+	// them.)
+	outageEvery := sometimes(r, time.Duration(500+r.IntN(4000))*time.Millisecond)
+	outageFor := time.Duration(math.Pow(10, 1+2.5*r.Float64())) * time.Millisecond
+	if f.Services {
+		s.OutageEvery, s.OutageFor = outageEvery, outageFor
+	}
 	return s
 }
 
@@ -606,11 +646,15 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 			return nil
 		},
 	})
+	h.points = newRegistry(seed, opts, h.Sometimes, h.Logf)
+	h.sim.S.Points = h.points
 	h.test = h.sim.Machine("test")
 	r := h.sim.RunOn(h.test, func(w *dst.World) {
 		setup(h)
 		h.phase = Faulty
+		h.points.SetActive(true)
 		h.nemesis(w)
+		h.points.SetActive(false) // and every outage with it
 		h.phase = Recovery
 		h.Heal()
 		h.sim.Net.StopFaults()
@@ -707,6 +751,12 @@ func (h *Harness) nemesis(w *dst.World) {
 	exp := func(mean time.Duration) time.Duration {
 		return time.Duration(r.ExpFloat64() * float64(mean))
 	}
+	// Classes added later draw from their own streams, so turning them on
+	// leaves the crash and partition schedule of each seed as it was.
+	rp, ro := h.sim.S.Rand("nemesis/pause"), h.sim.S.Rand("nemesis/outage")
+	expFrom := func(rr *rand.Rand, mean time.Duration) time.Duration {
+		return time.Duration(rr.ExpFloat64() * float64(mean))
+	}
 	type event struct {
 		at time.Time
 		fn func()
@@ -715,7 +765,20 @@ func (h *Harness) nemesis(w *dst.World) {
 	schedule := func(after time.Duration, fn func()) {
 		events = append(events, event{w.Now().Add(after), fn})
 	}
-	var crash, partition, pause func()
+	var crash, partition, pause, outage func()
+	outage = func() {
+		if svcs := h.points.Services(); len(svcs) > 0 {
+			svc := svcs[ro.IntN(len(svcs))]
+			h.Logf("nemesis: outage of %s", svc)
+			h.Sometimes("service outage")
+			h.points.SetDown(svc, true)
+			schedule(expFrom(ro, sw.OutageFor), func() {
+				h.Logf("nemesis: %s is back", svc)
+				h.points.SetDown(svc, false)
+			})
+		}
+		schedule(expFrom(ro, sw.OutageEvery), outage)
+	}
 	crash = func() {
 		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.neverCrash })
 		if len(alive) > 0 {
@@ -753,15 +816,15 @@ func (h *Harness) nemesis(w *dst.World) {
 	pause = func() {
 		up := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.Paused() })
 		if len(up) > 0 {
-			m := up[r.IntN(len(up))]
+			m := up[rp.IntN(len(up))]
 			h.Logf("nemesis: pause %s", m.Name())
 			m.Pause()
-			schedule(exp(sw.PauseFor), func() {
+			schedule(expFrom(rp, sw.PauseFor), func() {
 				h.Logf("nemesis: resume %s", m.Name())
 				m.Resume()
 			})
 		}
-		schedule(exp(sw.PauseEvery), pause)
+		schedule(expFrom(rp, sw.PauseEvery), pause)
 	}
 	if sw.CrashEvery > 0 && slices.ContainsFunc(h.machines, func(m *Machine) bool { return !m.neverCrash }) {
 		schedule(exp(sw.CrashEvery), crash)
@@ -769,9 +832,11 @@ func (h *Harness) nemesis(w *dst.World) {
 	if sw.PartitionEvery > 0 && len(h.machines) > 0 {
 		schedule(exp(sw.PartitionEvery), partition)
 	}
-	// Last, so turning pauses on leaves crash and partition timing as it was.
 	if sw.PauseEvery > 0 && len(h.machines) > 0 {
-		schedule(exp(sw.PauseEvery), pause)
+		schedule(expFrom(rp, sw.PauseEvery), pause)
+	}
+	if sw.OutageEvery > 0 { // after pauses, for the same reason
+		schedule(expFrom(ro, sw.OutageEvery), outage)
 	}
 	for {
 		next := end
@@ -1017,4 +1082,19 @@ func IsDeadlock(err error) bool {
 	var d *sched.DeadlockError
 	var s *StuckError
 	return errors.As(err, &d) || (errors.As(err, &s) && len(s.Stuck) > 0)
+}
+
+// newRegistry builds a seed's fault-point registry. With Faults.Points
+// off, every point is quiet (service outages still fail them).
+func newRegistry(seed uint64, opts Options, cover func(string), logf func(string, ...any)) *points.Registry {
+	ov := map[string]points.Config{}
+	for prefix, p := range opts.Points {
+		ov[prefix] = points.Config(p)
+	}
+	if !opts.Faults.Points {
+		ov = map[string]points.Config{"": {}}
+	}
+	r := points.New(seed, ov)
+	r.Cover, r.Logf = cover, logf
+	return r
 }

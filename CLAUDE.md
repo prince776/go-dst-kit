@@ -16,12 +16,13 @@ waits or is nondeterministic. The design and its approved decisions:
 | `internal/simfs/`, `internal/simnet/` | crash-prone disk; network with TCP-like streams and UDP |
 | `internal/simworld/` | wires them into simulated Worlds and machines |
 | `internal/worldtest/` | the contract suite run against both Worlds |
+| `internal/points/` | fault-point registry behind `dst.Inject` and `w.Buggify` |
 | `dsttest/` | the runner: seeds, swarm faults, phases, invariants, replay |
 | `check/` | linearizability checker, KV model, World-timed History |
 | `dsthttp/` | net/http over the World |
 | `dstgrpc/` | gRPC over the World (own module: grpc v1.84.0, the last for Go 1.25) |
 | `dstlint/` | analyzer for `//dst:simulated` packages (own module: x/tools) |
-| `examples/` | own module: wal, dedupe, lease, heartbeat, gcounter, twophase, workerpool |
+| `examples/` | own module: wal, dedupe, lease, heartbeat, objstore, gcounter, twophase, workerpool |
 
 The library module (`go.mod`, Go 1.25) has **no dependencies**; keep it
 that way. Public APIs must not expose `internal/` types.

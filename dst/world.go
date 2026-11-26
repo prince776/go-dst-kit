@@ -37,9 +37,11 @@
 //     to become ready.
 //   - [timers-follow-world-clock] Timers, tickers, Sleep and context
 //     deadlines fire by the World's clock, in deadline order.
+//   - [real-never-injects] In the real World, Inject always returns None,
+//     Do always runs its operation, and Buggify is always false.
 //
 // Children: World, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
-// Ticker, WithCancel, WithTimeout, WithDeadline, Rand
+// Ticker, WithCancel, WithTimeout, WithDeadline, Rand, Inject, Do, Buggify
 // Depends on: internal/sched (the simulator's engine)
 package dst
 

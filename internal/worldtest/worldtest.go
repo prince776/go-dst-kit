@@ -425,12 +425,12 @@ func contextCancel(w *dst.World) {
 }
 
 func contextTimeout(w *dst.World) {
+	start := w.Now() // before the context: its deadline counts from creation
 	ctx, cancel := dst.WithTimeout(w, context.Background(), 2*tick)
 	defer cancel()
 	if dl, ok := ctx.Deadline(); !ok || dl.Before(w.Now()) {
 		failf("deadline %v %v", dl, ok)
 	}
-	start := w.Now()
 	which := ""
 	dst.Select(w,
 		dst.OnDone(ctx, func() { which = "done" }),

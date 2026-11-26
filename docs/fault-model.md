@@ -122,6 +122,19 @@ connected socket that sends to and receives from one peer):
 
 Not modelled yet: bandwidth limits.
 
+## Fault points (`dst.Inject`, `w.Buggify`, `internal/points`)
+
+Points are in the code under test and its fakes; see
+[writing a test](writing-a-test.md#faults-in-your-own-fakes).
+
+- A call fails without acting (**Fail**), fails after acting
+  (**FailAfter**: the operation happened, the caller sees an error), is
+  slowed, or proceeds. Rates are drawn per seed and per point.
+- A **service outage** fails every point of a service (`svc.` in
+  `svc.op`) for a window: lengths log-uniform from 10ms to 3s.
+- Nothing fires outside the fault phase, and a quiet point changes
+  nothing in the schedule.
+
 ## The runner (`dsttest`)
 
 - Fault rates are drawn per seed (swarm testing): some seeds turn whole

@@ -46,6 +46,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prince776/go-dst-kit/internal/points"
 )
 
 // Options configure a Scheduler.
@@ -88,6 +90,9 @@ type Options struct {
 
 // Scheduler runs tasks one at a time in an order decided by the seed.
 type Scheduler struct {
+	// Points, if set, decides dst.Inject and World.Buggify calls.
+	Points *points.Registry
+
 	opts     Options
 	rng      *rand.Rand
 	now      time.Duration

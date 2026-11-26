@@ -109,6 +109,53 @@ default: // timeout: it may or may not have happened
 Getting the third case right matters: a timed-out write may still take
 effect later, and the checker allows exactly that.
 
+## Faults in your own fakes
+
+A service you don't simulate (cloud storage, a managed database, a queue)
+gets a fake in tests. Put fault points in the fake and the runner makes it
+fail for you, the same way it crashes machines:
+
+```go
+func (t *FakeTable) Insert(ctx context.Context, e Entity) error {
+	switch dst.Inject(t.w, "table.insert") {
+	case dst.Fail: // refused: nothing happened
+		return &ResponseError{StatusCode: 503}
+	case dst.FailAfter: // it happened, but the caller never hears
+		t.insert(e)
+		return context.DeadlineExceeded
+	}
+	return t.insert(e)
+}
+```
+
+`dst.Do(w, name, op)` is the short form: it returns `dst.ErrInjected`
+without running op on Fail, runs op and returns `dst.ErrInjected` on
+FailAfter. Inject also sleeps any latency it injects. In the real World a
+point is always quiet.
+
+- **Names** are `service.operation`. With `Faults.Services` on, the
+  runner takes a whole service down for a while (every point of it
+  fails), as a real outage would.
+- **Rates** are drawn per seed from a stream named after the point: quiet
+  in a third of seeds, else failing 0.1% to 20% of calls (a random share
+  of them after acting), sometimes slowed by 1ms to 1s. Adding a point
+  doesn't change the other points' draws.
+- **Overrides**: `Options.Points` sets points by name prefix, the longest
+  prefix winning: `{"table.": {}}` silences the table,
+  `{"table.insert": {FailAfter: 0.1}}` loses 10% of insert replies.
+- **Coverage**: each firing counts as `point NAME: fail`, `: fail-after`,
+  `: slow` or `: outage`, so `h.Expect("point table.insert: fail-after")`
+  makes sure the ambiguous case was reached.
+- Points fire only in the fault phase.
+
+`w.Buggify(name)` (after FoundationDB's BUGGIFY) is a point in your own
+code: it returns true now and then in a simulation, so code can take a
+legal but rare path (a tiny buffer, an early flush, a spurious retry) to
+shake out bugs that path hides. Each point is active in about a quarter
+of seeds and then fires on about a quarter of calls; it is always false
+in the real World. [`examples/objstore`](../examples/objstore) has a fake
+store and a client that handles the ambiguous case.
+
 ## Running
 
 ```sh

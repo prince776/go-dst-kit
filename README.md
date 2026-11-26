@@ -39,9 +39,9 @@ can't reproduce it. Under simulation:
 
 - **Everything is explored**: goroutine order (uniform and PCT), network
   latency, partitions, resets, datagram loss and duplication, process
-  crashes and pauses, power loss
-  that drops unsynced writes or tears them, and clock skew between
-  machines. Each seed draws its own mix of faults (swarm
+  crashes and pauses, power loss that drops unsynced writes or tears
+  them, clock skew between machines, and failures, timeouts and outages
+  of the services you fake (`dst.Inject`, `w.Buggify`). Each seed draws its own mix of faults (swarm
   testing).
 - **Everything replays**: same seed, same run, step for step, with an
   event log (`-dst.v`).
@@ -104,6 +104,7 @@ every planted bug is caught, for the right reason.
 |---|---|
 | [wal](examples/wal): checksummed write-ahead log | no fsync, no directory fsync, appending after a torn tail |
 | [dedupe](examples/dedupe): exactly-once over retries | dedupe set in memory, "seen" logged separately from the effect |
+| [objstore](examples/objstore): a fake object store with fault points, and a log client on it | blind retry after a timeout (duplicates), timeout reported as failure (lost ack), writes without an ETag precondition (lost update) |
 | [heartbeat](examples/heartbeat): UDP failure detector | no sequence numbers (found only with UDP faults), sequence numbers that restart with the process, a monitor that learns members from heartbeats |
 | [lease](examples/lease): lock service with leases and fenced writes | lease timed from the reply, no step-down, restarted server forgets, no drift margin, trusting the server's timestamp, no fencing (found only with pauses) |
 | [gcounter](examples/gcounter): gossiped CRDT counter | merge by sum, rename without fsync |

@@ -13,6 +13,7 @@ import (
 
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/dsttest"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 // ---- a tiny durable log, with a planted bug ----
@@ -472,5 +473,170 @@ func TestPausesExplore(t *testing.T) {
 	})
 	if !rep.OK() {
 		t.Fatalf("%+v %v %v", rep.Failed, rep.Nondeterministic, rep.NeverHappened)
+	}
+}
+
+// pointHarness calls svc.op, other.op and the Buggify point svc.knob every
+// millisecond from a machine, recording the phase of each injection (in
+// seen, shared across seeds: sweep with Parallel 1).
+func pointHarness(seen map[string]map[dsttest.Phase]int) func(h *dsttest.Harness) {
+	return func(h *dsttest.Harness) {
+		note := func(what string) {
+			if seen[what] == nil {
+				seen[what] = map[dsttest.Phase]int{}
+			}
+			seen[what][h.Phase()]++
+		}
+		h.Machine("m", func(w *dst.World) {
+			for {
+				for _, p := range []string{"svc.op", "other.op"} {
+					if f := dst.Inject(w, p); f != dst.None {
+						note(p + " " + f.String())
+					}
+				}
+				if w.Buggify("svc.knob") {
+					note("svc.knob")
+				}
+				w.Sleep(time.Millisecond)
+			}
+		}, dsttest.NeverCrash)
+	}
+}
+
+// Verifies: [points-only-in-fault-phase]
+// Fails if: a fault point fails or a Buggify point fires outside the fault
+// phase, or with Faults.Points and Faults.Services off; or (negative) they
+// never do in the fault phase.
+func TestPointsOnlyInFaultPhase(t *testing.T) {
+	points := map[string]dsttest.Point{"svc.": {Fail: 0.3, FailAfter: 0.3}, "svc.knob": {Fire: 0.5}}
+	for _, on := range []bool{true, false} {
+		seen := map[string]map[dsttest.Phase]int{}
+		rep := dsttest.Sweep(dsttest.Options{Seeds: 5, Parallel: 1, Faults: dsttest.Faults{Points: on, Services: on}, Points: points,
+			FaultPhase: time.Second, RecoveryPhase: time.Second}, pointHarness(seen))
+		if !rep.OK() {
+			t.Fatalf("%+v", rep.Failed)
+		}
+		for what, phases := range seen {
+			for ph, n := range phases {
+				if !on || ph != dsttest.Faulty {
+					t.Errorf("points on=%v: %s happened %d times in phase %v", on, what, n, ph)
+				}
+			}
+		}
+		if on && (seen["svc.op Fail"][dsttest.Faulty] == 0 || seen["svc.op FailAfter"][dsttest.Faulty] == 0 || seen["svc.knob"][dsttest.Faulty] == 0) {
+			t.Errorf("points on: the fault phase saw %v", seen)
+		}
+	}
+}
+
+// Verifies: [outages-explore]
+// Fails if: with Services faults no seed has an outage, or an outage
+// fails a point of a service that isn't down (checked through a quiet
+// configuration: then only outages fail calls, a whole service at once).
+func TestOutagesExplore(t *testing.T) {
+	seen := map[string]map[dsttest.Phase]int{}
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 20, Parallel: 1, Faults: dsttest.Faults{Services: true}, FaultPhase: 5 * time.Second, RecoveryPhase: time.Second},
+		func(h *dsttest.Harness) {
+			pointHarness(seen)(h)
+			h.Machine("pair", func(w *dst.World) {
+				for { // two points of one service: down together or not at all
+					a, b := dst.Inject(w, "pair.a"), dst.Inject(w, "pair.b")
+					if a != b {
+						h.Failf("pair.a %v but pair.b %v at the same moment", a, b)
+					}
+					w.Sleep(time.Millisecond)
+				}
+			}, dsttest.NeverCrash)
+			h.Expect("service outage")
+		})
+	if !rep.OK() {
+		t.Fatalf("%+v %v", rep.Failed, rep.NeverHappened)
+	}
+	if seen["svc.op Fail"][dsttest.Faulty] == 0 || seen["other.op Fail"][dsttest.Faulty] == 0 {
+		t.Errorf("outages over 20 seeds: %v", seen)
+	}
+	if seen["svc.op FailAfter"] != nil || seen["svc.knob"] != nil {
+		t.Errorf("with only outages on, saw %v", seen)
+	}
+}
+
+// Verifies: [real-never-injects]
+// Fails if: the real World injects a fault or fires a Buggify point, or
+// Do doesn't run the operation there; or (negative) a simulated World set
+// to always fail doesn't.
+func TestRealNeverInjects(t *testing.T) {
+	w := realworld.New(realworld.Options{})
+	ran := 0
+	for range 1000 {
+		if dst.Inject(w, "svc.op") != dst.None || w.Buggify("svc.knob") {
+			t.Fatal("the real World injected a fault")
+		}
+		if err := dst.Do(w, "svc.op", func() error { ran++; return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ran != 1000 {
+		t.Fatalf("Do ran its operation %d of 1000 times", ran)
+	}
+	var fails, afterRan int
+	dsttest.Sweep(dsttest.Options{Seeds: 1, Faults: dsttest.Faults{Points: true}, Points: map[string]dsttest.Point{"svc.": {FailAfter: 1}},
+		FaultPhase: 100 * time.Millisecond, RecoveryPhase: 100 * time.Millisecond}, func(h *dsttest.Harness) {
+		h.Machine("m", func(w *dst.World) {
+			for {
+				if errors.Is(dst.Do(w, "svc.op", func() error { afterRan++; return nil }), dst.ErrInjected) {
+					fails++
+				}
+				w.Sleep(time.Millisecond)
+			}
+		})
+	})
+	if fails == 0 || afterRan < fails {
+		t.Errorf("simulated, always FailAfter: %d injected, op ran %d times", fails, afterRan)
+	}
+}
+
+// Verifies: [fault-classes-independent]
+// Fails if: turning on pauses or service outages changes when a seed's
+// crashes and partitions happen; or (negative) a different seed's schedule
+// is the same.
+func TestFaultClassesIndependent(t *testing.T) {
+	schedule := func(seed uint64, f dsttest.Faults) string {
+		var b strings.Builder
+		dsttest.RunSeed(seed, dsttest.Options{Faults: f, FaultPhase: 5 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+			for _, n := range []string{"a", "b", "c"} {
+				h.Machine(n, func(w *dst.World) {
+					for {
+						dst.Inject(w, n+".op")
+						w.Sleep(time.Millisecond)
+					}
+				})
+			}
+		}, func(format string, args ...any) {
+			line := fmt.Sprintf(format, args...)
+			if strings.Contains(line, "nemesis: crash") || strings.Contains(line, "nemesis: restart") || strings.Contains(line, "partition") || strings.Contains(line, "heal") {
+				b.WriteString(line + "\n")
+			}
+		})
+		return b.String()
+	}
+	base := dsttest.Faults{Crash: true, Partition: true}
+	more := base
+	more.Pause, more.Services, more.Points = true, true, true
+	compared := 0
+	for seed := uint64(1); seed <= 10; seed++ {
+		a, b := schedule(seed, base), schedule(seed, more)
+		if !strings.Contains(a, "nemesis: crash") {
+			continue // crashes off for this seed: little to compare
+		}
+		if a != b {
+			t.Fatalf("seed %d: crashes and partitions moved when pauses and outages were turned on:\n%s---\n%s", seed, a, b)
+		}
+		if a == schedule(seed+100, base) {
+			t.Fatalf("seeds %d and %d have the same schedule: the comparison can't tell schedules apart", seed, seed+100)
+		}
+		compared++
+	}
+	if compared < 3 {
+		t.Fatalf("only %d of 10 seeds had crashes to compare", compared)
 	}
 }
