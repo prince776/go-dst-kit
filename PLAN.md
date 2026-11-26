@@ -374,6 +374,30 @@ deliveries as synced consumption; `Depth()` under-reports after crash
 recovery. Released:
 v0.1.0 (main module), dstgrpc/v0.1.0, dstlint/v0.1.0.
 
+**llm-tor (in progress, 2026-11-26):** the backend's payment, issuance
+and redemption flows on a World (branch `dst`). A real HTTP service
+(chi over dsthttp) with a crashable server, never-crash clients and Dodo,
+and cloud fakes outside every machine behind `dst.Call`. Bugs confirmed
+by traced seeds: double credit on a webhook retry, lost updates between
+the webhook and issuance, a double charge on an issuance retry, a token
+buying two LLM answers, and a request hash that doesn't cover the prompt.
+Library findings:
+- **Process-level nondeterminism isn't caught.** RSA keys generated per
+  process made seeds replay differently across processes (blinding's
+  rejection sampling takes a key-dependent number of bytes from the
+  World's stream). The determinism check reruns a seed in the same
+  process, so it can't see this. Fixed in the test with testdata keys.
+  Candidates: independent named random streams (so crypto consumption
+  can't shift the workload), and a cross-process replay check (a trace
+  hash printed with each failure).
+- **Crashes alone barely test a request/response service.** With
+  instantaneous fakes a request is atomic in virtual time, so crashes
+  land only between requests: 1,000 crash-only seeds passed while a sweep
+  adding latency (no failures) failed in most seeds. Candidate: the swarm
+  pairs Crash with service latency, or the docs say so loudly.
+- `NeverCrash` client machines, cloud fakes as plain maps outside
+  machines, and dsthttp under chi all worked unchanged.
+
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
 - ~~`Rand.CryptoRead`~~ **done**: `Rand.Read` became `CryptoRead`
