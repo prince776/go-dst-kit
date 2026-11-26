@@ -61,7 +61,7 @@ It's a mechanical substitution, and it can be done one package at a time
 | `make(chan T, n)`, `c <- v`, `<-c`, `range c` | `dst.MakeChan[T](w, n)`, `c.Send(v)`, `c.Recv()`, `c.All()` |
 | `select { ... }` | `dst.Select(w, dst.OnRecv(c, fn), dst.OnSend(c, v, fn), dst.OnDone(ctx, fn), dst.Default(fn))` |
 | `time.Now`, `time.Sleep`, `time.NewTimer`, `time.After` | `w.Now()`, `w.Sleep(d)`, `w.NewTimer(d)`, `w.After(d)` |
-| `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once` | `dst.Mutex`, `RWMutex`, `WaitGroup`, `Once` (zero values work) |
+| `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` | `dst.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` (zero values work) |
 | `context.WithTimeout`, `WithCancel` | `dst.WithTimeout(w, ctx, d)`, `dst.WithCancel(w, ctx)` |
 | `math/rand`, `crypto/rand` | `w.Rand()` |
 | `os.OpenFile`, `os.Rename`, ... | `w.FS().OpenFile`, `w.FS().Rename`, ... |

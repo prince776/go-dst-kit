@@ -18,6 +18,7 @@
 //	time.Now / Sleep        w.Now() / w.Sleep(d)
 //	time.NewTimer/After     w.NewTimer(d) / w.After(d)
 //	sync.Mutex/WaitGroup    dst.Mutex / dst.WaitGroup (zero values work)
+//	sync.Cond               dst.Cond (dst.NewCond)
 //	context.WithTimeout     dst.WithTimeout(w, ctx, d)
 //	math/rand, crypto/rand  w.Rand()
 //	os, net                 w.FS(), w.Net()
@@ -37,7 +38,7 @@
 //   - [timers-follow-world-clock] Timers, tickers, Sleep and context
 //     deadlines fire by the World's clock, in deadline order.
 //
-// Children: World, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Timer,
+// Children: World, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
 // Ticker, WithCancel, WithTimeout, WithDeadline, Rand
 // Depends on: internal/sched (the simulator's engine)
 package dst

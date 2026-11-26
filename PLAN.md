@@ -196,7 +196,7 @@ a step-back when done.
 
 | # | Item | Design | Verification goals |
 |---|---|---|---|
-| 10 | `dst.Cond` | Wait/Signal/Broadcast over dst.Mutex/RWMutex; real = sync.Cond, sim = scheduler wait queue; dstlint points sync.Cond users to it | contract checks in both Worlds: Signal wakes exactly one, Broadcast all, Wait reacquires the lock, a Signal with no waiter is lost |
+| 10 | `dst.Cond` (**done**) | Wait/Signal/Broadcast over dst.Mutex/RWMutex; real = sync.Cond, sim = scheduler wait queue; dstlint points sync.Cond users to it | contract checks in both Worlds: Signal wakes exactly one, Broadcast all, Wait reacquires the lock, a Signal with no waiter is lost |
 | 11 | Goroutine-identity check | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
 | 12 | `Select2` / `Select3` | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
 | 13 | PCT scheduler | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |

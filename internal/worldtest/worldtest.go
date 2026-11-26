@@ -46,6 +46,9 @@ var Checks = []Check{
 	{"sync/rwmutex", rwMutex},
 	{"sync/waitgroup-waits", waitGroup},
 	{"sync/once-runs-once", once},
+	{"sync/cond-signal-wakes-one-broadcast-all", condSignalBroadcast},
+	{"sync/cond-wait-reacquires-lock", condReacquires},
+	{"sync/cond-signal-without-waiter-is-lost", condLostSignal},
 	{"context/cancel-propagates", contextCancel},
 	{"context/timeout", contextTimeout},
 	{"context/std-children-work", contextStdChildren},
@@ -460,4 +463,92 @@ func randInRange(w *dst.World) {
 	if n, err := r.Read(b); n != 16 || err != nil || slices.Equal(b, make([]byte, 16)) {
 		failf("Read: %d %v %x", n, err, b)
 	}
+}
+
+// condWaiters starts n goroutines that each wait on c once (under mu) and
+// count themselves woken. It returns once all n are waiting.
+func condWaiters(w *dst.World, mu *dst.Mutex, c *dst.Cond, n int, woken *atomic.Int32, wg *dst.WaitGroup) {
+	waiting := 0
+	for range n {
+		wg.Go(w, func() {
+			mu.Lock()
+			waiting++
+			c.Wait()
+			woken.Add(1)
+			mu.Unlock()
+		})
+	}
+	for {
+		mu.Lock()
+		all := waiting == n // each counted itself before Wait released mu
+		mu.Unlock()
+		if all {
+			return
+		}
+		w.Sleep(tick)
+	}
+}
+
+func condSignalBroadcast(w *dst.World) {
+	var mu dst.Mutex
+	c := dst.NewCond(&mu)
+	var woken atomic.Int32
+	var wg dst.WaitGroup
+	condWaiters(w, &mu, c, 3, &woken, &wg)
+	if n := woken.Load(); n != 0 {
+		failf("%d woken before any Signal", n)
+	}
+	c.Signal()
+	w.Sleep(4 * tick)
+	if n := woken.Load(); n != 1 {
+		failf("Signal woke %d of 3 waiters, want 1", n)
+	}
+	mu.Lock()
+	c.Broadcast()
+	mu.Unlock()
+	wg.Wait()
+	if n := woken.Load(); n != 3 {
+		failf("Broadcast left %d of 3 waiters woken", n)
+	}
+}
+
+func condReacquires(w *dst.World) {
+	var mu dst.Mutex
+	c := dst.Cond{L: &mu} // the zero value with L set works too
+	ready := false
+	var held atomic.Bool
+	var wg dst.WaitGroup
+	wg.Go(w, func() {
+		mu.Lock()
+		for !ready {
+			c.Wait()
+		}
+		held.Store(!mu.TryLock()) // Wait must have taken mu back
+		mu.Unlock()
+	})
+	w.Sleep(tick)
+	mu.Lock()
+	ready = true
+	c.Signal()
+	mu.Unlock()
+	wg.Wait()
+	if !held.Load() {
+		failf("Wait returned without holding L")
+	}
+}
+
+func condLostSignal(w *dst.World) {
+	var mu dst.Mutex
+	c := dst.NewCond(&mu)
+	c.Signal() // nobody waits: lost
+	c.Broadcast()
+	var woken atomic.Int32
+	var wg dst.WaitGroup
+	condWaiters(w, &mu, c, 1, &woken, &wg)
+	w.Sleep(4 * tick)
+	if woken.Load() != 0 {
+		failf("a Signal made before Wait woke a later waiter")
+	}
+	c.Signal()
+	wg.Wait()
 }

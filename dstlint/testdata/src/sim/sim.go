@@ -11,6 +11,10 @@ import (
 
 var mu sync.Mutex // want `sync.Mutex escapes the World; use dst.Mutex`
 
+var cond = sync.NewCond(nil) // want `sync.NewCond escapes the World; use dst.NewCond`
+
+var cv sync.Cond // want `sync.Cond escapes the World; use dst.Cond`
+
 func f(ctx context.Context) {
 	go f(ctx)                  // want `go statement escapes the World; use w.Go`
 	c := make(chan int, 1)     // want `make\(chan\) escapes the World; use dst.MakeChan`

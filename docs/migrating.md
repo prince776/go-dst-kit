@@ -43,6 +43,7 @@ In tests, `dsttest` gives each simulated machine its own World.
 | `time.Sleep(d)` | `w.Sleep(d)` | |
 | `time.NewTimer`, `After`, `AfterFunc`, `NewTicker` | `w.NewTimer(d)`, `w.After(d)`, `w.AfterFunc(d, f)`, `w.NewTicker(d)` | timers have `.C`-style channels as `dst.Chan` |
 | `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once` | `dst.Mutex`, `dst.RWMutex`, `dst.WaitGroup`, `dst.Once` | zero values work; `wg.Go(w, f)` too |
+| `sync.NewCond(l)`, `sync.Cond` | `dst.NewCond(l)`, `dst.Cond{L: l}` | same semantics: a Signal with no waiter is lost |
 | `context.WithCancel`, `WithTimeout`, `WithDeadline` | `dst.WithCancel(w, ctx)`, `dst.WithTimeout(w, ctx, d)`, `dst.WithDeadline(w, ctx, t)` | `Background`, `WithValue` are fine as they are |
 | `context.AfterFunc` | `dst.AfterDone(ctx, f)` | |
 | `math/rand`, `crypto/rand` | `w.Rand()` | seeded per World in simulation |

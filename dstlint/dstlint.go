@@ -66,6 +66,7 @@ var funcs = map[string]map[string]string{
 		"Float64": "w.Rand()", "Float32": "w.Rand()", "Perm": "w.Rand()", "Shuffle": "w.Rand()",
 		"ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
 	},
+	"sync":        {"NewCond": "dst.NewCond"},
 	"crypto/rand": {"Read": "w.Rand().Read", "Int": "w.Rand()", "Text": "w.Rand()"},
 	"os": {
 		"Open": "dst.Open(w.FS(), ...)", "Create": "dst.Create(w.FS(), ...)", "OpenFile": "w.FS().OpenFile",
@@ -92,7 +93,7 @@ var funcs = map[string]map[string]string{
 var typeNames = map[string]map[string]string{
 	"sync": {
 		"Mutex": "dst.Mutex", "RWMutex": "dst.RWMutex", "WaitGroup": "dst.WaitGroup",
-		"Once": "dst.Once", "Cond": "a dst.Chan or dst.Mutex",
+		"Once": "dst.Once", "Cond": "dst.Cond",
 	},
 	"time":     {"Timer": "dst.Timer", "Ticker": "dst.Ticker"},
 	"net/http": {"Server": "dsthttp.Serve"},
