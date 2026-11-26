@@ -181,8 +181,43 @@ each one.
 
 All tests pass with `-race`.
 
+## Approved next work (Prince, 2026-11-26)
+
+Order: Cond, identity check, typed Select, PCT, clock, UDP. Each gets a
+step-back when done.
+
+| # | Item | Design | Verification goals |
+|---|---|---|---|
+| 10 | `dst.Cond` | Wait/Signal/Broadcast over dst.Mutex/RWMutex; real = sync.Cond, sim = scheduler wait queue; dstlint points sync.Cond users to it | contract checks in both Worlds: Signal wakes exactly one, Broadcast all, Wait reacquires the lock, a Signal with no waiter is lost |
+| 11 | Goroutine-identity check | in simulation every World operation asserts the caller holds the baton; a mismatch fails with "World operation from a goroutine this World didn't start" and the stack (also catches an Always that uses the World) | a raw goroutine calling Send gets the error; all suites pass (no false positives); cost measured |
+| 12 | `Select2` / `Select3` | generic over case element types; real World compiles to a native select per combination of case kinds (generated); sim reuses Select | select contract checks in both Worlds; benchmark near native (53ns) |
+| 13 | PCT scheduler | per-seed choice of uniform or PCT (random priorities, d-1 priority drops, d = 1..3, chosen by the swarm); demote a goroutine after N consecutive steps so polling loops can't starve others | channel model check still two-way (PCT stays legal); a planted ordering bug found in far fewer seeds than uniform; replay holds |
+| 14 | Per-machine clocks | one true timeline drives the simulation; each machine's clock is offset + rate x true time, kept across restarts; w.Now is local, Sleep/timers fire by the local clock; the test machine and all invariants use true time; `Clock{MaxOffset, MaxDrift}` with realistic defaults, some seeds at the bound. No wall-clock jumps (Go's monotonic reading can't be faked; approved) | clocks only move forward; offset and drift within bounds; Sleep(d) takes d/rate of true time; clock survives restart; fast, slow and at-bound clocks all occur; lease gets planted bug NoDriftMargin, caught only with skew on |
+| 15 | UDP | ListenPacket and Dial("udp"); per-datagram latency (so reordering); loss and duplication rates per seed; partitions and dead hosts drop; plus a heartbeat failure-detector example with a planted bug (approved) | contract checks against real loopback UDP; whole-or-nothing datagrams; no faults means exactly once; loss, duplication and reordering each occur in some seed |
+| - | `NeverCrash` machine option | `h.Machine(name, start, dsttest.NeverCrash)` exempts a machine from the nemesis's crashes (still partitionable) | a NeverCrash machine is never crashed across a crash-heavy sweep; others still are |
+
+## Performance (Apple M1, Go 1.25; dst/bench_compare_test.go)
+
+| Operation | Bare Go | Real World | Simulated |
+|---|---|---|---|
+| channel round trip | 266ns | 295ns | 3.7µs |
+| select (2 ready cases) | 54ns | 225ns | - |
+| spawn + wait | 344ns | 390ns | 6.3µs |
+| mutex, 4 goroutines contending | 67ns | 52ns | 14ns (never contends: see finding) |
+| context WithTimeout + cancel | 298ns | 295ns | 347ns |
+| timer arm + stop | 131ns | 156ns | 166ns |
+| 4 KiB write + read | 1.7µs | 1.6µs | 2.2µs |
+| open + close | 14.5µs | 12.8µs | 0.6µs |
+| 4 KiB write + fsync | 3.0ms | 3.0ms | 2.0µs |
+| TCP 64 B round trip | 16.6µs | 18.4µs | 3.9µs |
+| HTTP GET | 37.7µs | 37.7µs | 33.3µs |
+
+Finding: `dst.Mutex.Lock` on a free mutex isn't a scheduling point, so in
+simulation two critical sections with no other World operation between
+them are never interleaved (a lost update across two locked sections
+can't be found). Fix proposed to Prince, not yet approved.
+
 ## Deferred
 
-- The 3 inconclusive raftkv seeds and the independent bug hunt (v0; Prince: later).
-- Goroutine-identity check on every World operation (debug mode).
-- `dst.Cond`.
+- The 3 inconclusive raftkv seeds and the independent bug hunt (v0;
+  Prince, reconfirmed 2026-11-26: later).
