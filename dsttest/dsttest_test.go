@@ -914,3 +914,62 @@ func TestRunCrossProcessReplay(t *testing.T) {
 		}
 	})
 }
+
+// Feature: on in about half the seeds, the same for a seed every time it
+// is asked and every time the seed runs, independent between names,
+// pinned by Options.Features, and listed in a failing seed's report.
+// Fails if a feature is constant, flips within a run, two features always
+// agree, or a pin is ignored.
+func TestFeature(t *testing.T) {
+	opts := dsttest.Options{FaultPhase: 10 * time.Millisecond, RecoveryPhase: 10 * time.Millisecond}
+	on, agree := 0, 0
+	for seed := uint64(1); seed <= 400; seed++ {
+		var a, b bool
+		r := dsttest.RunSeed(seed, opts, func(h *dsttest.Harness) {
+			a, b = h.Feature("a"), h.Feature("b")
+			if h.Feature("a") != a {
+				t.Fatalf("seed %d: feature a changed within the run", seed)
+			}
+		}, nil)
+		again := dsttest.RunSeed(seed, opts, func(h *dsttest.Harness) {
+			h.Feature("b") // asked in another order
+			if h.Feature("a") != a {
+				t.Fatalf("seed %d: feature a differs between runs of the seed", seed)
+			}
+		}, nil)
+		if r.Features["a"] != a || again.Features["a"] != a {
+			t.Fatalf("seed %d: Result.Features %v, want a %v", seed, r.Features, a)
+		}
+		if a {
+			on++
+		}
+		if a == b {
+			agree++
+		}
+	}
+	if on < 160 || on > 240 {
+		t.Errorf("feature a on in %d of 400 seeds, want about half", on)
+	}
+	if agree < 160 || agree > 240 {
+		t.Errorf("features a and b agree in %d of 400 seeds, want about half (independent)", agree)
+	}
+
+	opts.Features = map[string]bool{"a": true}
+	for seed := uint64(1); seed <= 50; seed++ {
+		dsttest.RunSeed(seed, opts, func(h *dsttest.Harness) {
+			if !h.Feature("a") {
+				t.Fatalf("seed %d: the pinned feature is off", seed)
+			}
+		}, nil)
+	}
+
+	rec := &recorder{TB: t}
+	dsttest.Run(rec, dsttest.Options{Seeds: 5, FaultPhase: 10 * time.Millisecond, RecoveryPhase: 10 * time.Millisecond, Features: map[string]bool{"z": false}},
+		func(h *dsttest.Harness) {
+			h.Feature("z")
+			h.Go(func(w *dst.World) { h.Fail(errors.New("boom")) })
+		})
+	if len(rec.errs) == 0 || !strings.Contains(rec.errs[0], "\nfeatures: z off\n") {
+		t.Fatalf("the report lacks the features: %v", rec.errs)
+	}
+}

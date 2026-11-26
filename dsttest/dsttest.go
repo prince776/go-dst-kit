@@ -77,6 +77,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"math"
 	"math/rand/v2"
@@ -170,6 +171,9 @@ type Options struct {
 	// third of seeds, else failing 0.1% to 20% of calls (a random share of
 	// those after acting), sometimes slowed by 1ms to 1s.
 	Points map[string]Point
+	// Features pins workload features (Harness.Feature) on or off for
+	// every seed; the others are drawn per seed.
+	Features map[string]bool
 	// Start pins what clocks read at the start of every run (default:
 	// drawn per seed, see Swarm.Start).
 	Start time.Time
@@ -292,6 +296,8 @@ type Harness struct {
 	points   *points.Registry
 	expect   []string
 	workload []*sched.Task
+	seed     uint64
+	features map[string]bool
 }
 
 type named[T any] struct {
@@ -459,6 +465,30 @@ func (h *Harness) Always(name string, fn func() error) {
 // system, wait with deadlines).
 func (h *Harness) Final(name string, fn func(w *dst.World) error) {
 	h.final = append(h.final, named[func(w *dst.World) error]{name, fn})
+}
+
+// Feature reports whether this seed enables the workload feature name
+// (swarm testing over the workload, after Groce et al.: a seed that
+// leaves some actions out does the others more often, and combinations
+// get tried that a fixed mix dilutes). It is on in half the seeds,
+// decided by the seed and the name alone, so adding a feature leaves
+// every other draw of a seed unchanged; Options.Features pins it. A
+// failing seed's report lists its features.
+func (h *Harness) Feature(name string) bool {
+	if on, ok := h.features[name]; ok {
+		return on
+	}
+	on, pinned := h.opts.Features[name]
+	if !pinned {
+		f := fnv.New64a()
+		f.Write([]byte(name))
+		on = rand.New(rand.NewPCG(h.seed^0xfea7c0de, f.Sum64())).IntN(2) == 0
+	}
+	if h.features == nil {
+		h.features = map[string]bool{}
+	}
+	h.features[name] = on
+	return on
 }
 
 // Sometimes records that a behaviour happened in this run (coverage).
@@ -664,7 +694,8 @@ type Result struct {
 	Checkpoints []uint64
 	Steps       uint64
 	SimTime     time.Duration
-	Wall        time.Duration // the run's wall-clock time (set by Sweep)
+	Wall        time.Duration   // the run's wall-clock time (set by Sweep)
+	Features    map[string]bool // the workload features the run asked about, and whether they were on
 	Coverage    map[string]int
 	Expect      []string
 }
@@ -683,7 +714,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 	if !opts.Start.IsZero() {
 		swarm.Start = opts.Start
 	}
-	h := &Harness{opts: opts, swarm: swarm, cover: map[string]int{}}
+	h := &Harness{opts: opts, swarm: swarm, cover: map[string]int{}, seed: seed}
 	h.sim = simworld.New(simworld.Options{
 		Seed:           seed,
 		Logf:           logf,
@@ -736,7 +767,7 @@ func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format
 		}
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
-		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect}
+		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features}
 }
 
 // unfinished reports workload goroutines (and goroutines they started)
@@ -1091,19 +1122,36 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 	return rep
 }
 
+// featureList is "\nfeatures: a on, b off", or "" with no features.
+func featureList(f map[string]bool) string {
+	if len(f) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(f)) {
+		v := "off"
+		if f[k] {
+			v = "on"
+		}
+		parts = append(parts, k+" "+v)
+	}
+	return "\nfeatures: " + strings.Join(parts, ", ")
+}
+
 // seedRecord is one line of -dst.json.
 type seedRecord struct {
-	Test     string         `json:"test"`
-	Call     int            `json:"call"` // which call of Run in the test (0 is the first)
-	Seed     uint64         `json:"seed"`
-	Trace    string         `json:"trace"` // the run's fingerprint, in hex
-	Index    int            `json:"index"` // position in the sweep (0 is the first seed)
-	Failed   bool           `json:"failed"`
-	Error    string         `json:"error,omitempty"`
-	Steps    uint64         `json:"steps"`
-	SimNS    int64          `json:"sim_ns"`
-	WallNS   int64          `json:"wall_ns"`
-	Coverage map[string]int `json:"coverage,omitempty"`
+	Test     string          `json:"test"`
+	Call     int             `json:"call"` // which call of Run in the test (0 is the first)
+	Seed     uint64          `json:"seed"`
+	Trace    string          `json:"trace"` // the run's fingerprint, in hex
+	Index    int             `json:"index"` // position in the sweep (0 is the first seed)
+	Failed   bool            `json:"failed"`
+	Error    string          `json:"error,omitempty"`
+	Steps    uint64          `json:"steps"`
+	SimNS    int64           `json:"sim_ns"`
+	WallNS   int64           `json:"wall_ns"`
+	Coverage map[string]int  `json:"coverage,omitempty"`
+	Features map[string]bool `json:"features,omitempty"`
 }
 
 // writeJSON appends a line per run of rep to path.
@@ -1115,7 +1163,7 @@ func writeJSON(path, test string, call int, rep Report) error {
 	enc := json.NewEncoder(f)
 	for _, r := range rep.Results {
 		rec := seedRecord{Test: test, Call: call, Trace: fmt.Sprintf("%016x", r.Fingerprint), Seed: r.Seed, Index: int(r.Seed - rep.FirstSeed), Failed: r.Err != nil,
-			Steps: r.Steps, SimNS: int64(r.SimTime), WallNS: int64(r.Wall), Coverage: r.Coverage}
+			Steps: r.Steps, SimNS: int64(r.SimTime), WallNS: int64(r.Wall), Coverage: r.Coverage, Features: r.Features}
 		if r.Err != nil {
 			rec.Error = strings.SplitN(r.Err.Error(), "\n", 2)[0]
 		}
@@ -1204,7 +1252,7 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 			logf = func(format string, args ...any) { fmt.Fprintf(os.Stdout, format+"\n", args...) }
 		}
 		r := RunSeed(*flagSeed, opts, setup, logf)
-		t.Logf("seed %d: %s; %v simulated in %d steps\nfaults: %v", r.Seed, outcome(r), r.SimTime, r.Steps, r.Swarm)
+		t.Logf("seed %d: %s; %v simulated in %d steps\nfaults: %v%s", r.Seed, outcome(r), r.SimTime, r.Steps, r.Swarm, featureList(r.Features))
 		if r.Err != nil {
 			t.Fatalf("seed %d: %v", r.Seed, r.Err)
 		}
@@ -1245,7 +1293,7 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 			t.Errorf("... and more failing seeds (use KeepGoing to list them all)")
 			break
 		}
-		t.Errorf("seed %d failed: %v\nfaults: %v\ntrace: %016x\nreplay: go test -run '^%s$' -dst.seed=%d -dst.v", r.Seed, r.Err, r.Swarm, r.Fingerprint, name, r.Seed)
+		t.Errorf("seed %d failed: %v\nfaults: %v%s\ntrace: %016x\nreplay: go test -run '^%s$' -dst.seed=%d -dst.v", r.Seed, r.Err, r.Swarm, featureList(r.Features), r.Fingerprint, name, r.Seed)
 	}
 	for _, d := range rep.Nondeterministic {
 		t.Error(d)
