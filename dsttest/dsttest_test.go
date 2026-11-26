@@ -954,6 +954,15 @@ func TestFeature(t *testing.T) {
 		t.Errorf("features a and b agree in %d of 400 seeds, want about half (independent)", agree)
 	}
 
+	all := opts
+	all.Features = map[string]bool{"*": false, "b": true}
+	for seed := uint64(1); seed <= 50; seed++ {
+		dsttest.RunSeed(seed, all, func(h *dsttest.Harness) {
+			if h.Feature("a") || h.Feature("c") || !h.Feature("b") {
+				t.Fatalf("seed %d: \"*\" didn't pin the features not named, or overrode a named one", seed)
+			}
+		}, nil)
+	}
 	opts.Features = map[string]bool{"a": true}
 	for seed := uint64(1); seed <= 50; seed++ {
 		dsttest.RunSeed(seed, opts, func(h *dsttest.Harness) {

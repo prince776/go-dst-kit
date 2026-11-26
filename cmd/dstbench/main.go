@@ -159,7 +159,7 @@ func measure(dir string, cfg config, bugName, test, reached string, seeds int, f
 	if cfg.Tags != "" {
 		args = append(args, "-tags", cfg.Tags)
 	}
-	args = append(args, cfg.Package, "-dst.keepgoing", "-dst.json="+tmp.Name(),
+	args = append(args, cfg.Package, "-dst.keepgoing", "-dst.corpus=false", "-dst.json="+tmp.Name(),
 		fmt.Sprintf("-dst.seeds=%d", seeds), "-dst.first="+first)
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir

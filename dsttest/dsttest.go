@@ -173,8 +173,12 @@ type Options struct {
 	// those after acting), sometimes slowed by 1ms to 1s.
 	Points map[string]Point
 	// Features pins workload features (Harness.Feature) on or off for
-	// every seed; the others are drawn per seed.
+	// every seed; the others are drawn per seed. The key "*" pins every
+	// feature not named: a sweep of the fixed, original workload.
 	Features map[string]bool
+	// Corpus is the directory of saved failing paths, replayed by Run
+	// before it sweeps (default testdata/dst, one directory per test).
+	Corpus string
 	// Start pins what clocks read at the start of every run (default:
 	// drawn per seed, see Swarm.Start).
 	Start time.Time
@@ -480,6 +484,9 @@ func (h *Harness) Feature(name string) bool {
 		return on
 	}
 	on, pinned := h.opts.Features[name]
+	if !pinned {
+		on, pinned = h.opts.Features["*"]
+	}
 	if !pinned {
 		f := fnv.New64a()
 		f.Write([]byte(name))
@@ -1300,7 +1307,13 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 		return Report{Runs: 1, Coverage: r.Coverage}
 	}
 	call := runCall(t)
+	if *flagCorpus && os.Getenv(childEnv) == "" {
+		replayCorpus(t, t.Name(), opts, setup, *flagSave)
+	}
 	rep := Sweep(opts, setup)
+	if *flagSave {
+		saveFailures(t, t.Name(), opts, rep)
+	}
 	if opts.DeterminismChecks >= 0 && *flagXProcess && os.Getenv(childEnv) == "" && len(rep.Results) > 0 {
 		check := []Result{rep.Results[0]}
 		if len(rep.Failed) > 0 && rep.Failed[0].Seed != check[0].Seed {

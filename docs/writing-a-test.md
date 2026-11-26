@@ -400,6 +400,11 @@ some actions does the others more often, and some bugs only show when a
 behaviour that crowds them out is absent. On go-diskqueue, consumers that
 lag hide one bug entirely and expose another.
 
+`Options.Features` pins features: `{"*": true}` pins every feature on,
+`{"*": false, "x": true}` all off but x. Keep one sweep of your original,
+fixed workload (whichever way that pins) as a floor: features trade the
+easy bugs' rate for the hard ones'.
+
 Don't make a feature of a rare trigger on a failure path (giving up,
 then trying something else): a bug needing two such features is left
 for a quarter of the seeds. A failing seed's report lists its features,
@@ -473,6 +478,35 @@ only reproduces its bug until the next change, the fix included. To keep
 a fixed bug fixed, write a small ordinary test of the exact scenario the
 trace showed (it should fail when the fix is reverted), and keep the sweep
 that found it.
+
+## Paths and the corpus
+
+A failing run is reported as a *path*: its seed, plus any forks
+(`17/"leader elected"#2:99`: after the second `Sometimes("leader
+elected")`, continue with seed 99). `-dst.path='...'` replays it; a path
+without forks is just `-dst.seed`.
+
+`go test -dst.save` saves the sweep's failing paths to
+`testdata/dst/<Test>/`; commit them. `Run` replays them before every
+sweep, the way `go test` runs `testdata/fuzz`. Each entry stores the run's
+trace, so a replay is one of:
+
+- **exact**: the same run as when it was saved. A failure is the same
+  failure.
+- **drifted**: the code changed, so the same path is now a different run
+  (with the same faults and features). A drifted failure is still a real
+  failure of the current code. A drifted entry that passes says nothing
+  about whether its bug is fixed; `-dst.save` refreshes its trace.
+
+So a saved path is a head start, not a regression test: when a sweep finds
+a bug, also write a test that targets it (as for a parser, a plain unit
+test of the function that was wrong). `-dst.corpus=false` skips the
+corpus.
+
+The trace hashes scheduling decisions and events, not the values your
+code draws: a run whose schedule doesn't depend on its data can change
+without its trace changing. In practice data feeds back into scheduling
+(a retry, a branch that sends) and drift shows.
 
 ## Sweeps that pass for the wrong reason
 
