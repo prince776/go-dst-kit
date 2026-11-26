@@ -398,6 +398,12 @@ v0.1.0 (main module), dstgrpc/v0.1.0, dstlint/v0.1.0.
   needs no hand-written wrapper. To settle: naming points from methods,
   mapping errors per method (reads vs writes), methods without a context
   or an error, and streaming results.
+- **Bit rot (opt-in disk fault)**: corruption of data already on disk:
+  occasionally flip bits in synced data (and perhaps misdirected or
+  unreadable sectors). Opt-in (`Faults.BitRot`, not in `AllFaults`): code
+  without checksums fails it by design. First use: go-diskqueue, which has
+  no checksums. Pulled forward from the deferred storage faults (Prince,
+  2026-11-26).
 - **GC-shaped example**: a small pack store with dedupe and a
   consolidating GC as a template (checks gated on durable completion,
   faults off then on).
