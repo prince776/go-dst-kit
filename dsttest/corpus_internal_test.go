@@ -12,8 +12,13 @@ import (
 
 type fakeT struct{ errs, logs []string }
 
-func (f *fakeT) Errorf(format string, args ...any) { f.errs = append(f.errs, fmt.Sprintf(format, args...)) }
-func (f *fakeT) Logf(format string, args ...any)   { f.logs = append(f.logs, fmt.Sprintf(format, args...)) }
+func (f *fakeT) Helper() {}
+func (f *fakeT) Errorf(format string, args ...any) {
+	f.errs = append(f.errs, fmt.Sprintf(format, args...))
+}
+func (f *fakeT) Logf(format string, args ...any) {
+	f.logs = append(f.logs, fmt.Sprintf(format, args...))
+}
 
 // A corpus entry's life: saved when a sweep fails; replayed as an exact
 // failure while the code is unchanged; as a drifted failure once the code

@@ -19,6 +19,13 @@ var (
 	flagCorpus = flag.Bool("dst.corpus", true, "replay the corpus before sweeping")
 )
 
+// logger is the part of testing.TB the corpus reports through.
+type logger interface {
+	Helper()
+	Errorf(string, ...any)
+	Logf(string, ...any)
+}
+
 // corpusEntry is one saved path: a run that failed, kept so later runs of
 // the test replay it first. It is a starting point, not a regression test:
 // once the code changes the same path may play differently (it drifts),
@@ -74,7 +81,7 @@ func loadCorpus(dir string) (map[string]corpusEntry, error) {
 }
 
 func newEntry(r Result) corpusEntry {
-	e := corpusEntry{Path: r.Path.String(), Saved: time.Now().UTC().Format("2006-01-02"), Trace: fmt.Sprintf("%016x", r.Fingerprint)}
+	e := corpusEntry{Path: r.Path.String(), Saved: time.Now().Format("2006-01-02"), Trace: fmt.Sprintf("%016x", r.Fingerprint)}
 	if r.Err != nil {
 		e.Kept = "failed: " + strings.SplitN(r.Err.Error(), "\n", 2)[0]
 	}
@@ -109,10 +116,8 @@ func diverged(e corpusEntry, r Result, every uint64) string {
 // replayCorpus replays test's saved entries: a failing one fails the test
 // (exact, or drifted if the code changed since), a drifted one that passes
 // is logged. With save, drifted entries get the current trace.
-func replayCorpus(t interface {
-	Errorf(string, ...any)
-	Logf(string, ...any)
-}, test string, opts Options, setup func(h *Harness), save bool) {
+func replayCorpus(t logger, test string, opts Options, setup func(h *Harness), save bool) {
+	t.Helper()
 	dir := corpusDir(opts, test)
 	entries, err := loadCorpus(dir)
 	if err != nil {
@@ -155,10 +160,8 @@ func replayCorpus(t interface {
 
 // saveFailures adds the sweep's failing paths to the corpus (the first
 // few, as Run reports them).
-func saveFailures(t interface {
-	Errorf(string, ...any)
-	Logf(string, ...any)
-}, test string, opts Options, rep Report) {
+func saveFailures(t logger, test string, opts Options, rep Report) {
+	t.Helper()
 	dir := corpusDir(opts, test)
 	for i, r := range rep.Failed {
 		if i == 3 {
