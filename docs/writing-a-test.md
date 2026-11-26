@@ -208,6 +208,49 @@ default: // timeout: it may or may not have happened
 Getting the third case right matters: a timed-out write may still take
 effect later, and the checker allows exactly that.
 
+## Designing the workload
+
+The simulation explores timing: interleavings, crashes, lost replies. It
+can only find bugs in what the workload does and what the fakes can say.
+Most of a sweep's power comes from these choices.
+
+- **Do what the real clients do.** Retry the same request (same request
+  ID, same body) after an error or a timeout. Renew a credential the
+  server reports expired. Resend after a lost reply and expect the same
+  answer. Go away and come back later. A client that does less misses
+  bugs; one that does things the real one never does reports bugs that
+  aren't.
+- **Several clients per identity.** One user on two devices at once
+  sends concurrent requests that a per-user lock, a per-session cache or a
+  "re-fetch before write" may not cover.
+- **Every writer of shared state.** List what writes each record (an
+  account, a balance, a document) and make the workload call all of them,
+  often. Bugs between writers (lost updates, double counting) need two of
+  them in the same window.
+- **Every kind of answer.** Not only success: the outcomes the code
+  branches on (not found, refused, blocked, quota exceeded), and inputs
+  near limits (long prompts, many items, sizes near chunk or page
+  boundaries).
+- **Misuse a real client can send.** Replays, a spent token on a new
+  request, a stale version. Check they're refused.
+- **A model outside the machines.** Record what each client was told and
+  what it sent before it sent it (a request whose reply is lost may still
+  have taken effect), and check the system's final state against it.
+- **Coverage.** `h.Sometimes` each kind of operation and outcome, and
+  `h.Expect` the ones a sweep must reach.
+
+### What a fake should answer
+
+Model the service's documented failure modes, not only its happy path:
+
+| Service | Model at least |
+|---|---|
+| A database (Cosmos, DynamoDB, Postgres) | throttling (429 or its equivalent: the request didn't run), timeouts that may have committed (`FailAfter`), not found, precondition failed on a conditional write, latency |
+| An object store | not found, precondition failed, throttling (503 slow down), a write that committed but whose reply was lost |
+| A key service (KMS, Key Vault) | throttling, unavailable, a key that is disabled |
+| An HTTP API (LLM provider, payments) | error answers: 4xx for bad requests, 429 with retry-after, 500/503 overloaded; slow answers; answers that are errors in a 200 |
+| A webhook sender | at-least-once delivery, duplicates, any order, retries after a non-2xx or a timeout |
+
 ## Faults in your own fakes
 
 ### Which tool for which fault
