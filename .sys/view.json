@@ -2356,6 +2356,302 @@
       ]
     },
     {
+      "name": "dsthttp",
+      "title": "HTTP over World",
+      "purpose": "Runs net/http code in a World: your http.Handlers and http.Client calls stay unchanged; only how the server is started and which transport the client uses come from here.",
+      "what": "go dsthttp.Serve(w, ln, mux)                          // instead of http.Serve(ln, mux) client := \u0026http.Client{Transport: dsthttp.Transport(w)} // instead of http.DefaultClient\n\nIn the real World these are http.Serve and http.DefaultTransport. In a simulated World, the server is a small loop that parses requests with http.ReadRequest and calls the handler, and the transport dials through the World's network, one connection per request.\n\nIn simulated code, bound requests with a context (dst.WithTimeout), not http.Client.Timeout, which uses real timers.",
+      "paths": [
+        "dsthttp"
+      ],
+      "loc": "dsthttp/dsthttp.go:1",
+      "laws": [
+        {
+          "id": "handlers-run-unchanged",
+          "text": "The same handlers and client calls work in both Worlds (status, headers, bodies, keep-alive, methods).",
+          "status": "verified",
+          "loc": "dsthttp/dsthttp.go:17",
+          "tests": [
+            "TestHandlersRunUnchanged"
+          ],
+          "test_locs": {
+            "TestHandlersRunUnchanged": "dsthttp/dsthttp_test.go:86"
+          }
+        },
+        {
+          "id": "client-honours-context",
+          "text": "A request ends with the context's error when the context ends.",
+          "detail": "That holds even if the server never answers.",
+          "status": "verified",
+          "loc": "dsthttp/dsthttp.go:19",
+          "tests": [
+            "TestClientHonoursContext"
+          ],
+          "test_locs": {
+            "TestClientHonoursContext": "dsthttp/dsthttp_test.go:104"
+          }
+        },
+        {
+          "id": "handler-panic-fails-run",
+          "text": "A panic in a handler fails the simulated run (unlike net/http, which logs it), except http.ErrAbortHandler.",
+          "status": "verified",
+          "loc": "dsthttp/dsthttp.go:21",
+          "tests": [
+            "TestHandlerPanicFailsRun"
+          ],
+          "test_locs": {
+            "TestHandlerPanicFailsRun": "dsthttp/dsthttp_test.go:151"
+          }
+        }
+      ],
+      "assumes": [
+        {
+          "text": "In the real World, http.Serve and http.DefaultTransport give the same handler-visible behaviour.",
+          "detail": "In the real World, dsthttp passes straight through to net/http and adds no behaviour of its own.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:43",
+            "dsthttp/dsthttp.go:141"
+          ]
+        }
+      ],
+      "children": [
+        "dsthttp.Serve",
+        "dsthttp.Transport"
+      ],
+      "depends_on": [
+        "dst"
+      ],
+      "change": {
+        "kind": "contract-preserving",
+        "reason": "Only the doc-comment wording of the verified law client-honours-context changed; the meaning is the same. Line numbers after it moved up by one."
+      }
+    },
+    {
+      "name": "dsthttp.Serve",
+      "title": "Simulated server",
+      "purpose": "Accepts World connections and serves buffered HTTP/1.1 responses from a handler.",
+      "what": "In a simulated World, `Serve` accepts connections and starts a named World goroutine for each one. Each goroutine reads requests one after another with `http.ReadRequest`. Each request runs the handler with a World-cancellable context. The handler writes into an in-memory `responseWriter`, and the whole response is sent once the handler returns. Streaming is therefore not supported: `Flush` does nothing.",
+      "paths": [
+        "dsthttp"
+      ],
+      "loc": "dsthttp/dsthttp.go:43",
+      "interface": [
+        {
+          "name": "Serve",
+          "signature": "func Serve(w *dst.World, ln net.Listener, h http.Handler) error",
+          "doc": "Accepts and serves connections until the listener's Accept fails.",
+          "loc": "dsthttp/dsthttp.go:43"
+        }
+      ],
+      "laws": [
+        {
+          "text": "Serve returns the listener's Accept error.",
+          "detail": "Closing the listener is how a caller stops Serve.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:48",
+            "dsthttp/dsthttp.go:50"
+          ]
+        },
+        {
+          "text": "The client sees no response bytes until the handler returns, even after Flush.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:113",
+            "dsthttp/dsthttp.go:119",
+            "dsthttp/dsthttp.go:75",
+            "dsthttp/dsthttp.go:76"
+          ]
+        },
+        {
+          "text": "The first WriteHeader status wins; later WriteHeader calls are ignored.",
+          "detail": "Write without WriteHeader sets 200. A handler that writes nothing gets 200.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:107",
+            "dsthttp/dsthttp.go:114",
+            "dsthttp/dsthttp.go:122"
+          ]
+        },
+        {
+          "text": "A non-empty body without Content-Type gets a sniffed Content-Type.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:125",
+            "dsthttp/dsthttp.go:126"
+          ]
+        },
+        {
+          "text": "The handler's request context is cancelled as soon as the handler returns.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:65",
+            "dsthttp/dsthttp.go:69"
+          ]
+        },
+        {
+          "text": "A handler panicking with http.ErrAbortHandler closes the connection without sending a response.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:87",
+            "dsthttp/dsthttp.go:72",
+            "dsthttp/dsthttp.go:73"
+          ]
+        },
+        {
+          "text": "The connection closes after a response if the request or response asks for Close.",
+          "detail": "Otherwise the server drains any unread request body and reads the next request on the same connection.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:70",
+            "dsthttp/dsthttp.go:76",
+            "dsthttp/dsthttp.go:136"
+          ]
+        }
+      ],
+      "assumes": [
+        {
+          "text": "dst.WithCancel contexts are cancelled through the World, deterministically.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:65"
+          ]
+        }
+      ],
+      "depends_on": [
+        "dst"
+      ],
+      "uses": [
+        {
+          "to": "dst",
+          "names": [
+            "World",
+            "World.GoNamed",
+            "World.Simulated"
+          ]
+        },
+        {
+          "to": "dst.WithCancel",
+          "names": [
+            "WithCancel"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dsthttp.Transport",
+      "title": "Simulated transport",
+      "purpose": "Sends each request over a new World network connection.",
+      "what": "In a simulated World, `Transport` returns a RoundTripper. For each request it dials the World's network, writes the request with Connection: close, and reads one response. The request context controls the connection through deadlines: the context's deadline becomes the connection's deadline, and cancellation sets a deadline in the past. That unblocks any pending I/O. Only plain http URLs are supported.",
+      "paths": [
+        "dsthttp"
+      ],
+      "loc": "dsthttp/dsthttp.go:141",
+      "interface": [
+        {
+          "name": "Transport",
+          "signature": "func Transport(w *dst.World) http.RoundTripper",
+          "doc": "Returns the World's RoundTripper.",
+          "loc": "dsthttp/dsthttp.go:141"
+        },
+        {
+          "name": "Client",
+          "signature": "func Client(w *dst.World) *http.Client",
+          "doc": "Returns an http.Client using Transport(w).",
+          "loc": "dsthttp/dsthttp.go:149"
+        }
+      ],
+      "laws": [
+        {
+          "text": "A request whose URL scheme isn't http fails without dialing.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:156",
+            "dsthttp/dsthttp.go:157"
+          ]
+        },
+        {
+          "text": "A URL host without a port dials port 80.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:160",
+            "dsthttp/dsthttp.go:161"
+          ]
+        },
+        {
+          "text": "Every request uses its own connection and is sent with Connection: close.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:164",
+            "dsthttp/dsthttp.go:184"
+          ]
+        },
+        {
+          "text": "Closing the response body closes the connection.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:211",
+            "dsthttp/dsthttp.go:214"
+          ]
+        },
+        {
+          "text": "A body read that fails after context cancellation returns the context's error.",
+          "detail": "io.EOF passes through unchanged even if the context has already ended.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:203",
+            "dsthttp/dsthttp.go:205",
+            "dsthttp/dsthttp.go:206"
+          ]
+        }
+      ],
+      "assumes": [
+        {
+          "text": "World Net().DialContext stops dialing when the context ends.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:164"
+          ]
+        },
+        {
+          "text": "Setting a past deadline on a World connection makes pending reads and writes fail.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:153",
+            "dsthttp/dsthttp.go:174"
+          ]
+        },
+        {
+          "text": "dst.AfterDone runs its callback when the context ends, unless stop was called first.",
+          "status": "inferred",
+          "evidence": [
+            "dsthttp/dsthttp.go:174",
+            "dsthttp/dsthttp.go:212"
+          ]
+        }
+      ],
+      "depends_on": [
+        "dst"
+      ],
+      "uses": [
+        {
+          "to": "dst",
+          "names": [
+            "Net",
+            "World",
+            "World.Net",
+            "World.Simulated"
+          ]
+        },
+        {
+          "to": "dst.WithCancel",
+          "names": [
+            "AfterDone"
+          ]
+        }
+      ]
+    },
+    {
       "name": "dstlint",
       "title": "Simulation linter",
       "purpose": "Is an analyzer that finds code in simulated packages that would escape the World: raw goroutines, channels, select, the clock, sync primitives that wait, context timers, global randomness, and the os, net, net/http and gRPC entry points.",
@@ -3901,6 +4197,281 @@
           "status": "inferred",
           "evidence": [
             "examples/dedupe/dedupe.go:132"
+          ]
+        }
+      ],
+      "depends_on": [
+        "dst"
+      ]
+    },
+    {
+      "name": "gcounter",
+      "title": "Grow-only counter",
+      "purpose": "Is a replicated grow-only counter (a G-Counter CRDT): any node accepts increments, nodes gossip their state, and once gossip gets through every node reports the same total.",
+      "what": "Ordinary Go (goroutines, TCP, files) written against a dst.World.\n\nEach node counts its own increments in one slot of a vector and persists the vector before acknowledging, by the classic atomic file replace: write a temporary file, fsync it, rename it over the old one, fsync the directory. Merging takes the larger count per slot, so gossip can repeat, reorder and duplicate freely.\n\nBugs plants known mistakes; the test shows the simulator catches each.",
+      "paths": [
+        "examples/gcounter"
+      ],
+      "loc": "examples/gcounter/gcounter.go:1",
+      "interface": [
+        {
+          "name": "Node.Serve",
+          "signature": "func (n *Node) Serve(ln net.Listener) error",
+          "doc": "Answers inc, get and merge requests on a listener.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:137"
+        },
+        {
+          "name": "Node.Gossip",
+          "signature": "func (n *Node) Gossip()",
+          "doc": "Pushes state to random peers forever.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:169"
+        },
+        {
+          "name": "Node.Value",
+          "signature": "func (n *Node) Value() uint64",
+          "doc": "Sum of the counts this node knows.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:79"
+        },
+        {
+          "name": "Bugs",
+          "signature": "type Bugs struct{}",
+          "doc": "Switches that plant known mistakes in a node.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:40"
+        }
+      ],
+      "laws": [
+        {
+          "id": "converges",
+          "text": "Once faults stop, every node reports the same value.",
+          "status": "verified",
+          "loc": "examples/gcounter/gcounter.go:15",
+          "tests": [
+            "TestGCounter"
+          ],
+          "test_locs": {
+            "TestGCounter": "examples/gcounter/gcounter_test.go:94"
+          }
+        },
+        {
+          "id": "counts-exactly",
+          "text": "The value lies between the acknowledged and the attempted increments.",
+          "detail": "That holds under crashes, partitions, resets and power loss.",
+          "status": "verified",
+          "loc": "examples/gcounter/gcounter.go:16",
+          "tests": [
+            "TestGCounter"
+          ],
+          "test_locs": {
+            "TestGCounter": "examples/gcounter/gcounter_test.go:94"
+          }
+        },
+        {
+          "text": "Zero-valued Bugs gives the correct replica; each set field plants one mistake.",
+          "detail": "Tests rely on the default being correct and each switch being independent.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:40",
+            "examples/gcounter/gcounter.go:100",
+            "examples/gcounter/gcounter.go:127"
+          ]
+        }
+      ],
+      "children": [
+        "gcounter.Node",
+        "gcounter.call"
+      ],
+      "depends_on": [
+        "dst"
+      ],
+      "change": {
+        "kind": "contract-preserving",
+        "reason": "Only the wording of the counts-exactly law's doc comment changed; its meaning and the code are the same."
+      }
+    },
+    {
+      "name": "gcounter.Node",
+      "title": "Replica",
+      "purpose": "One replica: durable local counts, max-merge of gossip, request server.",
+      "what": "A `Node` holds a vector of counts keyed by node name, guarded by a `dst.Mutex`. Increments bump its own slot and are persisted with a write-temp, fsync, rename, fsync-directory sequence before being acknowledged. Incoming gossip is merged by taking the per-slot maximum, and `Gossip` periodically sends the whole vector to a random peer. `Start` rebuilds the vector from the state file on restart.",
+      "paths": [
+        "examples/gcounter"
+      ],
+      "loc": "examples/gcounter/gcounter.go:53",
+      "interface": [
+        {
+          "name": "Start",
+          "signature": "func Start(w *dst.World, name string, peers []string, bugs Bugs) (*Node, error)",
+          "doc": "Recovers a replica from the World's disk.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:63"
+        },
+        {
+          "name": "Node.Serve",
+          "signature": "func (n *Node) Serve(ln net.Listener) error",
+          "doc": "Answers inc, get and merge requests on a listener.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:137"
+        },
+        {
+          "name": "Node.Gossip",
+          "signature": "func (n *Node) Gossip()",
+          "doc": "Pushes state to random peers forever.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:169"
+        },
+        {
+          "name": "Node.Value",
+          "signature": "func (n *Node) Value() uint64",
+          "doc": "Sum of the counts this node knows.",
+          "group": "Replica",
+          "loc": "examples/gcounter/gcounter.go:79"
+        }
+      ],
+      "laws": [
+        {
+          "text": "An inc request is answered \"ok\" only after the new state is renamed into place and the directory synced.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:116",
+            "examples/gcounter/gcounter.go:105",
+            "examples/gcounter/gcounter.go:108",
+            "examples/gcounter/gcounter.go:152"
+          ]
+        },
+        {
+          "text": "An increment whose persist fails leaves Value unchanged and gets no reply.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:116",
+            "examples/gcounter/gcounter.go:117",
+            "examples/gcounter/gcounter.go:152"
+          ]
+        },
+        {
+          "text": "Merging the same state again, or older state, does not change Value.",
+          "detail": "Merge takes the per-slot maximum, so it is idempotent, commutative and never lowers a slot.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:130"
+          ]
+        },
+        {
+          "text": "Start with no state file yields a node whose Value is zero.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:64",
+            "examples/gcounter/gcounter.go:67"
+          ]
+        },
+        {
+          "text": "Start on an unparseable state file returns a corrupt-state error, not a node.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:71",
+            "examples/gcounter/gcounter.go:72"
+          ]
+        },
+        {
+          "text": "Malformed merge payloads and unknown commands get no reply and change nothing.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:149",
+            "examples/gcounter/gcounter.go:159"
+          ]
+        },
+        {
+          "text": "Serve returns the listener's Accept error and otherwise never returns.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:139",
+            "examples/gcounter/gcounter.go:141"
+          ]
+        }
+      ],
+      "assumes": [
+        {
+          "text": "The World's FS Rename atomically replaces the state file.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:105"
+          ]
+        },
+        {
+          "text": "File Sync then dst.SyncDir make the renamed state survive power loss.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:101",
+            "examples/gcounter/gcounter.go:108"
+          ]
+        },
+        {
+          "text": "Gossip is started only on nodes with at least one peer.",
+          "detail": "Picking a peer from an empty list panics.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:175"
+          ]
+        }
+      ],
+      "depends_on": [
+        "dst",
+        "gcounter.call"
+      ]
+    },
+    {
+      "name": "gcounter.call",
+      "title": "Client calls",
+      "purpose": "One-request-per-connection client for the replica's text protocol.",
+      "what": "`call` dials a node through the World's network, sends one line and reads one reply line, all under a 200ms World-timed deadline. `Inc` and `Get` are thin wrappers that interpret the reply. Anything short of the expected reply is reported as failure, which for `Inc` means the increment's fate is unknown.",
+      "paths": [
+        "examples/gcounter"
+      ],
+      "loc": "examples/gcounter/gcounter.go:181",
+      "interface": [
+        {
+          "name": "Inc",
+          "signature": "func Inc(w *dst.World, addr string) bool",
+          "doc": "Asks a node to increment; true means counted.",
+          "group": "Client calls",
+          "loc": "examples/gcounter/gcounter.go:200"
+        },
+        {
+          "name": "Get",
+          "signature": "func Get(w *dst.World, addr string) (uint64, error)",
+          "doc": "Asks a node for its value.",
+          "group": "Client calls",
+          "loc": "examples/gcounter/gcounter.go:206"
+        }
+      ],
+      "laws": [
+        {
+          "text": "Inc returns true only when the node replied exactly \"ok\".",
+          "detail": "False means the increment may or may not have been counted.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:200",
+            "examples/gcounter/gcounter.go:202"
+          ]
+        },
+        {
+          "text": "Inc and Get give up after 200ms of World time.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:182",
+            "examples/gcounter/gcounter.go:189",
+            "examples/gcounter/gcounter.go:190"
+          ]
+        },
+        {
+          "text": "Get returns an error when there is no reply or it is not a number.",
+          "status": "inferred",
+          "evidence": [
+            "examples/gcounter/gcounter.go:208",
+            "examples/gcounter/gcounter.go:211"
           ]
         }
       ],
