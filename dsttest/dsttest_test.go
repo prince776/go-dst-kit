@@ -711,3 +711,28 @@ func TestCall(t *testing.T) {
 		t.Errorf("%d slow calls were cut by their deadline and %d not; want some of each", cut, uncut)
 	}
 }
+
+// Verifies: [raw-is-the-channel]
+// Fails if: Raw in the real World isn't the channel values flow through,
+// or Raw of a simulated channel doesn't panic.
+func TestChanRaw(t *testing.T) {
+	w := realworld.New(realworld.Options{})
+	c := dst.MakeChan[int](w, 1)
+	c.Send(7)
+	if v := <-c.Raw(); v != 7 {
+		t.Fatalf("received %d through Raw, want 7", v)
+	}
+	if dst.RecvOnly(c.Raw()).Raw() != c.Raw() {
+		t.Fatal("RecvOnly(c.Raw()).Raw() isn't the same channel")
+	}
+	var panicked bool
+	dsttest.Sweep(dsttest.Options{Seeds: 1, FaultPhase: time.Millisecond, RecoveryPhase: time.Millisecond}, func(h *dsttest.Harness) {
+		func() {
+			defer func() { panicked = recover() != nil }()
+			dst.MakeChan[int](h.World(), 1).Raw()
+		}()
+	})
+	if !panicked {
+		t.Fatal("Raw on a simulated channel didn't panic")
+	}
+}

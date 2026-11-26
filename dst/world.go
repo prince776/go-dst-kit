@@ -38,6 +38,8 @@
 //     to become ready.
 //   - [timers-follow-world-clock] Timers, tickers, Sleep and context
 //     deadlines fire by the World's clock, in deadline order.
+//   - [raw-is-the-channel] In the real World, Chan.Raw is the native
+//     channel values flow through; on a simulated channel it panics.
 //   - [real-never-injects] In the real World, Inject always returns None,
 //     Do and Call always run their operation, and Buggify is always false.
 //   - [call-fail-never-runs] On Fail, Call doesn't run its operation and

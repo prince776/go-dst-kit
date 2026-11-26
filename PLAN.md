@@ -356,7 +356,22 @@ long DST sweep. First two:
    token issuance and redemption over Azure Cosmos DB, Key Vault, Dodo
    Payments and Gemini; fakes with fault points against real guarantees.
 
-Library gaps found along the way go in the Todo below. Released:
+Library gaps found along the way go in the Todo below.
+
+**go-diskqueue (done, 2026-11-26):** migrated (needed `Chan.Raw`: APIs that
+return channels return `dst.Chan`, `Raw()` gives production code the
+native one; and World filesystems are rooted, so `New(dataPath)` roots a
+real World there). Its upstream tests pass on the real World. DST tests
+state its durability contract and found four bugs, each fixed and each
+caught again when its fix is reverted: no directory fsync after the
+metadata rename (synced consumption redelivered), `Close` persisting
+metadata without fsyncing data (acked, synced messages lost), a data file
+left by a crash before the first sync reused in place (messages lost to
+the reader's stale buffer), and upstream issue #38 (a false corruption
+report at a file roll, found by the no-fault sweep alone). Model bugs on
+the way: counting an in-progress Put as durable, and counting pre-crash
+deliveries as synced consumption; `Depth()` under-reports after crash
+recovery. Released:
 v0.1.0 (main module), dstgrpc/v0.1.0, dstlint/v0.1.0.
 
 ## Todo (Prince, 2026-11-26; propose each design before building)

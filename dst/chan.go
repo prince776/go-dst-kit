@@ -29,6 +29,17 @@ func MakeChan[T any](w *World, size int) Chan[T] {
 // real World. A simulated World can't wait on it.
 func RecvOnly[T any](c <-chan T) Chan[T] { return Chan[T]{ro: c} }
 
+// Raw returns the native channel behind c in the real World, for APIs
+// that hand out a <-chan T and callers that select on it with other
+// native channels. In a simulated World there is no native channel: Raw
+// panics, and simulated callers use c itself.
+func (c Chan[T]) Raw() <-chan T {
+	if c.sim != nil {
+		panic("dst: Raw on a simulated channel: a simulated World waits on the dst.Chan itself")
+	}
+	return c.ro
+}
+
 func (c Chan[T]) isNil() bool { return c.sim == nil && c.ro == nil }
 
 // Send is c <- v.
