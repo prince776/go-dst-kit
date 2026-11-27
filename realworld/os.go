@@ -40,8 +40,18 @@ func (f *osFS) OpenFile(name string, flag int, perm fs.FileMode) (dst.File, erro
 	if err != nil {
 		return nil, err // not a typed-nil *os.File
 	}
-	return file, nil
+	return &rootFile{file, name}, nil
 }
+
+// rootFile is a file opened in the root. Its Name is the name it was
+// opened with, as os.File's is (os.Root's files report the root's path
+// joined to it, which the root then rejects as escaping).
+type rootFile struct {
+	*os.File
+	name string
+}
+
+func (f *rootFile) Name() string { return f.name }
 
 func (f *osFS) Mkdir(name string, perm fs.FileMode) error {
 	r, err := f.r()

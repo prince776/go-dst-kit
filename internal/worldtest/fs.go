@@ -25,6 +25,7 @@ var FSChecks = []Check{
 	{"fs/unlinked-open-file", fsUnlinked},
 	{"fs/no-escape", fsNoEscape},
 	{"fs/sync", fsSync},
+	{"fs/name-as-opened", fsName},
 }
 
 func must(err error) {
@@ -277,4 +278,18 @@ func fsSync(w *dst.World) {
 	f.Close()
 	must(dst.SyncDir(fsys, "d"))
 	must(dst.SyncDir(fsys, "."))
+}
+
+// fsName: a file's Name is the name it was opened with, as os.File's is,
+// so code can pass it back to the same FS (Remove(f.Name())).
+func fsName(w *dst.World) {
+	fsys := w.FS()
+	must(fsys.MkdirAll("d/e", 0o755))
+	f, err := fsys.OpenFile("d/e/f", os.O_CREATE|os.O_RDWR, 0o644)
+	must(err)
+	if f.Name() != "d/e/f" {
+		failf("Name() = %q, want the name as opened, %q", f.Name(), "d/e/f")
+	}
+	must(f.Close())
+	must(fsys.Remove(f.Name()))
 }
