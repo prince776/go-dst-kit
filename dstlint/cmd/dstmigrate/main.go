@@ -490,6 +490,19 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			setPos(n, n.Pos())
 			m.changes++
 		}
+	case "context":
+		switch s.Sel.Name {
+		case "WithCancel", "WithTimeout", "WithDeadline", "WithCancelCause", "WithTimeoutCause", "WithDeadlineCause":
+			// The World's: a simulated World waits on its own contexts only.
+			n.Fun = sel(ast.NewIdent("dst"), strings.TrimSuffix(s.Sel.Name, "Cause"))
+			if strings.HasSuffix(s.Sel.Name, "Cause") {
+				m.warn(n, "context."+s.Sel.Name+": dst has no Cause variant; rewritten without the cause")
+				n.Args = n.Args[:len(n.Args)-1]
+			}
+			n.Args = append([]ast.Expr{m.w()}, n.Args...)
+			setPos(n, n.Pos())
+			m.changes++
+		}
 	case "crypto/rand":
 		if s.Sel.Name == "Read" {
 			n.Fun = sel(call(sel(m.w(), "Rand")), "CryptoRead")

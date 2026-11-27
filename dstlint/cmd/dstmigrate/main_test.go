@@ -45,7 +45,7 @@ func TestMigrateSample(t *testing.T) {
 	must(bin, "-world", "Pool=$.wd", ".")
 	must("go", "vet", ".")
 	got, _ := os.ReadFile(filepath.Join(dir, "p.go"))
-	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`} {
+	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`, `context\.With`} {
 		if regexp.MustCompile(bad).Match(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
