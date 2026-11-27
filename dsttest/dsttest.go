@@ -176,6 +176,16 @@ type Options struct {
 	// every seed; the others are drawn per seed. The key "*" pins every
 	// feature not named: a sweep of the fixed, original workload.
 	Features map[string]bool
+	// Explore, if positive, makes Run explore with this many guided runs
+	// instead of sweeping Seeds (see Explore; -dst.explore).
+	Explore int
+	// ExploreFresh is the share of guided runs that are fresh seeds
+	// (default 0.25); ExploreBudget caps the runs forked from one marker
+	// (default max(8, Explore/10)); ExploreBatch is the generation size
+	// (default 32; fixed, so an exploration replays on any machine).
+	ExploreFresh  float64
+	ExploreBudget int
+	ExploreBatch  int
 	// Corpus is the directory of saved failing paths, replayed by Run
 	// before it sweeps (default testdata/dst, one directory per test).
 	Corpus string
@@ -237,6 +247,18 @@ func (o *Options) defaults() {
 	}
 	if o.DeterminismChecks == 0 {
 		o.DeterminismChecks = 5
+	}
+	if *flagExplore > 0 {
+		o.Explore = *flagExplore
+	}
+	if o.ExploreFresh == 0 {
+		o.ExploreFresh = 0.25
+	}
+	if o.ExploreBudget == 0 {
+		o.ExploreBudget = max(8, max(o.Explore, o.Seeds)/10)
+	}
+	if o.ExploreBatch == 0 {
+		o.ExploreBatch = 32
 	}
 	if o.Parallel == 0 {
 		o.Parallel = runtime.GOMAXPROCS(0)
@@ -711,8 +733,9 @@ type Result struct {
 	Expect      []string
 	// Path is the run's path; Forked how many of its forks the run reached
 	// (a fork whose anchor never came leaves the rest unapplied).
-	Path   Path
-	Forked int
+	Path      Path
+	Forked    int
+	ForkSteps []uint64 // the step each reached fork was applied at
 	// FirstMarks is the step at which each Sometimes marker was first
 	// reached: where an explorer forks to go further from there.
 	FirstMarks map[string]uint64
@@ -765,7 +788,10 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 			return nil
 		},
 	})
-	h.points = newRegistry(seed, opts, swarm, h.Sometimes, h.Logf)
+	// Fault-point firings count as coverage, but aren't markers: they
+	// look rare (the swarm turns points off) and forking from them rarely
+	// leads anywhere; exploration guides on the test's own Sometimes.
+	h.points = newRegistry(seed, opts, swarm, func(name string) { h.cover[name]++ }, h.Logf)
 	h.points.NewRand = h.sim.S.Rand // per-call decisions fork with the run
 	h.sim.S.Points = h.points
 	h.test = h.sim.Machine("test")
@@ -800,7 +826,7 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
 		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features,
-		Path: path, Forked: h.sim.S.ForksApplied(), FirstMarks: h.sim.S.FirstMarks()}
+		Path: path, Forked: h.sim.S.ForksApplied(), ForkSteps: h.sim.S.ForkSteps(), FirstMarks: h.sim.S.FirstMarks()}
 }
 
 // unfinished reports workload goroutines (and goroutines they started)
@@ -1080,12 +1106,23 @@ func compare(a, b Result) *Divergence {
 func Sweep(opts Options, setup func(h *Harness)) Report {
 	opts.defaults()
 	start := time.Now()
-	seeds := make([]uint64, opts.Seeds)
-	for i := range seeds {
-		seeds[i] = opts.FirstSeed + uint64(i)
+	paths := make([]Path, opts.Seeds)
+	for i := range paths {
+		paths[i] = Path{Seed: opts.FirstSeed + uint64(i)}
 	}
-	results := make([]Result, len(seeds))
-	divs := make([]*Divergence, len(seeds))
+	results, divs := runAll(paths, opts, setup, opts.DeterminismChecks)
+	rep := aggregate(opts, results, divs)
+	rep.Wall = time.Since(start)
+	return rep
+}
+
+// runAll runs paths in parallel (opts.Parallel at once); the first checks
+// of them, and every failing one, run twice to check determinism. Without
+// KeepGoing it stops starting runs after a failure: those not run have a
+// zero Seed.
+func runAll(paths []Path, opts Options, setup func(h *Harness), checks int) ([]Result, []*Divergence) {
+	results := make([]Result, len(paths))
+	divs := make([]*Divergence, len(paths))
 	var mu sync.Mutex
 	stop := false
 	next := 0
@@ -1096,20 +1133,20 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 			defer wg.Done()
 			for {
 				mu.Lock()
-				if next >= len(seeds) || stop {
+				if next >= len(paths) || stop {
 					mu.Unlock()
 					return
 				}
 				i := next
 				next++
 				mu.Unlock()
-				checked := i < opts.DeterminismChecks
+				checked := i < checks
 				t0 := time.Now()
-				r := runSeed(seeds[i], opts, setup, nil, checked)
+				r := runPath(paths[i], opts, setup, nil, checked)
 				r.Wall = time.Since(t0)
 				if r.Err != nil || checked {
 					// The rerun is strict too: a misuse may explain a failure.
-					divs[i] = compare(r, runSeed(seeds[i], opts, setup, nil, true))
+					divs[i] = compare(r, runPath(paths[i], opts, setup, nil, true))
 				}
 				results[i] = r
 				if r.Err != nil && !opts.KeepGoing {
@@ -1121,6 +1158,11 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 		}()
 	}
 	wg.Wait()
+	return results, divs
+}
+
+// aggregate builds a Report from runs in order (skipping those not run).
+func aggregate(opts Options, results []Result, divs []*Divergence) Report {
 	rep := Report{FirstSeed: opts.FirstSeed, Coverage: map[string]int{}}
 	expect := map[string]bool{}
 	for i, r := range results {
@@ -1151,7 +1193,6 @@ func Sweep(opts Options, setup func(h *Harness)) Report {
 			}
 		}
 	}
-	rep.Wall = time.Since(start)
 	return rep
 }
 
@@ -1177,7 +1218,8 @@ type seedRecord struct {
 	Call     int             `json:"call"` // which call of Run in the test (0 is the first)
 	Seed     uint64          `json:"seed"`
 	Trace    string          `json:"trace"` // the run's fingerprint, in hex
-	Index    int             `json:"index"` // position in the sweep (0 is the first seed)
+	Index    int             `json:"index"` // position in the sweep (0 is the first run)
+	Path     string          `json:"path"`
 	Failed   bool            `json:"failed"`
 	Error    string          `json:"error,omitempty"`
 	Steps    uint64          `json:"steps"`
@@ -1194,8 +1236,8 @@ func writeJSON(path, test string, call int, rep Report) error {
 		return err
 	}
 	enc := json.NewEncoder(f)
-	for _, r := range rep.Results {
-		rec := seedRecord{Test: test, Call: call, Trace: fmt.Sprintf("%016x", r.Fingerprint), Seed: r.Seed, Index: int(r.Seed - rep.FirstSeed), Failed: r.Err != nil,
+	for i, r := range rep.Results {
+		rec := seedRecord{Test: test, Call: call, Trace: fmt.Sprintf("%016x", r.Fingerprint), Seed: r.Seed, Index: i, Path: r.Path.String(), Failed: r.Err != nil,
 			Steps: r.Steps, SimNS: int64(r.SimTime), WallNS: int64(r.Wall), Coverage: r.Coverage, Features: r.Features}
 		if r.Err != nil {
 			rec.Error = strings.SplitN(r.Err.Error(), "\n", 2)[0]
@@ -1310,7 +1352,12 @@ func Run(t testing.TB, opts Options, setup func(h *Harness)) Report {
 	if *flagCorpus && os.Getenv(childEnv) == "" {
 		replayCorpus(t, t.Name(), opts, setup, *flagSave)
 	}
-	rep := Sweep(opts, setup)
+	var rep Report
+	if opts.Explore > 0 || *flagExplore > 0 {
+		rep = Explore(opts, setup)
+	} else {
+		rep = Sweep(opts, setup)
+	}
 	if *flagSave {
 		saveFailures(t, t.Name(), opts, rep)
 	}

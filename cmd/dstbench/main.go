@@ -58,6 +58,7 @@ type record struct {
 	Failed   bool            `json:"failed"`
 	Error    string          `json:"error"`
 	WallNS   int64           `json:"wall_ns"`
+	Path     string          `json:"path"`
 	Coverage map[string]int  `json:"coverage"`
 	Features map[string]bool `json:"features"`
 }
@@ -74,6 +75,7 @@ type cell struct {
 	CPUToFirst       float64 // seconds of seed runs up to the first failure
 	Reached          float64 // share of seeds that reached the precondition (-1: no marker)
 	FirstError       string
+	Roots            int     // distinct root seeds among the failures (runs forked from one root aren't independent)
 	Wall             float64 // the cell's wall-clock seconds
 	HeldOut          bool
 	ExpectedFailures bool             // false for the baseline
@@ -89,6 +91,7 @@ func main() {
 	onlyTest := flag.String("test", "", "run only this sweep")
 	noBaseline := flag.Bool("no-baseline", false, "skip the baseline")
 	out := flag.String("out", "", "also write the cells as JSON to this file")
+	explore := flag.Bool("explore", false, "run each cell as guided exploration (-dst.explore) of -seeds runs, not a sweep")
 	flag.Parse()
 
 	data, err := os.ReadFile(*cfgPath)
@@ -110,7 +113,7 @@ func main() {
 		if *onlyTest != "" && test != *onlyTest {
 			return
 		}
-		c, err := measure(dir, cfg, bugName, test, reached, *seeds, *first)
+		c, err := measure(dir, cfg, bugName, test, reached, *seeds, *first, *explore)
 		if err != nil {
 			fatal(fmt.Errorf("%s under %s: %w", orBaseline(bugName), test, err))
 		}
@@ -148,7 +151,7 @@ func orBaseline(name string) string {
 }
 
 // measure runs one sweep with one bug re-inserted (none for "").
-func measure(dir string, cfg config, bugName, test, reached string, seeds int, first string) (cell, error) {
+func measure(dir string, cfg config, bugName, test, reached string, seeds int, first string, explore bool) (cell, error) {
 	tmp, err := os.CreateTemp("", "dstbench-*.jsonl")
 	if err != nil {
 		return cell{}, err
@@ -161,6 +164,9 @@ func measure(dir string, cfg config, bugName, test, reached string, seeds int, f
 	}
 	args = append(args, cfg.Package, "-dst.keepgoing", "-dst.corpus=false", "-dst.json="+tmp.Name(),
 		fmt.Sprintf("-dst.seeds=%d", seeds), "-dst.first="+first)
+	if explore {
+		args = append(args, fmt.Sprintf("-dst.explore=%d", seeds))
+	}
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), cfg.Env+"="+bugName)
@@ -207,19 +213,46 @@ func measure(dir string, cfg config, bugName, test, reached string, seeds int, f
 		if reached != "" && r.Coverage[reached] > 0 {
 			reachedN++
 		}
-		for f, on := range r.Features {
+	}
+	// Features are per root seed: count each root once, failed if any of
+	// its runs failed (a sweep has one run per root).
+	type rootInfo struct {
+		failed   bool
+		features map[string]bool
+	}
+	roots := map[string]*rootInfo{}
+	var order []string
+	for _, r := range recs {
+		root := strings.SplitN(r.Path, "/", 2)[0]
+		if root == "" {
+			root = fmt.Sprint(r.Seed)
+		}
+		ri := roots[root]
+		if ri == nil {
+			ri = &rootInfo{features: r.Features}
+			roots[root] = ri
+			order = append(order, root)
+		}
+		ri.failed = ri.failed || r.Failed
+	}
+	for _, root := range order {
+		r := roots[root]
+		if r.failed {
+			c.Roots++
+		}
+		for f, on := range r.features {
 			if c.Features == nil {
 				c.Features = map[string]split{}
 			}
 			sp := c.Features[f]
 			if on {
 				sp.On++
-				if r.Failed {
+				if r.failed {
 					sp.FailOn++
 				}
 			} else {
 				sp.Off++
-				if r.Failed {
+				if r.failed {
 					sp.FailOff++
 				}
 			}
@@ -249,7 +282,7 @@ func wilson(k, n int) (float64, float64) {
 
 func report(cells []cell, seeds int) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "bug\tsweep\tfailed\trate per seed (95%)\tfirst failure\tCPU to first\treached\t")
+	fmt.Fprintln(w, "bug\tsweep\tfailed\trate per run (95%)\tfailing roots\tfirst failure\tCPU to first\treached\t")
 	found, total, bad := 0, 0, 0
 	for _, c := range cells {
 		name := orBaseline(c.Bug)
@@ -258,14 +291,14 @@ func report(cells []cell, seeds int) {
 		}
 		ff, cpu := "never", "-"
 		if c.FirstFailure > 0 {
-			ff, cpu = fmt.Sprintf("seed #%d", c.FirstFailure), fmt.Sprintf("%.1fs", c.CPUToFirst)
+			ff, cpu = fmt.Sprintf("run #%d", c.FirstFailure), fmt.Sprintf("%.1fs", c.CPUToFirst)
 		}
 		reached := "-"
 		if c.Reached >= 0 {
 			reached = fmt.Sprintf("%.0f%%", 100*c.Reached)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d/%d\t%.1f%% [%.1f, %.1f]\t%s\t%s\t%s\t\n", name, c.Test, c.Failures, c.Seeds,
-			100*c.Rate, 100*c.Low, 100*c.High, ff, cpu, reached)
+		fmt.Fprintf(w, "%s\t%s\t%d/%d\t%.1f%% [%.1f, %.1f]\t%d\t%s\t%s\t%s\t\n", name, c.Test, c.Failures, c.Seeds,
+			100*c.Rate, 100*c.Low, 100*c.High, c.Roots, ff, cpu, reached)
 		if !c.ExpectedFailures && c.Failures > 0 {
 			bad++
 		}

@@ -120,6 +120,7 @@ type Scheduler struct {
 	streams      []*stream
 	curSeed      uint64            // the seed streams are drawn from now (the last fork's)
 	forked       int               // forks applied
+	forkAt       []uint64          // the step each was applied at
 	forkNow      bool              // the next fork's marker anchor has come
 	marks        map[string]int    // Mark counts
 	firstAt      map[string]uint64 // the step of each marker's first Mark
@@ -395,6 +396,7 @@ func (s *Scheduler) fork(seed uint64) {
 		st.pcg.Seed(seed^st.key, seed*0x9e3779b97f4a7c15+st.key)
 	}
 	s.forked++
+	s.forkAt = append(s.forkAt, s.steps)
 	s.forkNow = false
 	s.Logf("fork %d: seed %d (step %d)", s.forked, seed, s.steps)
 }
@@ -416,6 +418,9 @@ func (s *Scheduler) Mark(name string) {
 
 // FirstMarks is the step at which each marker was first reached.
 func (s *Scheduler) FirstMarks() map[string]uint64 { return s.firstAt }
+
+// ForkSteps is the step each applied fork was applied at.
+func (s *Scheduler) ForkSteps() []uint64 { return s.forkAt }
 
 // ForksApplied is how many of Options.Forks the run reached.
 func (s *Scheduler) ForksApplied() int { return s.forked }
