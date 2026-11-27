@@ -67,4 +67,17 @@ func (p *Pool) start() {
 
 func (p *Pool) worker(i int) { _ = i; _ = <-p.jobs + 1 }
 
+type job struct{ n int }
+
+// wait returns from every case: the migrated function must still end in a
+// terminating statement, and job is unqualified in its own package.
+func (p *Pool) wait(js chan *job) int {
+	select {
+	case j := <-js:
+		return j.n
+	case <-p.done:
+		return 0
+	}
+}
+
 func dstRecv[T any](c dst.Chan[T]) T { v, _ := c.Recv(); return v }

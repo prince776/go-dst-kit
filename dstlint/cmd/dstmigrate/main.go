@@ -71,7 +71,7 @@ func main() {
 		os.Exit(1)
 	}
 	for _, pkg := range pkgs {
-		m := &migrator{fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
+		m := &migrator{pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
 			m.plans = nil
@@ -114,6 +114,7 @@ func main() {
 }
 
 type migrator struct {
+	pkg      *types.Package
 	fset     *token.FileSet
 	info     *types.Info
 	worlds   map[string]string
@@ -137,7 +138,14 @@ func (m *migrator) chanElem(e ast.Expr) string {
 	return types.TypeString(m.info.TypeOf(e).Underlying().(*types.Chan).Elem(), m.qualifier)
 }
 
-func (m *migrator) qualifier(p *types.Package) string { return p.Name() }
+// qualifier names types as code in the migrated package would: its own
+// unqualified, others by package name.
+func (m *migrator) qualifier(p *types.Package) string {
+	if p == m.pkg {
+		return ""
+	}
+	return p.Name()
+}
 
 func expr(src string) ast.Expr {
 	e, err := parseExpr(src)
@@ -482,7 +490,10 @@ func spliceSelects(name string, src []byte, plans []selectPlan) ([]byte, error) 
 			}
 			body.WriteString(caseBody)
 		}
-		repl := head.String() + "dst.Select(" + plan.world + ",\n" + ops.String() + ")\nswitch " + id + " {\n" + body.String() + "}\n}"
+		// The default never runs (one case always fires); it keeps a
+		// select whose cases all return a terminating statement.
+		repl := head.String() + "dst.Select(" + plan.world + ",\n" + ops.String() + ")\nswitch " + id + " {\n" + body.String() +
+			"default:\npanic(\"dstmigrate: no select case ran\")\n}\n}"
 		src = append(append(append([]byte{}, src[:off(s.Pos())]...), repl...), src[off(s.End()):]...)
 	}
 	return src, nil
