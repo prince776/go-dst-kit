@@ -225,12 +225,6 @@ type Options struct {
 	// Start pins what clocks read at the start of every run (default:
 	// drawn per seed, see Swarm.Start).
 	Start time.Time
-	// StrictIdentity checks on every scheduling call that the World is
-	// used only from goroutines it started (about 1.8µs per call). Without
-	// it, the determinism-checked seeds and replays are checked strictly
-	// and the rest by sampling: a leftover raw goroutine misuses the World
-	// in nearly every seed, so a few strict seeds catch it.
-	StrictIdentity bool
 }
 
 // ClockOptions bound the machines' clocks. Each machine's clock starts
@@ -880,23 +874,22 @@ type Result struct {
 // RunSeed runs one seed and returns its result. logf, if set, receives the
 // event log.
 func RunSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any)) Result {
-	return runSeed(seed, opts, setup, logf, true)
+	return runSeed(seed, opts, setup, logf)
 }
 
 // RunPath runs one path (a seed, with forks) and returns its result.
 func RunPath(p Path, opts Options, setup func(h *Harness), logf func(format string, args ...any)) Result {
-	return runPath(p, opts, setup, logf, true)
+	return runPath(p, opts, setup, logf)
 }
 
-func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any), strict bool) Result {
-	return runPath(Path{Seed: seed}, opts, setup, logf, strict)
+func runSeed(seed uint64, opts Options, setup func(h *Harness), logf func(format string, args ...any)) Result {
+	return runPath(Path{Seed: seed}, opts, setup, logf)
 }
 
-// runPath runs one path; strict checks goroutine identity on every
-// scheduling call (always with Options.StrictIdentity). The root seed
+// runPath runs one path. The root seed
 // decides the configuration (faults, features, points, clocks); forks
 // reseed only the choices.
-func runPath(path Path, opts Options, setup func(h *Harness), logf func(format string, args ...any), strict bool) Result {
+func runPath(path Path, opts Options, setup func(h *Harness), logf func(format string, args ...any)) Result {
 	seed := path.Seed
 	opts.defaults()
 	swarm := newSwarm(seed, opts.Faults, opts.FaultPhase+opts.RecoveryPhase)
@@ -907,17 +900,16 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 	netOpts := swarm.net()
 	netOpts.Note = func(event string) { h.Sometimes(event) }
 	h.sim = simworld.New(simworld.Options{
-		Seed:           seed,
-		Logf:           logf,
-		MaxTime:        opts.FaultPhase + opts.RecoveryPhase + time.Hour,
-		MaxSteps:       opts.MaxSteps,
-		Net:            netOpts,
-		StrictIdentity: strict || opts.StrictIdentity,
-		PCTDepth:       swarm.PCTDepth,
-		PCTHorizon:     swarm.PCTHorizon,
-		Start:          swarm.Start,
-		Forks:          path.schedForks(),
-		Pairs:          opts.recordPairs,
+		Seed:       seed,
+		Logf:       logf,
+		MaxTime:    opts.FaultPhase + opts.RecoveryPhase + time.Hour,
+		MaxSteps:   opts.MaxSteps,
+		Net:        netOpts,
+		PCTDepth:   swarm.PCTDepth,
+		PCTHorizon: swarm.PCTHorizon,
+		Start:      swarm.Start,
+		Forks:      path.schedForks(),
+		Pairs:      opts.recordPairs,
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
@@ -1322,11 +1314,10 @@ func runAll(paths []Path, opts Options, setup func(h *Harness), checks int) ([]R
 				mu.Unlock()
 				checked := i < checks
 				t0 := time.Now()
-				r := runPath(paths[i], opts, setup, nil, checked)
+				r := runPath(paths[i], opts, setup, nil)
 				r.Wall = time.Since(t0)
 				if r.Err != nil || checked {
-					// The rerun is strict too: a misuse may explain a failure.
-					divs[i] = compare(r, runPath(paths[i], opts, setup, nil, true))
+					divs[i] = compare(r, runPath(paths[i], opts, setup, nil))
 				}
 				results[i] = r
 				if r.Err != nil && !opts.KeepGoing {

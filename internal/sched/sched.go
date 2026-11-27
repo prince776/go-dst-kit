@@ -81,11 +81,6 @@ type Options struct {
 	// PCTHorizon is the step range the priority drops are drawn from
 	// (default 10000).
 	PCTHorizon uint64
-	// StrictIdentity checks on every scheduling call that the caller is
-	// the goroutine holding the baton (about 1.8µs each). By default a
-	// cheap structural check runs on every call and the goroutine ID on
-	// every 256th.
-	StrictIdentity bool
 	// Forks continue the run, from each fork's anchor on, with every
 	// stream of choices reseeded from the fork's seed (see Fork). They
 	// apply in order: a fork whose anchor never comes leaves the rest
@@ -589,11 +584,11 @@ func (e *PanicError) Error() string {
 // World operation from anywhere else (a raw go statement, an Always
 // invariant, the test's own goroutine) fails the run with a MisuseError.
 //
-// The check is cheap by default: the task must still be in the running
-// state (an operation made on its behalf by another goroutine changes
-// that), and every 256th call compares goroutine identities (goid: a few
-// nanoseconds on amd64 and arm64; elsewhere about 2µs and a process-wide
-// lock). StrictIdentity compares them on every call.
+// The task must still be in the running state (an operation made on its
+// behalf by another goroutine changes that), and the caller must be the
+// task's goroutine: compared on every call where goid is cheap (amd64 and
+// arm64: a few nanoseconds), on every 256th elsewhere (about 2µs and a
+// process-wide lock there).
 func (s *Scheduler) Current() *Task {
 	t := s.cur
 	if t == nil {
@@ -603,7 +598,7 @@ func (s *Scheduler) Current() *Task {
 		panic(killSignal{})
 	}
 	s.calls++
-	if t.state != running || s.opts.StrictIdentity || s.calls%256 == 0 {
+	if t.state != running || goidCheap || s.calls%256 == 0 {
 		if goid() != t.goid {
 			s.misuse(t)
 		}

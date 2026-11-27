@@ -165,10 +165,14 @@ each one.
   call would make simulations ~3x slower. A cheap structural check (the
   task must still be running) missed a real case in testing: a raw
   goroutine that steals one grant and exits leaves every state
-  consistent. So the check is strict on the determinism-checked seeds,
+  consistent. So the check was strict on the determinism-checked seeds,
   failing seeds' reruns and replays (a leftover raw goroutine misuses the
-  World in nearly every seed), sampled 1 in 16 elsewhere, and strict
-  everywhere with `Options.StrictIdentity`. A misuse aborts the run at
+  World in nearly every seed), sampled elsewhere, and strict everywhere
+  with `Options.StrictIdentity`. (2026-11-27, Prince: with goroutine
+  identity read from the g pointer, a few nanoseconds on amd64 and arm64,
+  the check runs on every World operation there, sampled elsewhere; the
+  option is gone. Measured on raft's 5-node sweep, 200 seeds: 19.5-21.7s
+  strict against 18.5-25.6s sampled, within noise.) A misuse aborts the run at
   once (no waiting for the watchdog). An Always invariant that uses the
   World is always caught. The raw-goroutine test can't run under -race:
   the misuse is a data race, which -race reports itself.

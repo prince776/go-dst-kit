@@ -23,7 +23,7 @@ import (
 // without the caller's stack, or hangs the run until the watchdog.
 func TestRawGoroutineMisuse(t *testing.T) {
 	start := time.Now()
-	r := simworld.Run(simworld.Options{Seed: 1, StrictIdentity: true}, func(w *dst.World) {
+	r := simworld.Run(simworld.Options{Seed: 1}, func(w *dst.World) {
 		ch := dst.MakeChan[int](w, 1)
 		var started atomic.Bool
 		go func() { // a leftover raw go statement

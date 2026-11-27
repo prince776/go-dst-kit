@@ -40,9 +40,9 @@ a law in the package that implements it, with a test.
   or lost liveness); a panic in any goroutine (with your stack); a
   goroutine blocked outside the World for 10s of wall time (watchdog); a
   run exceeding its step or time limit; a World operation from a goroutine
-  the World didn't start, or from an `Always` invariant (checked strictly
-  on the determinism-checked seeds and replays, by sampling elsewhere, or
-  always with `Options.StrictIdentity`).
+  the World didn't start, or from an `Always` invariant (checked on every
+  World operation on amd64 and arm64, where reading the goroutine's
+  identity costs a few nanoseconds; on every 256th elsewhere).
 
 ## Machines (`internal/simworld`)
 

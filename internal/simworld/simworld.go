@@ -66,9 +66,6 @@ type Options struct {
 	Net simnet.Options
 	// AfterStep runs after every scheduling step (see sched.Options).
 	AfterStep func() error
-	// StrictIdentity checks the caller's goroutine on every scheduling
-	// call (see sched.Options).
-	StrictIdentity bool
 	// PCTDepth and PCTHorizon select PCT scheduling (see sched.Options).
 	PCTDepth   int
 	PCTHorizon uint64
@@ -111,7 +108,7 @@ func New(opts Options) *Sim {
 	}
 	s := &Sim{
 		S: sched.New(sched.Options{Seed: opts.Seed, Watchdog: opts.Watchdog, Logf: opts.Logf,
-			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep, StrictIdentity: opts.StrictIdentity,
+			MaxTime: opts.MaxTime, MaxSteps: opts.MaxSteps, AfterStep: opts.AfterStep,
 			PCTDepth: opts.PCTDepth, PCTHorizon: opts.PCTHorizon, Forks: opts.Forks, Pairs: opts.Pairs}),
 		machines: map[string]*Machine{},
 	}
