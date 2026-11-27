@@ -1,0 +1,81 @@
+package migr
+
+import (
+	"io/ioutil"
+	"os"
+	"path/filepath"
+)
+
+type Store struct {
+	w   *dst.World
+	dir string
+	f   *os.File
+}
+
+func (s *Store) open() error {
+	if _, err := os.Stat(s.dir); os.IsNotExist(err) {
+		if err := os.MkdirAll(s.dir, os.ModePerm); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, "log"), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	s.f = f
+	if _, err := f.WriteString("hello"); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+func (s *Store) replace(data []byte) error {
+	tmp := filepath.Join(s.dir, "meta.tmp")
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := ioutil.WriteFile(tmp+"2", data, 0o644); err != nil {
+		return err
+	}
+	_ = os.Remove(tmp + "2")
+	if _, err := os.Lstat(tmp); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(s.dir, "meta"))
+}
+
+func (s *Store) list() ([]string, error) {
+	es, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	b, err := os.ReadFile(filepath.Join(s.dir, "meta"))
+	if err == nil {
+		out = append(out, string(b))
+	}
+	f, err := os.Open(filepath.Join(s.dir, "log"))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	c, err := os.Create(filepath.Join(s.dir, "new"))
+	if err != nil {
+		return nil, err
+	}
+	c.Close()
+	_ = os.Chmod(filepath.Join(s.dir, "new"), 0o600)
+	return out, os.RemoveAll(filepath.Join(s.dir, "old"))
+}
+
+// size takes a file: its type becomes dst.File.
+func size(f *os.File) (int64, error) {
+	st, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
+}

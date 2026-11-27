@@ -18,7 +18,14 @@
 //   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types;
 //   - go statements to w.Go, evaluating the call's arguments first as go
 //     does;
-//   - math/rand calls to the World's Rand.
+//   - math/rand calls to the World's Rand;
+//   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
+//     RemoveAll, Rename, Stat (and Lstat), ReadDir to w.FS()'s methods;
+//     os.Open, Create, ReadFile, WriteFile (and ioutil's) to dst's
+//     helpers; *os.File to dst.File, f.WriteString to io.WriteString.
+//     Names pass through unchanged, and a World's FS is rooted, so they
+//     must be relative to its root. Calls with no World equivalent
+//     (os.Chmod, filepath.Walk, (*os.File).Fd, ...) are reported.
 //
 // The World expression is chosen by the enclosing method's receiver:
 // -world 'Raft=$.w,NetworkTransport=$.w' uses r.w in methods of Raft
@@ -395,6 +402,14 @@ func (m *migrator) decl(d ast.Node) {
 		case *ast.ChanType:
 			m.replace(c, &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: n.Value})
 			m.changes++
+		case *ast.StarExpr:
+			// *os.File: the World's dst.File (an interface).
+			if s, ok := n.X.(*ast.SelectorExpr); ok {
+				if tn, ok := m.info.Uses[s.Sel].(*types.TypeName); ok && tn.Name() == "File" && tn.Pkg() != nil && tn.Pkg().Path() == "os" {
+					m.replace(c, sel(ast.NewIdent("dst"), "File"))
+					m.changes++
+				}
+			}
 		case *ast.SelectorExpr:
 			if id, ok := n.X.(*ast.Ident); ok {
 				switch id.Name + "." + n.Sel.Name {
@@ -463,6 +478,7 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	if !ok {
 		return
 	}
+	m.fileMethod(c, n)
 	pkg, ok := s.X.(*ast.Ident)
 	if !ok {
 		return
@@ -503,6 +519,12 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			setPos(n, n.Pos())
 			m.changes++
 		}
+	case "os", "io/ioutil":
+		m.fileCall(n, s, obj.Imported().Path())
+	case "path/filepath":
+		if s.Sel.Name == "Walk" || s.Sel.Name == "WalkDir" || s.Sel.Name == "Glob" {
+			m.warn(n, "filepath."+s.Sel.Name+" reads the real filesystem; walk the World's FS with ReadDir")
+		}
 	case "crypto/rand":
 		if s.Sel.Name == "Read" {
 			n.Fun = sel(call(sel(m.w(), "Rand")), "CryptoRead")
@@ -510,6 +532,77 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			m.changes++
 		}
 	}
+}
+
+// fsMethods are the package os functions the World's FS has, with the
+// same signature (Lstat is Stat: a World's FS has no symbolic links).
+var fsMethods = map[string]string{"OpenFile": "OpenFile", "Mkdir": "Mkdir", "MkdirAll": "MkdirAll",
+	"Remove": "Remove", "RemoveAll": "RemoveAll", "Rename": "Rename", "Stat": "Stat", "Lstat": "Stat", "ReadDir": "ReadDir"}
+
+// fsHelpers are the os (and io/ioutil) functions package dst has as
+// helpers taking the FS first.
+var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile"}
+
+// fsMissing are os functions that touch the filesystem but have no World
+// equivalent: left as they are, with a warning.
+var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "Chtimes": true, "Truncate": true,
+	"Link": true, "Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
+	"Getwd": true, "DirFS": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true, "TempFile": true, "TempDir": true}
+
+// fileCall rewrites a filesystem call of package os (or io/ioutil) to
+// the World's FS: os.Rename(a, b) to w.FS().Rename(a, b), os.Open(name)
+// to dst.Open(w.FS(), name). Names are passed through unchanged: a
+// World's FS is rooted, so they must be relative to its root.
+func (m *migrator) fileCall(n *ast.CallExpr, s *ast.SelectorExpr, pkg string) {
+	name := s.Sel.Name
+	fsys := func() ast.Expr { return call(sel(m.w(), "FS")) }
+	switch {
+	case pkg == "os" && fsMethods[name] != "":
+		n.Fun = sel(fsys(), fsMethods[name])
+	case fsHelpers[name] != "" && (pkg == "os" || name == "ReadFile" || name == "WriteFile"):
+		n.Fun = sel(ast.NewIdent("dst"), fsHelpers[name])
+		n.Args = append([]ast.Expr{fsys()}, n.Args...)
+	case pkg == "io/ioutil" && name == "ReadDir":
+		m.warn(n, "ioutil.ReadDir returns FileInfos; use the World's FS ReadDir (DirEntries) by hand")
+		return
+	case fsMissing[name]:
+		if name != "TempDir" { // a path, not I/O
+			m.warn(n, pkg+"."+name+" has no World equivalent; it still uses the real filesystem")
+		}
+		return
+	default:
+		return
+	}
+	setPos(n, n.Pos())
+	m.changes++
+}
+
+// fileMethod handles a method call on a file the migration makes a
+// dst.File: WriteString becomes io.WriteString, and methods dst.File
+// lacks are reported.
+func (m *migrator) fileMethod(c *astutil.Cursor, n *ast.CallExpr) {
+	s, ok := n.Fun.(*ast.SelectorExpr)
+	if !ok || !m.isOSFile(m.info.TypeOf(s.X)) {
+		return
+	}
+	switch s.Sel.Name {
+	case "Read", "Write", "ReadAt", "WriteAt", "Seek", "Close", "Name", "Stat", "Sync", "Truncate", "ReadDir":
+	case "WriteString":
+		m.replace(c, call(sel(ast.NewIdent("io"), "WriteString"), append([]ast.Expr{s.X}, n.Args...)...))
+		m.changes++
+	default:
+		m.warn(n, "(*os.File)."+s.Sel.Name+" isn't part of dst.File")
+	}
+}
+
+// isOSFile reports whether t is *os.File.
+func (m *migrator) isOSFile(t types.Type) bool {
+	p, ok := t.(*types.Pointer)
+	if !ok {
+		return false
+	}
+	named, ok := p.Elem().(*types.Named)
+	return ok && named.Obj().Name() == "File" && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "os"
 }
 
 // goStmt: go f(a, b) evaluates f, a and b now; w.Go(func() { f(a, b) })
