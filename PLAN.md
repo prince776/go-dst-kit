@@ -689,6 +689,23 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
+- **World atomics** (Prince, 2026-11-28). The scheduler switches
+  goroutines only at World operations, so code that synchronizes through
+  `sync/atomic` (lock-free queues, published flags, spin loops) gets no
+  interleavings between its atomic operations, and a spin loop on an
+  atomic hangs the simulation (pebble's commit pipeline; `w.Yield()`
+  covers the spin itself). Proposal to write: `dst.Int32`, `dst.Int64`,
+  `dst.Uint32`, `dst.Uint64`, `dst.Bool`, `dst.Pointer[T]`, `dst.Value`
+  mirroring `sync/atomic`'s types, zero values usable (found the way
+  `dst.Mutex` finds its scheduler), each operation a scheduling point in
+  simulation and the plain atomic in production (the cost to measure:
+  one `sched.Active()` check); dstmigrate maps the types and the
+  functions; a law that interleavings at atomics are explored (a
+  lock-free bug planted in an example that only atomics scheduling
+  finds). Precedent: Rust's loom model checker requires its own atomic
+  types for the same reason. Data races (unsynchronized access) stay out
+  of reach; `-race` covers them.
+
 - ~~**Gray failure finds the examples' fixed timeouts**~~ **done**
   (2026-11-27, Prince: Gray goes into AllFaults, fix the examples). With
   Faults.Gray three examples' correct systems lost liveness, each a
