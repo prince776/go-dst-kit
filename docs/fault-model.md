@@ -82,10 +82,12 @@ against both). What survives a crash is anything POSIX and real
 journaling filesystems allow, chosen by the seed:
 
 - File data is durable only after the file's `Sync`.
-- Directory changes (create, mkdir, rename, remove) form one ordered
+- Directory changes (create, mkdir, link, rename, remove) form one ordered
   journal: a crash keeps a prefix of the unsynced ones, and `Sync` on a
   directory (`dst.SyncDir`) makes it durable up to that directory's last
   change. A rename is atomic: the old file or the new, never neither.
+  A hard link (`dst.Link`) is a second name for the same data, made
+  durable like a create.
 - Per seed, one of two modes:
   - **harsh** (like ext4 `data=writeback`, XFS): each file's unsynced writes
     survive independently of other files', and a file's `Sync` covers only

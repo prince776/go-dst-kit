@@ -93,6 +93,15 @@ func (f *osFS) Rename(oldname, newname string) error {
 	return r.Rename(oldname, newname)
 }
 
+// Link is os.Link inside the root (dst.Linker).
+func (f *osFS) Link(oldname, newname string) error {
+	r, err := f.r()
+	if err != nil {
+		return err
+	}
+	return r.Link(oldname, newname)
+}
+
 func (f *osFS) Stat(name string) (fs.FileInfo, error) {
 	r, err := f.r()
 	if err != nil {

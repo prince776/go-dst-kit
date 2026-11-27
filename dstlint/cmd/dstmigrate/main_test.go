@@ -82,12 +82,12 @@ func TestMigrateSample(t *testing.T) {
 // comment after it.
 func TestMigrateFiles(t *testing.T) {
 	got, stderr := migrateSample(t, "files", "Store=$.w")
-	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|Lstat|MkdirAll|Mkdir|ReadDir)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
+	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|Lstat|MkdirAll|Mkdir|ReadDir|Link)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
 		if regexp.MustCompile(bad).MatchString(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
 	}
-	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`,
+	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `dst\.Link\(s\.w\.FS\(\), tmp, tmp\+"3"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`,
 		`\n// size takes a file: its type becomes dst\.File\.\nfunc size`} {
 		if !regexp.MustCompile(want).MatchString(got) {
 			t.Errorf("want %q in:\n%s", want, got)

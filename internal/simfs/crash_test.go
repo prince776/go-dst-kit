@@ -29,6 +29,7 @@ const (
 	kSyncDir
 	kRename
 	kRemove
+	kLink
 )
 
 type fop struct {
@@ -52,6 +53,8 @@ func (o fop) String() string {
 		return "syncdir " + o.name
 	case kRename:
 		return "rename " + o.name + " " + o.to
+	case kLink:
+		return "link " + o.name + " " + o.to
 	default:
 		return "remove " + o.name
 	}
@@ -61,11 +64,13 @@ var files = []string{"a", "b", "d/c"}
 
 func gen(r *rand.Rand, n int) []fop {
 	live := map[string]bool{}
+	ino := map[string]int{} // which file each live name is (links share one)
+	inos := 0
 	var ops []fop
 	for len(ops) < n {
 		name := files[r.IntN(len(files))]
 		var o fop
-		switch k := r.IntN(8); {
+		switch k := r.IntN(9); {
 		case !live[name] || k == 0:
 			if live[name] {
 				continue
@@ -84,14 +89,28 @@ func gen(r *rand.Rand, n int) []fop {
 			if to == name {
 				continue
 			}
+			if live[to] && ino[to] == ino[name] {
+				continue // two names of one file: POSIX's rename does nothing
+			}
 			o = fop{k: kRename, name: name, to: to}
 			delete(live, name)
 			live[to] = true
+			ino[to] = ino[name]
+		case k == 8:
+			to := files[r.IntN(len(files))]
+			if live[to] {
+				continue
+			}
+			o = fop{k: kLink, name: name, to: to}
+			live[to] = true
+			ino[to] = ino[name]
 		default:
 			o = fop{k: kRemove, name: name}
 			delete(live, name)
 		}
 		if o.k == kCreate {
+			inos++
+			ino[name] = inos
 			live[name] = true
 		}
 		ops = append(ops, o)
@@ -243,6 +262,10 @@ func (m *model) do(o fop) {
 	case kRemove:
 		delete(m.live, o.name)
 		m.metaOp(mop{k: kRemove, name: o.name})
+	case kLink:
+		x := m.live[o.name]
+		m.live[o.to] = x
+		m.metaOp(mop{k: kCreate, name: o.to, o: x}) // a second name: a create of the same file
 	}
 }
 
@@ -384,6 +407,8 @@ func play(t *testing.T, ops []fop, seed uint64, ordered bool) (got string, legal
 				check(fsys.Rename(o.name, o.to))
 			case kRemove:
 				check(fsys.Remove(o.name))
+			case kLink:
+				check(dst.Link(fsys, o.name, o.to))
 			}
 			m.do(o)
 			// [read-your-writes]: the live view always matches the model.
@@ -450,7 +475,7 @@ func TestCrashIsLegal(t *testing.T) {
 func TestCrashExplores(t *testing.T) {
 	for _, ordered := range []bool{false, true} {
 		r := rand.New(rand.NewPCG(7, 1))
-		checked := 0
+		checked, withLink := 0, 0
 		for range 300 {
 			ops := gen(r, 1+r.IntN(5))
 			_, legal := play(t, ops, 0, ordered)
@@ -458,6 +483,9 @@ func TestCrashExplores(t *testing.T) {
 				continue
 			}
 			checked++
+			if slices.ContainsFunc(ops, func(o fop) bool { return o.k == kLink }) {
+				withLink++
+			}
 			seen := map[string]bool{}
 			for s := uint64(1); s <= 3000 && len(seen) < len(legal); s++ {
 				got, _ := play(t, ops, s, ordered)
@@ -471,6 +499,9 @@ func TestCrashExplores(t *testing.T) {
 		}
 		if checked < 100 {
 			t.Fatalf("%s: only %d sequences small enough to explore", modeName(ordered), checked)
+		}
+		if withLink < 10 {
+			t.Fatalf("%s: only %d explored sequences have a link", modeName(ordered), withLink)
 		}
 	}
 }
@@ -556,6 +587,8 @@ func playKill(t *testing.T, ops []fop, seed uint64, ordered, power bool) (live, 
 				check(fsys.Rename(o.name, o.to))
 			case kRemove:
 				check(fsys.Remove(o.name))
+			case kLink:
+				check(dst.Link(fsys, o.name, o.to))
 			}
 			m.do(o)
 		}

@@ -25,7 +25,7 @@
 //     crypto/rand.Read and crypto/rand.Reader to the World's;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
 //     RemoveAll, Rename, Stat (and Lstat), ReadDir to w.FS()'s methods;
-//     os.Open, Create, ReadFile, WriteFile (and ioutil's) to dst's
+//     os.Open, Create, ReadFile, WriteFile, Link (and ioutil's) to dst's
 //     helpers; *os.File to dst.File, f.WriteString to io.WriteString.
 //     Names pass through unchanged, and a World's FS is rooted, so they
 //     must be relative to its root. Calls with no World equivalent
@@ -675,12 +675,12 @@ var fsMethods = map[string]string{"OpenFile": "OpenFile", "Mkdir": "Mkdir", "Mkd
 
 // fsHelpers are the os (and io/ioutil) functions package dst has as
 // helpers taking the FS first.
-var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile"}
+var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile", "Link": "Link"}
 
 // fsMissing are os functions that touch the filesystem but have no World
 // equivalent: left as they are, with a warning.
 var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "Chtimes": true, "Truncate": true,
-	"Link": true, "Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
+	"Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
 	"Getwd": true, "DirFS": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true, "TempFile": true, "TempDir": true}
 
 // fileCall rewrites a filesystem call of package os (or io/ioutil) to

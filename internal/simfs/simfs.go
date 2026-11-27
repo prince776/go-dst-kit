@@ -7,7 +7,7 @@
 // POSIX and real journaling filesystems allow, chosen by the seed:
 //
 //   - Data written to a file is durable only after the file's Sync.
-//   - Directory changes (create, mkdir, rename, remove) form one ordered
+//   - Directory changes (create, mkdir, link, rename, remove) form one ordered
 //     journal: a crash keeps a prefix of the unsynced ones, and a Sync of
 //     a directory makes the journal durable up to that directory's last
 //     change. A rename is atomic.
@@ -520,6 +520,46 @@ func (f *FS) Rename(oldpath, newpath string) error {
 	delete(d1.liveDents, b1)
 	d2.liveDents[b2] = ino
 	f.issue(&op{kind: opRename, dir: d1, name: b1, dir2: d2, name2: b2, ino: ino})
+	f.powerLoss()
+	return nil
+}
+
+// Link is os.Link: newname becomes a second name for oldname's file (a
+// hard link). Like a create, the new name is a directory change: durable
+// once its directory is synced. The file's data is the same through
+// either name, and lasts while any name does.
+func (f *FS) Link(oldname, newname string) error {
+	f.enter()
+	linkErr := func(err error) error { return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: err} }
+	p1, err := clean(oldname)
+	if err != nil {
+		return linkErr(err)
+	}
+	p2, err := clean(newname)
+	if err != nil {
+		return linkErr(err)
+	}
+	ino, err := f.lookup(p1)
+	if err != nil {
+		return linkErr(err)
+	}
+	if ino.dir {
+		return linkErr(syscall.EPERM) // Linux refuses hard links to directories
+	}
+	d, base, err := f.parent(p2)
+	if err != nil {
+		return linkErr(err)
+	}
+	if _, ok := d.liveDents[base]; ok {
+		return linkErr(fs.ErrExist)
+	}
+	if f.room() == 0 {
+		f.noSpace()
+		return linkErr(syscall.ENOSPC)
+	}
+	d.liveDents[base] = ino
+	d.modTime = f.now()
+	f.issue(&op{kind: opCreate, dir: d, name: base, ino: ino})
 	f.powerLoss()
 	return nil
 }

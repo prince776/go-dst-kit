@@ -42,6 +42,7 @@ func (s *Store) replace(data []byte) error {
 		return err
 	}
 	_ = os.Remove(tmp + "2")
+	_ = os.Link(tmp, tmp+"3")
 	if _, err := os.Lstat(tmp); err != nil {
 		return err
 	}

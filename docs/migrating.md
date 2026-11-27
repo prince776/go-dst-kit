@@ -61,6 +61,7 @@ and why no World reaches it.
 | `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
 | `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | paths are relative to the World's root |
 | `os.ReadFile`, `WriteFile`, `Create`, `Open` | `dst.ReadFile(w.FS(), ...)`, ... | `dst.SyncDir(fsys, dir)` to fsync a directory |
+| `os.Link` (a hard link) | `dst.Link(w.FS(), old, new)` | like a create, the new name is durable once its directory is synced |
 | `syscall.Flock(fd, LOCK_EX\|LOCK_NB)` on a lock file (gofrs/flock's `TryLock`) | `unlock, err := dst.LockFile(w.FS(), name)` | `dst.ErrLocked` when held; released by `unlock` or the process's death; unix only in the real World |
 | `net.Listen`, `net.Dial`, `DialContext` | `w.Net().Listen`, `w.Net().Dial`, `w.Net().DialContext` | returns ordinary `net.Listener` and `net.Conn` |
 | `http.Serve`, `http.DefaultClient` | `dsthttp.Serve(w, ln, h)`, `dsthttp.Client(w)` | handlers are unchanged |
