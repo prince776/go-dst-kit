@@ -170,6 +170,9 @@ type Scheduler struct {
 type Machine struct {
 	ID   int
 	Name string
+	// World is the machine's *dst.World (as any: sched can't import dst),
+	// for dst.Current.
+	World any
 	// Incarnation counts restarts.
 	Incarnation int
 	dead        bool

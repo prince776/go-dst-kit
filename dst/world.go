@@ -92,9 +92,45 @@ func init() {
 		if sp.Net != nil {
 			w.net = sp.Net.(Net)
 		}
+		if sp.Machine != nil {
+			sp.Machine.World = w
+		}
 		return w
 	}
 }
+
+// Current returns the World of the calling goroutine, for code that no
+// World can reach. It is a last resort: pass a World (as a field, a
+// parameter, an option) wherever one is reachable, and use Current only
+// in leaf code with no owner to hand it one, such as a package-level
+// helper called from everywhere. dstlint reports every use.
+//
+// For a goroutine a simulated World started, Current is that machine's
+// World. For any other goroutine (one a raw go statement started, a
+// finalizer, the test's own goroutine) it is the real World, even while
+// a simulation runs: such a goroutine gets real randomness and the real
+// clock, and nothing reports it. The determinism check is the backstop:
+// a seed whose runs differ because of it is reported as
+// nondeterministic. Outside a simulation the World Current returns has
+// goroutines, time, locks and randomness but no filesystem or network
+// (realworld.New gives those).
+//
+// Verified:
+//   - [current-is-the-callers] A goroutine a simulated World started gets
+//     its own machine's World (even with other machines and other
+//     simulations running at once); a goroutine no World started gets the
+//     real World.
+func Current() *World {
+	if t := sched.CurrentTask(); t != nil {
+		if w, ok := t.Machine.World.(*World); ok {
+			return w
+		}
+	}
+	return currentReal
+}
+
+// currentReal is Current's real World.
+var currentReal = &World{rnd: realRand{}}
 
 // Simulated reports whether w is a simulated World.
 func (w *World) Simulated() bool { return w.s != nil }

@@ -29,6 +29,16 @@ srv := NewServer(w, cfg)
 
 In tests, `dsttest` gives each simulated machine its own World.
 
+**Last resort: `dst.Current()`.** Leaf code that no World can reach (a
+package-level helper called from everywhere, with no owner to pass it
+one: an assertion helper's random choice, say) can ask for the calling
+goroutine's World. A goroutine a simulated World started gets its
+machine's World; any other goroutine gets the real World, silently, even
+during a simulation, and only the determinism check notices what that
+changes. So pass a World wherever one is reachable. `dstlint` reports
+every use of `dst.Current`, in every package; excuse each with `//dst:ok`
+and why no World reaches it.
+
 ## 2. Substitute
 
 | Go | World | Notes |
