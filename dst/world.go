@@ -20,9 +20,11 @@
 //	sync.Mutex/WaitGroup    dst.Mutex / dst.WaitGroup (zero values work)
 //	sync.Cond               dst.Cond (dst.NewCond)
 //	context.WithTimeout     dst.WithTimeout(w, ctx, d)
+//	runtime.Gosched         w.Yield()
 //	math/rand               w.Rand()
 //	crypto/rand.Read        w.Rand().CryptoRead (crypto/rand.Reader: dst.CryptoReader(w))
 //	os, net                 w.FS(), w.Net()
+//	os.Link                 dst.Link(w.FS(), old, new)
 //
 // Inside a simulated World, code must not block any other way: a raw
 // channel, sync.Mutex held across a wait, time.Sleep or real I/O escapes
@@ -50,7 +52,7 @@
 //     context does: Call returns its error then, having run the operation
 //     unless the request was refused.
 //
-// Children: World, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
+// Children: World, Current, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
 // Ticker, WithCancel, WithTimeout, WithDeadline, Rand, Inject, Do, Call, Buggify
 // Depends on: internal/sched (the simulator's engine)
 package dst
