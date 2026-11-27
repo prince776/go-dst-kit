@@ -12,7 +12,9 @@ import (
 
 // The sample (every construct the tool rewrites) migrates to code that
 // compiles and vets, with no raw channel operation, select, go statement
-// or time.Now left. Fails if any survives or the result doesn't build.
+// or time.Now left, and a nil channel argument becomes the zero dst.Chan
+// without moving the comment after it. Fails if any survives, the result
+// doesn't build, or the nil argument is kept or moves the comment.
 func TestMigrateSample(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)
 	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
@@ -49,6 +51,9 @@ func TestMigrateSample(t *testing.T) {
 		if regexp.MustCompile(bad).Match(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
+	}
+	if !regexp.MustCompile(`notifyAll\(1, dst\.Chan\[struct\{\}\]\{\}\)\s*\}\s*// notifyAll's comment stays above it\.\s*func notifyAll`).Match(got) {
+		t.Errorf("a nil channel argument didn't become the zero dst.Chan, or moved a comment:\n%s", got)
 	}
 	if !regexp.MustCompile(`// a comment inside a case\s+out\.Send`).Match(got) {
 		t.Errorf("the comment isn't before its statement any more:\n%s", got)

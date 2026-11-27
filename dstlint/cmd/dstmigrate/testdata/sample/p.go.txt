@@ -107,6 +107,16 @@ func (p *Pool) disable() chan int {
 	return nil
 }
 
+// park passes nil for channel parameters, plain and variadic: each becomes
+// the zero dst.Chan.
+func (p *Pool) park() {
+	p.offer(nil, nil)
+	notifyAll(1, nil)
+}
+
+// notifyAll's comment stays above it.
+func notifyAll(n int, chs ...chan struct{}) {}
+
 // wait returns from every case: the migrated function must still end in a
 // terminating statement, and job is unqualified in its own package.
 func (p *Pool) wait(js chan *job) int {

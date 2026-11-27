@@ -7,7 +7,7 @@
 //   - sends to c.Send(v), receives to c.Recv() (or dstRecv(c) where only
 //     the value is used), range over a channel to range c.All(), close,
 //     len and cap of channels to their methods, and a channel compared
-//     with or set to nil to the zero dst.Chan;
+//     with, set to or passed as nil to the zero dst.Chan;
 //   - select statements to dst.Select, keeping their control flow: each
 //     case's callback records that it fired (and what it received), and a
 //     switch after the select runs the original case bodies, so break,
@@ -385,6 +385,7 @@ func (m *migrator) decl(d ast.Node) {
 				m.changes++
 			}
 		case *ast.CallExpr:
+			m.nilChanArgs(n)
 			m.callExpr(c, n)
 		case *ast.BinaryExpr:
 			if (n.Op == token.EQL || n.Op == token.NEQ) && (isNil(n.Y) && m.isChan(n.X) || isNil(n.X) && m.isChan(n.Y)) {
@@ -452,6 +453,39 @@ func (m *migrator) replace(c *astutil.Cursor, n ast.Node) {
 func (m *migrator) zeroChan(ch ast.Expr) ast.Expr {
 	// Parenthesized: a composite literal in an if or for condition must be.
 	return &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.chanElem(ch))}}}
+}
+
+// nilChanArgs rewrites f(nil) where the parameter is a channel (plain or
+// variadic) to the zero dst.Chan.
+func (m *migrator) nilChanArgs(n *ast.CallExpr) {
+	sig, ok := m.info.TypeOf(n.Fun).(*types.Signature)
+	if !ok || m.info.Types[n.Fun].IsType() {
+		return // a conversion or a builtin
+	}
+	params := sig.Params()
+	for i, a := range n.Args {
+		if !isNil(a) || params.Len() == 0 {
+			continue
+		}
+		var pt types.Type
+		switch {
+		case sig.Variadic() && i >= params.Len()-1:
+			if n.Ellipsis.IsValid() {
+				continue
+			}
+			pt = params.At(params.Len() - 1).Type().(*types.Slice).Elem()
+		case i < params.Len():
+			pt = params.At(i).Type()
+		default:
+			continue
+		}
+		if ch, ok := pt.Underlying().(*types.Chan); ok {
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			setPos(z, a.Pos()) // where nil was, so comments stay put
+			n.Args[i] = z
+			m.changes++
+		}
+	}
 }
 
 func isNil(e ast.Expr) bool { id, ok := e.(*ast.Ident); return ok && id.Name == "nil" }
