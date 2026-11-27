@@ -447,7 +447,7 @@ func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 type selectPlan struct {
 	pos   token.Pos
 	world string
-	elems []string // per case: the received element type ("" for send and default)
+	elems []string // per case: the channel's element type ("" for default)
 }
 
 func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
@@ -459,6 +459,8 @@ func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
 			elem = m.chanElem(comm.X.(*ast.UnaryExpr).X)
 		case *ast.AssignStmt:
 			elem = m.chanElem(comm.Rhs[0].(*ast.UnaryExpr).X)
+		case *ast.SendStmt:
+			elem = m.chanElem(comm.Chan) // explicit: a send converts its value to it
 		}
 		p.elems = append(p.elems, elem)
 	}
@@ -506,7 +508,7 @@ func spliceSelects(name string, src []byte, plans []selectPlan) ([]byte, error) 
 			case nil:
 				fmt.Fprintf(&ops, "dst.Default(func() { %s = %d }),\n", id, n)
 			case *ast.SendStmt:
-				fmt.Fprintf(&ops, "dst.OnSend(%s, %s, func() { %s = %d }),\n", text(comm.Chan), text(comm.Value), id, n)
+				fmt.Fprintf(&ops, "dst.OnSend[%s](%s, %s, func() { %s = %d }),\n", plan.elems[k], text(comm.Chan), text(comm.Value), id, n)
 			case *ast.ExprStmt:
 				fmt.Fprintf(&ops, "dst.OnRecv(%s, func(_ %s, _ bool) { %s = %d }),\n", text(comm.X.(*ast.UnaryExpr).X), plan.elems[k], id, n)
 			case *ast.AssignStmt:

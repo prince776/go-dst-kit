@@ -69,6 +69,18 @@ func (p *Pool) worker(i int) { _ = i; _ = <-p.jobs + 1 }
 
 type job struct{ n int }
 
+type sizer interface{ size() int }
+
+func (j *job) size() int { return j.n }
+
+// offer sends a *job on a channel of an interface it implements.
+func (p *Pool) offer(ch chan sizer, j *job) {
+	select {
+	case ch <- j:
+	case <-p.done:
+	}
+}
+
 // disable sets a channel to nil (blocking forever in a select) and returns one.
 func (p *Pool) disable() chan int {
 	p.jobs = nil
