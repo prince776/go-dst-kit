@@ -495,6 +495,22 @@ named by IP literals getting the net package's address types ([ip-hosts]).
 dstmigrate learned nil channels in composite literals and parameters,
 math/rand/v2's N, crypto/rand.Reader.
 
+**dst.WaitGroup was wrong in production (2026-11-28, found by pebble's
+suite on the migrated tree):** outside a simulation, `Wait` returned as
+soon as the simulation's own counter read zero, but `Done` updates that
+counter before the inner `sync.WaitGroup`, so `Wait` could return while
+the last `Done` was still running; a group reused at once (pebble's
+batches) corrupted the inner counter ("negative WaitGroup counter",
+"WaitGroup is reused before previous Wait has returned"). Fixed: outside
+a simulation `Wait` is exactly `sync.WaitGroup`'s ([wait-follows-done],
+white-box test, broken by hand). No adopter ships its fork, so nothing
+deployed ran it. Audit after it: Mutex, RWMutex, Once and Cond are sound
+outside a simulation (plain `sync` paths). The lesson: the contract suite
+runs both Worlds through the same operations but never stresses the real
+World's concurrency, and a race inside an adapter primitive needs that.
+Todo: a real-World stress test per primitive (reuse right after the wait,
+many goroutines, `-race`, thousands of rounds) in `internal/worldtest`.
+
 **pebble (started 2026-11-28):** cockroachdb/pebble at 4b082f41, a
 subagent, same method; blind benchmark held outside the agents' reach.
 
