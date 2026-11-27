@@ -522,7 +522,17 @@ func (s *Scheduler) failed() bool { return s.Err() != nil }
 // Spawn starts fn as a new task on machine m. It runs when the seed picks
 // it; Spawn itself doesn't yield.
 func (s *Scheduler) Spawn(m *Machine, name string, fn func()) *Task {
-	t := &Task{ID: len(s.tasks), Name: name, Machine: m, Parent: s.cur, s: s, wake: make(chan struct{}), state: runnable}
+	return s.spawn(m, name, s.cur, fn)
+}
+
+// SpawnRoot is Spawn with no parent: a machine's boot, which is no task's
+// work wherever it is started from.
+func (s *Scheduler) SpawnRoot(m *Machine, name string, fn func()) *Task {
+	return s.spawn(m, name, nil, fn)
+}
+
+func (s *Scheduler) spawn(m *Machine, name string, parent *Task, fn func()) *Task {
+	t := &Task{ID: len(s.tasks), Name: name, Machine: m, Parent: parent, s: s, wake: make(chan struct{}), state: runnable}
 	if s.pctRng != nil {
 		t.prio = 1 + s.pctRng.Float64()
 	}

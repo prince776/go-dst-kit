@@ -64,9 +64,15 @@
 //     Faults.Services off.
 //   - [outages-explore] With Services faults the runner takes whole
 //     services down: every point of the service fails together.
-//   - [fault-classes-independent] Turning on pauses, outages or fault
-//     points leaves the times of each seed's crashes and partitions as
-//     they were.
+//   - [fault-classes-independent] Turning on pauses, outages, fault
+//     points or losses leaves the times of each seed's crashes and
+//     partitions as they were.
+//   - [losses-are-final] A lost machine never boots again, even when a
+//     restart was already scheduled; the runner loses only machines the
+//     test's OnLoss accepts at that moment, and reports each loss once.
+//     With Faults.Loss and no OnLoss, the seed fails.
+//   - [boots-are-no-ones-work] A machine restarted from a workload
+//     goroutine doesn't count as that goroutine's work.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -126,9 +132,14 @@ type Faults struct {
 	Pause     bool // pause machines without crashing them (GC pauses, VM stalls)
 	Points    bool // fault points (dst.Inject) and Buggify points fire
 	Services  bool // service outages: every point of a service fails for a while
+	// Loss loses machines for good: one crashes and never restarts, with
+	// its disk (a dead server, replaced by a new one). The test says which
+	// machines may be lost and what happens then with Harness.OnLoss.
+	Loss bool
 }
 
-// AllFaults enables every fault class.
+// AllFaults enables every fault class but Loss, which only a system that
+// replaces lost machines can take (see Harness.OnLoss).
 var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true}
 
 // Point sets a fault point's behaviour for every seed, replacing the
@@ -327,6 +338,8 @@ type Harness struct {
 	sim      *simworld.Sim
 	test     *simworld.Machine
 	opts     Options
+	canLose  func(*Machine) bool // OnLoss
+	lost     func(*Machine)
 	swarm    Swarm
 	phase    Phase
 	machines []*Machine
@@ -351,6 +364,7 @@ type Machine struct {
 	m          *simworld.Machine
 	h          *Harness
 	neverCrash bool
+	lost       bool
 }
 
 // MachineOption configures a machine.
@@ -448,9 +462,37 @@ func (m *Machine) Paused() bool { return m.m.Paused() }
 
 // Restart restarts a crashed machine.
 func (m *Machine) Restart() {
-	if m.m.Dead() {
+	if m.m.Dead() && !m.lost {
 		m.m.Restart()
 	}
+}
+
+// Lose loses the machine for good: it crashes (if it hasn't) and never
+// restarts, with its disk; a restart already scheduled does nothing. A
+// system replaces a lost machine with a new one (another Machine, empty).
+func (m *Machine) Lose() {
+	if m.lost {
+		return
+	}
+	m.Crash()
+	m.lost = true
+	m.h.Sometimes("machine lost")
+}
+
+// Lost reports whether the machine was lost for good.
+func (m *Machine) Lost() bool { return m.lost }
+
+// OnLoss enables permanent losses (Faults.Loss) for this test. At each loss
+// the runner picks, among machines canLose accepts at that moment (lost
+// ones aside, crashed ones included: a server that died and never came
+// back), one to Lose, and then calls lost with it, on the runner's own
+// goroutine: lost should hand the news to the system (an operator's
+// ticket, say) rather than wait. canLose is where the test keeps losses
+// survivable (a raft cluster: only while a majority of voters would
+// remain). With Faults.Loss and no OnLoss, the seed fails: nothing says
+// which machines a loss may take.
+func (h *Harness) OnLoss(canLose func(m *Machine) bool, lost func(m *Machine)) {
+	h.canLose, h.lost = canLose, lost
 }
 
 // Machines lists the machines.
@@ -595,6 +637,8 @@ type Swarm struct {
 	OutageEvery time.Duration // mean time between service outages (0: none)
 	OutageFor   time.Duration // mean outage length
 
+	LossEvery time.Duration // mean time between permanent losses (0: none)
+
 	// Start is what clocks read at the start of the run: in half the seeds
 	// a random instant in 2030, in the other half just before a midnight,
 	// a month or a new year, so the boundary falls inside the run.
@@ -617,7 +661,8 @@ func (s Swarm) String() string {
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
 		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
 		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
-			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency)
+			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
+		fmt.Sprintf(", loss every ~%v", s.LossEvery)
 }
 
 func (s Swarm) sched() string {
@@ -705,6 +750,12 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	crashLatency := r.IntN(3) != 0
 	if f.Crash && !f.Points {
 		s.CrashLatency = crashLatency
+	}
+	// Permanent losses, last: a mean of 1 to 6s between them (Harness.OnLoss
+	// bounds how many a test allows).
+	lossEvery := sometimes(r, time.Duration(1000+r.IntN(5000))*time.Millisecond)
+	if f.Loss {
+		s.LossEvery = lossEvery
 	}
 	return s
 }
@@ -918,7 +969,7 @@ func (h *Harness) nemesis(w *dst.World) {
 	}
 	// Classes added later draw from their own streams, so turning them on
 	// leaves the crash and partition schedule of each seed as it was.
-	rp, ro := h.sim.S.Rand("nemesis/pause"), h.sim.S.Rand("nemesis/outage")
+	rp, ro, rl := h.sim.S.Rand("nemesis/pause"), h.sim.S.Rand("nemesis/outage"), h.sim.S.Rand("nemesis/loss")
 	expFrom := func(rr *rand.Rand, mean time.Duration) time.Duration {
 		return time.Duration(rr.ExpFloat64() * float64(mean))
 	}
@@ -930,7 +981,17 @@ func (h *Harness) nemesis(w *dst.World) {
 	schedule := func(after time.Duration, fn func()) {
 		events = append(events, event{w.Now().Add(after), fn})
 	}
-	var crash, partition, pause, outage func()
+	var crash, partition, pause, outage, loss func()
+	loss = func() {
+		cands := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.lost || m.neverCrash || !h.canLose(m) })
+		if len(cands) > 0 {
+			m := cands[rl.IntN(len(cands))]
+			h.Logf("nemesis: lose %s for good", m.Name())
+			m.Lose()
+			h.lost(m)
+		}
+		schedule(expFrom(rl, sw.LossEvery), loss)
+	}
 	outage = func() {
 		if svcs := h.points.Services(); len(svcs) > 0 {
 			svc := svcs[ro.IntN(len(svcs))]
@@ -1002,6 +1063,13 @@ func (h *Harness) nemesis(w *dst.World) {
 	}
 	if sw.OutageEvery > 0 { // after pauses, for the same reason
 		schedule(expFrom(ro, sw.OutageEvery), outage)
+	}
+	if sw.LossEvery > 0 {
+		if h.canLose == nil {
+			h.Fail(errors.New("dsttest: Faults.Loss is on but the test never called OnLoss to say which machines a loss may take"))
+			return
+		}
+		schedule(expFrom(rl, sw.LossEvery), loss)
 	}
 	for {
 		next := end

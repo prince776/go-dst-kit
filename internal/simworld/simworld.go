@@ -159,7 +159,9 @@ func (m *Machine) Boot() {
 	if m.Start == nil {
 		panic("simworld: machine " + m.Name + " has no Start function")
 	}
-	m.sim.S.Spawn(m.M, m.Name+".main", func() { m.Start(m.World) })
+	// A boot is no task's work: a machine restarted from a workload
+	// goroutine doesn't become part of that goroutine's work.
+	m.sim.S.SpawnRoot(m.M, m.Name+".main", func() { m.Start(m.World) })
 }
 
 // Crash kills the machine: its goroutines stop for good and its disk loses

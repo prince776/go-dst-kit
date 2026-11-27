@@ -600,7 +600,8 @@ func TestRealNeverInjects(t *testing.T) {
 }
 
 // Verifies: [fault-classes-independent]
-// Fails if: turning on pauses or service outages changes when a seed's
+// Fails if: turning on pauses, service outages, fault points or losses
+// changes when a seed's
 // crashes and partitions happen; or (negative) a different seed's schedule
 // is the same.
 func TestFaultClassesIndependent(t *testing.T) {
@@ -615,6 +616,9 @@ func TestFaultClassesIndependent(t *testing.T) {
 					}
 				})
 			}
+			// Losses scheduled, none allowed: their draws must not move
+			// the crashes (a lost machine could no longer crash).
+			h.OnLoss(func(*dsttest.Machine) bool { return false }, func(*dsttest.Machine) {})
 		}, func(format string, args ...any) {
 			line := fmt.Sprintf(format, args...)
 			if strings.Contains(line, "nemesis: crash") || strings.Contains(line, "nemesis: restart") || strings.Contains(line, "partition") || strings.Contains(line, "heal") {
@@ -625,7 +629,7 @@ func TestFaultClassesIndependent(t *testing.T) {
 	}
 	base := dsttest.Faults{Crash: true, Partition: true}
 	more := base
-	more.Pause, more.Services, more.Points = true, true, true
+	more.Pause, more.Services, more.Points, more.Loss = true, true, true, true
 	compared := 0
 	for seed := uint64(1); seed <= 10; seed++ {
 		a, b := schedule(seed, base), schedule(seed, more)
@@ -980,5 +984,108 @@ func TestFeature(t *testing.T) {
 		})
 	if len(rec.errs) == 0 || !strings.Contains(rec.errs[0], "\nfeatures: z off\n") {
 		t.Fatalf("the report lacks the features: %v", rec.errs)
+	}
+}
+
+// Verifies: [losses-are-final]
+// Fails if: a lost machine boots again (also when it was lost while down,
+// with its restart already scheduled), the runner loses a machine the
+// test refused or loses none, a loss isn't reported exactly once, or
+// Faults.Loss without OnLoss doesn't fail the seed.
+func TestLosses(t *testing.T) {
+	var mu sync.Mutex
+	lostDown, lost := 0, 0
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 60, Faults: dsttest.Faults{Crash: true, Loss: true}, FaultPhase: 10 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		bootAt := map[string][]time.Time{}
+		lostAt := map[string]time.Time{}
+		reported := map[string]int{}
+		var ms []*dsttest.Machine
+		for _, n := range []string{"keep", "a", "b", "c"} {
+			ms = append(ms, h.Machine(n, func(w *dst.World) {
+				bootAt[n] = append(bootAt[n], h.World().Now())
+				for {
+					w.Sleep(10 * time.Millisecond)
+				}
+			}))
+		}
+		wasDown := map[string]bool{} // as each candidate was when the runner asked
+		h.OnLoss(func(m *dsttest.Machine) bool {
+			wasDown[m.Name()] = m.Dead()
+			return m.Name() != "keep" && len(lostAt) < 2
+		}, func(m *dsttest.Machine) {
+			if wasDown[m.Name()] {
+				mu.Lock()
+				lostDown++
+				mu.Unlock()
+			}
+			if !m.Lost() || !m.Dead() {
+				h.Fail(fmt.Errorf("%s reported lost but Lost %v, Dead %v", m.Name(), m.Lost(), m.Dead()))
+			}
+			if _, again := lostAt[m.Name()]; again {
+				h.Fail(fmt.Errorf("%s lost twice", m.Name()))
+			}
+			reported[m.Name()]++
+			lostAt[m.Name()] = h.World().Now()
+		})
+		h.Final("losses", func(*dst.World) error {
+			for _, m := range ms {
+				at, ok := lostAt[m.Name()]
+				if m.Lost() != ok || (ok && reported[m.Name()] != 1) {
+					return fmt.Errorf("%s: Lost %v, reported %d times", m.Name(), m.Lost(), reported[m.Name()])
+				}
+				if !ok {
+					continue
+				}
+				if m.Name() == "keep" {
+					return fmt.Errorf("lost a machine the test refused")
+				}
+				boots := bootAt[m.Name()]
+				if last := boots[len(boots)-1]; last.After(at) {
+					return fmt.Errorf("%s booted at %v after it was lost at %v", m.Name(), last, at)
+				}
+				if !m.Dead() {
+					return fmt.Errorf("%s is lost but running", m.Name())
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			lost += len(lostAt)
+			return nil
+		})
+	})
+	if !rep.OK() {
+		t.Fatalf("%v", rep.Failed[0].Err)
+	}
+	if lost == 0 || lostDown == 0 {
+		t.Fatalf("losses %d (of which while down %d) in %d seeds: want both", lost, lostDown, rep.Runs)
+	}
+	t.Logf("%d losses in %d seeds", lost, rep.Runs)
+	// Negative: Loss without OnLoss.
+	r := dsttest.RunSeed(3, dsttest.Options{Faults: dsttest.Faults{Loss: true}, FaultPhase: 10 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		h.Machine("m", func(w *dst.World) { w.Sleep(time.Hour) })
+	}, nil)
+	if r.Err == nil || !strings.Contains(r.Err.Error(), "OnLoss") {
+		t.Fatalf("Faults.Loss without OnLoss: %v", r.Err)
+	}
+}
+
+// Verifies: [boots-are-no-ones-work]
+// Fails if: a machine crashed and restarted by a workload goroutine is
+// reported as that goroutine's unfinished work.
+func TestRestartFromWorkload(t *testing.T) {
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 5, FaultPhase: time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		m := h.Machine("server", func(w *dst.World) {
+			for {
+				w.Sleep(10 * time.Millisecond)
+			}
+		})
+		h.Go(func(w *dst.World) {
+			w.Sleep(100 * time.Millisecond)
+			m.Crash()
+			m.Restart()
+		})
+	})
+	if !rep.OK() {
+		t.Fatalf("%v", rep.Failed[0].Err)
 	}
 }
