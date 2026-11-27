@@ -128,6 +128,28 @@ every planted bug is caught, for the right reason.
 Building them also found bugs in this library's own adapters and harnesses
 (see [PLAN.md](PLAN.md#findings)).
 
+## Adopted on real systems
+
+Each adoption migrates an existing project onto a World (mostly
+mechanically, with `dstmigrate`), models the faults inside its contract,
+writes workloads and checks (each shown to fail on a bug planted for it),
+and sweeps seeds. Every bug below has a test that fails on the original
+code and passes with the fix; the forks' own records hold the evidence and
+replay commands. Nothing has been reported upstream yet.
+
+| Project | What it is | Found |
+|---|---|---|
+| [hashicorp/raft](https://github.com/prince776/raft/tree/dst) ([DST.md](https://github.com/prince776/raft/blob/dst/DST.md)) | Raft consensus (Consul, Nomad, Vault) | 4 bugs: a live majority that can never elect a leader (a lagging voter rejects the only candidate that could win); a crash inside bootstrap that strands a new server; a follower that trips over its own snapshot, rolls its state machine back, livelocks and panics (overlaps Antithesis's [#697](https://github.com/hashicorp/raft/issues/697)); a demoted leader that shuts down (a question for upstream). Fixes with upstream-style tests on `fix/*` branches. |
+| [rosedb](https://github.com/prince776/rosedb/tree/dst) ([DST.md](https://github.com/prince776/rosedb/blob/dst/DST.md)) | Bitcask key-value store and its WAL | 7 bugs, most of them losing acknowledged data: no directory fsync for new segments; merge output never fsynced; a torn tail that makes Open fail; iterators racing a merge; a Close racing a merge that installs an empty merge; `BytesPerSync` ignored; an unfinished merge installed on the next Open. |
+| [go-diskqueue](https://github.com/prince776/go-diskqueue) ([README](https://github.com/prince776/go-diskqueue#bugs-found)) | NSQ's disk-backed queue | 5 bugs: no directory fsync after the metadata rename; Close persisting metadata before syncing the data; a crashed run's file reused in place, then read as corrupt (no power loss needed); reading past a rolled file (known upstream, [#38](https://github.com/nsqio/go-diskqueue/issues/38), found unprompted); a second path to overwriting a crashed run's file. |
+| [LLM-Tor](https://github.com/prince776/LLM-Tor) ([DST.md](https://github.com/prince776/LLM-Tor/blob/dst/DST.md)) | A backend's payment and anonymous-token flows | 10 findings, 8 fixed: payments credited twice on webhook redelivery; lost updates handing out free tokens or erasing payments; retries charged twice; tokens left unspent after a failure; provider errors saved as answers; moderation that missed text across chunk boundaries; two open protocol decisions about token epochs. |
+| hashicorp/memberlist | Gossip membership and failure detection | In progress. |
+
+Each adoption also hardened this library: kills that keep the page cache,
+file locks, gray failure, clock offsets and drift, a faster goroutine
+identity check, and dstmigrate's `os` file I/O all came from what one of
+them needed.
+
 ## How it works
 
 Every simulated goroutine is a real goroutine, but only one runs at a
