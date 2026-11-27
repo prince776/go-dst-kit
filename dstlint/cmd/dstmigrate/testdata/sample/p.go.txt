@@ -1,6 +1,8 @@
 package migr
 
 import (
+	"runtime"
+	"sync/atomic"
 	"context"
 	crand "crypto/rand"
 	"io"
@@ -115,6 +117,35 @@ func (p *Pool) disable() chan int {
 func (p *Pool) jitter(d time.Duration) time.Duration { return mrand.N(d) }
 
 func (p *Pool) nonce(b []byte) { io.ReadFull(crand.Reader, b) }
+
+// handOff receives a channel over a channel in a select: the callback's
+// value is a dst.Chan too.
+func (p *Pool) handOff(chs chan chan int) int {
+	select {
+	case c := <-chs:
+		return <-c
+	default:
+		return 0
+	}
+}
+
+// fanOut uses WaitGroup.Go (Go 1.25): it must get the World.
+func (p *Pool) fanOut() {
+	var wg sync.WaitGroup
+	wg.Go(func() { p.worker(1) })
+	wg.Wait()
+}
+
+// newCond makes a Cond with the standard constructor: it must become
+// dst.NewCond, as its type becomes *dst.Cond.
+func (p *Pool) newCond() *sync.Cond { return sync.NewCond(&p.mu) }
+
+// spinUntil waits for flag without a World operation: a Gosched spin.
+func (p *Pool) spinUntil(flag *atomic.Bool) {
+	for !flag.Load() {
+		runtime.Gosched()
+	}
+}
 
 func (p *Pool) gauss() float64 { return mrand.NormFloat64() }
 

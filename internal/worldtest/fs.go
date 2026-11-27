@@ -27,6 +27,7 @@ var FSChecks = []Check{
 	{"fs/sync", fsSync},
 	{"fs/name-as-opened", fsName},
 	{"fs/lock", fsLock},
+	{"fs/link", fsLink},
 }
 
 func must(err error) {
@@ -316,4 +317,38 @@ func fsLock(w *dst.World) {
 		failf("LockFile after unlock: %v", err)
 	}
 	must(unlock())
+}
+
+// fsLink: a hard link is a second name for the same data: writes through
+// one read through the other, removing one keeps the data, and linking
+// onto an existing name or a directory fails ([link-shares-data]).
+func fsLink(w *dst.World) {
+	fsys := w.FS()
+	must(dst.WriteFile(fsys, "a", []byte("one"), 0o644))
+	must(fsys.Mkdir("d", 0o755))
+	must(dst.Link(fsys, "a", "d/b"))
+	f, err := fsys.OpenFile("d/b", os.O_WRONLY|os.O_APPEND, 0)
+	must(err)
+	_, err = f.Write([]byte("two"))
+	must(err)
+	must(f.Close())
+	if b, err := dst.ReadFile(fsys, "a"); err != nil || string(b) != "onetwo" {
+		failf("after writing through the link, a reads %q (%v), want %q", b, err, "onetwo")
+	}
+	if err := dst.Link(fsys, "a", "d/b"); !errors.Is(err, fs.ErrExist) {
+		failf("Link onto an existing name: %v, want ErrExist", err)
+	}
+	if err := dst.Link(fsys, "d", "e"); err == nil {
+		failf("Link of a directory succeeded")
+	}
+	if err := dst.Link(fsys, "missing", "c"); !errors.Is(err, fs.ErrNotExist) {
+		failf("Link of a missing file: %v, want ErrNotExist", err)
+	}
+	must(fsys.Remove("a"))
+	if b, err := dst.ReadFile(fsys, "d/b"); err != nil || string(b) != "onetwo" {
+		failf("after removing a, its link reads %q (%v), want %q", b, err, "onetwo")
+	}
+	if _, err := fsys.Stat("a"); !errors.Is(err, fs.ErrNotExist) {
+		failf("a still exists after Remove: %v", err)
+	}
 }

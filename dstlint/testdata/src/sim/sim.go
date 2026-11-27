@@ -7,8 +7,11 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 var mu sync.Mutex // want `sync.Mutex escapes the World; use dst.Mutex`
@@ -33,6 +36,8 @@ func f(ctx context.Context) {
 	_ = crand.Reader              // want `crypto/rand.Reader escapes the World; use dst.CryptoReader\(w\)`
 	net.ListenPacket("udp", ":0") // want `net.ListenPacket escapes the World; use w.Net\(\).ListenPacket`
 	context.WithTimeout(ctx, 1)   // want `context.WithTimeout escapes the World; use dst.WithTimeout`
+	runtime.Gosched()             // want `runtime.Gosched escapes the World; use w.Yield`
+	dst.Current().Yield()         // want `dst.Current is a last resort`
 	_ = time.Second.String()      // methods and constants are fine
 	_ = context.WithValue(ctx, 1, 2)
 	mu.Lock() //dst:ok checked by hand

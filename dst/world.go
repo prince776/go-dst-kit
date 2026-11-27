@@ -20,9 +20,11 @@
 //	sync.Mutex/WaitGroup    dst.Mutex / dst.WaitGroup (zero values work)
 //	sync.Cond               dst.Cond (dst.NewCond)
 //	context.WithTimeout     dst.WithTimeout(w, ctx, d)
+//	runtime.Gosched         w.Yield()
 //	math/rand               w.Rand()
 //	crypto/rand.Read        w.Rand().CryptoRead (crypto/rand.Reader: dst.CryptoReader(w))
 //	os, net                 w.FS(), w.Net()
+//	os.Link                 dst.Link(w.FS(), old, new)
 //
 // Inside a simulated World, code must not block any other way: a raw
 // channel, sync.Mutex held across a wait, time.Sleep or real I/O escapes
@@ -50,7 +52,7 @@
 //     context does: Call returns its error then, having run the operation
 //     unless the request was refused.
 //
-// Children: World, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
+// Children: World, Current, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
 // Ticker, WithCancel, WithTimeout, WithDeadline, Rand, Inject, Do, Call, Buggify
 // Depends on: internal/sched (the simulator's engine)
 package dst
@@ -92,9 +94,45 @@ func init() {
 		if sp.Net != nil {
 			w.net = sp.Net.(Net)
 		}
+		if sp.Machine != nil {
+			sp.Machine.World = w
+		}
 		return w
 	}
 }
+
+// Current returns the World of the calling goroutine, for code that no
+// World can reach. It is a last resort: pass a World (as a field, a
+// parameter, an option) wherever one is reachable, and use Current only
+// in leaf code with no owner to hand it one, such as a package-level
+// helper called from everywhere. dstlint reports every use.
+//
+// For a goroutine a simulated World started, Current is that machine's
+// World. For any other goroutine (one a raw go statement started, a
+// finalizer, the test's own goroutine) it is the real World, even while
+// a simulation runs: such a goroutine gets real randomness and the real
+// clock, and nothing reports it. The determinism check is the backstop:
+// a seed whose runs differ because of it is reported as
+// nondeterministic. Outside a simulation the World Current returns has
+// goroutines, time, locks and randomness but no filesystem or network
+// (realworld.New gives those).
+//
+// Verified:
+//   - [current-is-the-callers] A goroutine a simulated World started gets
+//     its own machine's World (even with other machines and other
+//     simulations running at once); a goroutine no World started gets the
+//     real World.
+func Current() *World {
+	if t := sched.CurrentTask(); t != nil {
+		if w, ok := t.Machine.World.(*World); ok {
+			return w
+		}
+	}
+	return currentReal
+}
+
+// currentReal is Current's real World.
+var currentReal = &World{rnd: realRand{}}
 
 // Simulated reports whether w is a simulated World.
 func (w *World) Simulated() bool { return w.s != nil }
@@ -118,6 +156,33 @@ func (w *World) GoNamed(name string, fn func()) {
 	w.s.Current()
 	w.s.Spawn(w.m, name, fn)
 	w.s.Yield()
+}
+
+// Yield lets other goroutines run, as runtime.Gosched does. Use it where
+// code waits for another goroutine without any World operation in between,
+// such as a loop spinning on an atomic:
+//
+//	for flag.Load() == 0 {
+//		w.Yield()
+//	}
+//
+// In a simulated World only one goroutine runs at a time, so such a loop
+// would otherwise never let the other one run. There Yield returns only
+// after another goroutine has taken a step or a timer has fired: the
+// goroutine waited for runs, time advances while it sleeps, and a spin
+// that nothing can ever end is reported as a deadlock.
+//
+// Verified:
+//   - [yield-waits-for-progress] In a simulated World, Yield returns only
+//     after another goroutine has taken a step or time has advanced; a
+//     spin waiting for a sleeping goroutine ends at its wake-up after a
+//     handful of iterations, and a spin no one can end is a deadlock.
+func (w *World) Yield() {
+	if w.s == nil {
+		runtime.Gosched()
+		return
+	}
+	w.s.YieldToOthers()
 }
 
 // Sleep pauses the goroutine for d, as time.Sleep does.

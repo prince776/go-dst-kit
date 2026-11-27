@@ -29,6 +29,16 @@ srv := NewServer(w, cfg)
 
 In tests, `dsttest` gives each simulated machine its own World.
 
+**Last resort: `dst.Current()`.** Leaf code that no World can reach (a
+package-level helper called from everywhere, with no owner to pass it
+one: an assertion helper's random choice, say) can ask for the calling
+goroutine's World. A goroutine a simulated World started gets its
+machine's World; any other goroutine gets the real World, silently, even
+during a simulation, and only the determinism check notices what that
+changes. So pass a World wherever one is reachable. `dstlint` reports
+every use of `dst.Current`, in every package; excuse each with `//dst:ok`
+and why no World reaches it.
+
 ## 2. Substitute
 
 | Go | World | Notes |
@@ -46,10 +56,12 @@ In tests, `dsttest` gives each simulated machine its own World.
 | `sync.NewCond(l)`, `sync.Cond` | `dst.NewCond(l)`, `dst.Cond{L: l}` | same semantics: a Signal with no waiter is lost |
 | `context.WithCancel`, `WithTimeout`, `WithDeadline` | `dst.WithCancel(w, ctx)`, `dst.WithTimeout(w, ctx, d)`, `dst.WithDeadline(w, ctx, t)` | `Background`, `WithValue` are fine as they are |
 | `context.AfterFunc` | `dst.AfterDone(ctx, f)` | |
+| `runtime.Gosched` (a spin waiting for another goroutine) | `w.Yield()` | in simulation it returns once another goroutine has made progress or time has advanced; a spin no one can end is a deadlock |
 | `math/rand` | `w.Rand()` | seeded per machine in simulation |
 | `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
 | `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | paths are relative to the World's root |
 | `os.ReadFile`, `WriteFile`, `Create`, `Open` | `dst.ReadFile(w.FS(), ...)`, ... | `dst.SyncDir(fsys, dir)` to fsync a directory |
+| `os.Link` (a hard link) | `dst.Link(w.FS(), old, new)` | like a create, the new name is durable once its directory is synced |
 | `syscall.Flock(fd, LOCK_EX\|LOCK_NB)` on a lock file (gofrs/flock's `TryLock`) | `unlock, err := dst.LockFile(w.FS(), name)` | `dst.ErrLocked` when held; released by `unlock` or the process's death; unix only in the real World |
 | `net.Listen`, `net.Dial`, `DialContext` | `w.Net().Listen`, `w.Net().Dial`, `w.Net().DialContext` | returns ordinary `net.Listener` and `net.Conn` |
 | `http.Serve`, `http.DefaultClient` | `dsthttp.Serve(w, ln, h)`, `dsthttp.Client(w)` | handlers are unchanged |
@@ -120,6 +132,23 @@ dst.Select2(w,
   stack, rather than hanging.
 - **A leftover `go` statement** whose goroutine uses the World is reported
   as a misuse, with that goroutine's stack.
+
+## dstmigrate
+
+`go run github.com/prince776/go-dst-kit/dstlint/cmd/dstmigrate -world
+'Server=$.w' ./pkg` does the substitutions above in place. `-world` names
+the World expression for each receiver type (`$` is the receiver);
+elsewhere it writes `__w`, which won't compile until a person passes a
+World in. A project's own wrappers around the clock (or anything else
+that needs a World) are rewritten with `-map`: each call becomes a call
+of a function taking the World first, then the receiver for a method:
+
+```
+-map 'example.com/clock.Now=example.com/app/dstclock.Now,(example.com/clock.Mono).Elapsed=example.com/app/dstclock.Elapsed'
+```
+
+turns `clock.Now()` into `dstclock.Now(w)` and `m.Elapsed()` into
+`dstclock.Elapsed(w, m)`, importing `dstclock`.
 
 ## 4. Do it a package at a time
 

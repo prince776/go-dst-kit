@@ -1,0 +1,12 @@
+package dstclock
+
+import (
+	"time"
+
+	"example.com/migr/clock"
+	"github.com/prince776/go-dst-kit/dst"
+)
+
+func Now(w *dst.World) clock.Mono { return clock.Mono(w.Now().UnixNano()) }
+
+func Elapsed(w *dst.World, m clock.Mono) time.Duration { return time.Duration(Now(w) - m) }

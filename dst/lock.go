@@ -3,6 +3,7 @@ package dst
 import (
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 )
 
@@ -37,4 +38,35 @@ func LockFile(fsys FS, name string) (unlock func() error, err error) {
 		return nil, fmt.Errorf("lock %s: %w", name, errors.ErrUnsupported)
 	}
 	return l.LockFile(name)
+}
+
+// Linker is a filesystem with hard links. The real World's and the
+// simulated disk are Linkers.
+type Linker interface {
+	Link(oldname, newname string) error
+}
+
+// Link is os.Link on fsys: it makes newname a second name (a hard link)
+// for the file oldname, as checkpoints and ingestion in storage engines
+// do. The data is one file, the same through either name, and it lasts
+// while either name does. The new name is a directory change: like a
+// create, it survives a crash only once its directory is synced. Linking
+// a directory, or onto a name that exists, fails. A filesystem that isn't
+// a Linker returns errors.ErrUnsupported.
+//
+// Verified:
+//   - [link-shares-data] After Link, a write through either name reads
+//     through the other, removing one name keeps the data under the
+//     other, and linking onto an existing name or a directory fails (both
+//     Worlds: the FS contract suite).
+//   - [link-is-a-dir-change] After a crash, a link survives only as the
+//     directory rules allow: lost unless its directory was synced, never
+//     with data the file's own rules would have lost (simulated disk: the
+//     crash model).
+func Link(fsys FS, oldname, newname string) error {
+	l, ok := fsys.(Linker)
+	if !ok {
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: errors.ErrUnsupported}
+	}
+	return l.Link(oldname, newname)
 }

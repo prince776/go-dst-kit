@@ -29,6 +29,7 @@ const (
 	kSyncDir
 	kRename
 	kRemove
+	kLink
 )
 
 type fop struct {
@@ -52,6 +53,8 @@ func (o fop) String() string {
 		return "syncdir " + o.name
 	case kRename:
 		return "rename " + o.name + " " + o.to
+	case kLink:
+		return "link " + o.name + " " + o.to
 	default:
 		return "remove " + o.name
 	}
@@ -61,11 +64,13 @@ var files = []string{"a", "b", "d/c"}
 
 func gen(r *rand.Rand, n int) []fop {
 	live := map[string]bool{}
+	ino := map[string]int{} // which file each live name is (links share one)
+	inos := 0
 	var ops []fop
 	for len(ops) < n {
 		name := files[r.IntN(len(files))]
 		var o fop
-		switch k := r.IntN(8); {
+		switch k := r.IntN(9); {
 		case !live[name] || k == 0:
 			if live[name] {
 				continue
@@ -84,14 +89,28 @@ func gen(r *rand.Rand, n int) []fop {
 			if to == name {
 				continue
 			}
+			if live[to] && ino[to] == ino[name] {
+				continue // two names of one file: POSIX's rename does nothing
+			}
 			o = fop{k: kRename, name: name, to: to}
 			delete(live, name)
 			live[to] = true
+			ino[to] = ino[name]
+		case k == 8:
+			to := files[r.IntN(len(files))]
+			if live[to] {
+				continue
+			}
+			o = fop{k: kLink, name: name, to: to}
+			live[to] = true
+			ino[to] = ino[name]
 		default:
 			o = fop{k: kRemove, name: name}
 			delete(live, name)
 		}
 		if o.k == kCreate {
+			inos++
+			ino[name] = inos
 			live[name] = true
 		}
 		ops = append(ops, o)
@@ -142,6 +161,7 @@ type entry struct {
 
 type model struct {
 	ordered  bool
+	holes    bool // harsh mode: files may be written back page by page
 	live     map[string]*obj
 	liveData map[*obj]string
 	durNS    map[string]*obj
@@ -243,6 +263,10 @@ func (m *model) do(o fop) {
 	case kRemove:
 		delete(m.live, o.name)
 		m.metaOp(mop{k: kRemove, name: o.name})
+	case kLink:
+		x := m.live[o.name]
+		m.live[o.to] = x
+		m.metaOp(mop{k: kCreate, name: o.to, o: x}) // a second name: a create of the same file
 	}
 }
 
@@ -263,6 +287,45 @@ func tornVariants(s string, d dop) []string {
 	}
 	for n := 1; n < len(d.data); n++ {
 		out = append(out, dop{write: true, off: d.off, data: d.data[:n]}.apply(s))
+	}
+	return out
+}
+
+// testPage is the page size the hole tests give the disk: small, so the
+// model's few-byte files span several pages.
+const testPage = 2
+
+// holeVariants lists what a file may hold after an out-of-order
+// write-back: its size durable or last written, each page from its last
+// written content or its durable content (zeros past either's end). A
+// file with an unsynced truncate has none (the prefix rule only).
+func holeVariants(o *obj) []string {
+	if len(o.pending) == 0 || slices.ContainsFunc(o.pending, func(d dop) bool { return !d.write }) {
+		return nil
+	}
+	live := o.durable
+	for _, d := range o.pending {
+		live = d.apply(live)
+	}
+	pageOf := func(src string, off, size int) string {
+		b := make([]byte, min(off+testPage, size)-off)
+		if off < len(src) {
+			copy(b, src[off:min(off+testPage, len(src))])
+		}
+		return string(b)
+	}
+	var out []string
+	for _, size := range []int{len(o.durable), len(live)} {
+		var rec func(off int, acc string)
+		rec = func(off int, acc string) {
+			if off >= size {
+				out = append(out, acc)
+				return
+			}
+			rec(off+testPage, acc+pageOf(o.durable, off, size))
+			rec(off+testPage, acc+pageOf(live, off, size))
+		}
+		rec(0, "")
 	}
 	return out
 }
@@ -334,6 +397,13 @@ func (m *model) legal() map[string]bool {
 					s = o.pending[j].apply(s)
 				}
 			}
+			if m.holes {
+				for _, v := range holeVariants(o) {
+					next := maps.Clone(acc)
+					next[o] = v
+					rec(i+1, next)
+				}
+			}
 		}
 		rec(0, map[*obj]string{})
 	}
@@ -344,10 +414,18 @@ func (m *model) legal() map[string]bool {
 
 func play(t *testing.T, ops []fop, seed uint64, ordered bool) (got string, legal map[string]bool) {
 	t.Helper()
+	return playHoles(t, ops, seed, ordered, 0)
+}
+
+// playHoles is play on a disk whose files are written back page by page
+// with probability holeProb per crash and file (testPage-byte pages).
+func playHoles(t *testing.T, ops []fop, seed uint64, ordered bool, holeProb float64) (got string, legal map[string]bool) {
+	t.Helper()
 	m := newModel(ordered)
+	m.holes = holeProb > 0 && !ordered
 	var failure error
 	sim := simworld.New(simworld.Options{Seed: seed})
-	disk := sim.AddMachine("disk", simworld.MachineOptions{Disk: simfs.Options{Ordered: ordered, TornWriteProb: 0.5}})
+	disk := sim.AddMachine("disk", simworld.MachineOptions{Disk: simfs.Options{Ordered: ordered, TornWriteProb: 0.5, HoleProb: holeProb, PageSize: testPage}})
 	res := sim.Run(func(*dst.World) {
 		fsys := disk.World.FS()
 		check := func(err error) {
@@ -384,6 +462,8 @@ func play(t *testing.T, ops []fop, seed uint64, ordered bool) (got string, legal
 				check(fsys.Rename(o.name, o.to))
 			case kRemove:
 				check(fsys.Remove(o.name))
+			case kLink:
+				check(dst.Link(fsys, o.name, o.to))
 			}
 			m.do(o)
 			// [read-your-writes]: the live view always matches the model.
@@ -419,6 +499,81 @@ func play(t *testing.T, ops []fop, seed uint64, ordered bool) (got string, legal
 	return got, legal
 }
 
+// Verifies: [crash-is-legal], [crash-explores] (with holes)
+// Fails if: in harsh mode with holes, a crash leaves a state that neither
+// the prefix rules nor out-of-order page write-back allow (a page with
+// content that was never written there, a size neither durable nor
+// last written), or some legal state, holes included, never happens; or,
+// against vacuity, no explored sequence has a state only holes allow.
+func TestCrashHoles(t *testing.T) {
+	r := rand.New(rand.NewPCG(42, 2))
+	for i := range 1000 {
+		ops := gen(r, 1+r.IntN(10))
+		for s := range uint64(3) {
+			got, legal := playHoles(t, ops, uint64(i)*8+s, false, 0.5)
+			if !legal[got] {
+				t.Fatalf("holes: after %v and a crash, %q isn't legal; legal:\n  %s", ops, got, strings.Join(slices.Sorted(maps.Keys(legal)), "\n  "))
+			}
+		}
+	}
+	r = rand.New(rand.NewPCG(7, 2))
+	checked, holeOnly := 0, 0
+	for range 300 {
+		ops := gen(r, 1+r.IntN(5))
+		_, legal := playHoles(t, ops, 0, false, 0.5)
+		if len(legal) > 16 {
+			continue
+		}
+		checked++
+		_, prefixOnly := play(t, ops, 0, false)
+		if len(legal) > len(prefixOnly) {
+			holeOnly++
+		}
+		seen := map[string]bool{}
+		for s := uint64(1); s <= 3000 && len(seen) < len(legal); s++ {
+			got, _ := playHoles(t, ops, s, false, 0.5)
+			seen[got] = true
+		}
+		for o := range legal {
+			if !seen[o] {
+				t.Fatalf("holes: after %v, legal state %q never happened in 3000 seeds (saw %v)", ops, o, slices.Sorted(maps.Keys(seen)))
+			}
+		}
+	}
+	if checked < 100 || holeOnly < 10 {
+		t.Fatalf("holes: %d sequences explored, %d with states only holes allow; want at least 100 and 10", checked, holeOnly)
+	}
+}
+
+// Verifies: [holes-own-stream]
+// Fails if: a disk whose hole draws all say "no" (a tiny HoleProb) ends a
+// crash differently from a disk without holes, for any sequence and seed:
+// a hole draw taken from the disk's main stream shifts every later
+// prefix and tear; or, against vacuity, holes at 0.5 never change an
+// outcome.
+func TestHolesOwnStream(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 3))
+	changed := 0
+	for i := range 1000 {
+		ops := gen(r, 1+r.IntN(10))
+		for s := range uint64(3) {
+			seed := uint64(i)*8 + s
+			off, _ := play(t, ops, seed, false)
+			never, _ := playHoles(t, ops, seed, false, 1e-300)
+			if never != off {
+				t.Fatalf("after %v, seed %d: %q with holes that never fire, %q without holes", ops, seed, never, off)
+			}
+			if on, _ := playHoles(t, ops, seed, false, 0.5); on != off {
+				changed++
+			}
+		}
+	}
+	if changed == 0 {
+		t.Fatal("holes at 0.5 never changed a crash's outcome")
+	}
+	t.Logf("holes at 0.5 changed %d of 3000 outcomes", changed)
+}
+
 func modeName(ordered bool) string {
 	if ordered {
 		return "ordered"
@@ -450,7 +605,7 @@ func TestCrashIsLegal(t *testing.T) {
 func TestCrashExplores(t *testing.T) {
 	for _, ordered := range []bool{false, true} {
 		r := rand.New(rand.NewPCG(7, 1))
-		checked := 0
+		checked, withLink := 0, 0
 		for range 300 {
 			ops := gen(r, 1+r.IntN(5))
 			_, legal := play(t, ops, 0, ordered)
@@ -458,6 +613,9 @@ func TestCrashExplores(t *testing.T) {
 				continue
 			}
 			checked++
+			if slices.ContainsFunc(ops, func(o fop) bool { return o.k == kLink }) {
+				withLink++
+			}
 			seen := map[string]bool{}
 			for s := uint64(1); s <= 3000 && len(seen) < len(legal); s++ {
 				got, _ := play(t, ops, s, ordered)
@@ -471,6 +629,9 @@ func TestCrashExplores(t *testing.T) {
 		}
 		if checked < 100 {
 			t.Fatalf("%s: only %d sequences small enough to explore", modeName(ordered), checked)
+		}
+		if withLink < 10 {
+			t.Fatalf("%s: only %d explored sequences have a link", modeName(ordered), withLink)
 		}
 	}
 }
@@ -556,6 +717,8 @@ func playKill(t *testing.T, ops []fop, seed uint64, ordered, power bool) (live, 
 				check(fsys.Rename(o.name, o.to))
 			case kRemove:
 				check(fsys.Remove(o.name))
+			case kLink:
+				check(dst.Link(fsys, o.name, o.to))
 			}
 			m.do(o)
 		}

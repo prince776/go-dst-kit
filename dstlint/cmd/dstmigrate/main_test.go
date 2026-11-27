@@ -15,7 +15,8 @@ import (
 // or time.Now left, a nil channel in a literal compiles, and a nil channel
 // argument becomes the zero dst.Chan
 // without moving the comment after it; math/rand/v2's N and
-// crypto/rand.Reader become the World's, and a rand function with no
+// crypto/rand.Reader become the World's, runtime.Gosched becomes
+// w.Yield, and a rand function with no
 // World equivalent is reported. Fails if any survives, the result doesn't
 // build, the nil argument is kept or moves the comment, or the unmapped
 // rand call goes unreported.
@@ -54,13 +55,19 @@ func TestMigrateSample(t *testing.T) {
 	if !strings.Contains(warnings, "rand.NormFloat64 has no World equivalent") {
 		t.Errorf("rand.NormFloat64 kept without a warning:\n%s", warnings)
 	}
-	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`, `mrand\.N\(`, `crand\.`, `context\.With`} {
+	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`, `mrand\.N\(`, `crand\.`, `context\.With`, `runtime\.Gosched`} {
 		if regexp.MustCompile(bad).Match(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
 	}
 	if !regexp.MustCompile(`notifyAll\(1, dst\.Chan\[struct\{\}\]\{\}\)\s*\}\s*// notifyAll's comment stays above it\.\s*func notifyAll`).Match(got) {
 		t.Errorf("a nil channel argument didn't become the zero dst.Chan, or moved a comment:\n%s", got)
+	}
+	if !regexp.MustCompile(`wg\.Go\(p\.wd, func\(\) \{ p\.worker\(1\) \}\)`).Match(got) {
+		t.Errorf("WaitGroup.Go didn't get the World:\n%s", got)
+	}
+	if !regexp.MustCompile(`for !flag\.Load\(\) \{\s+p\.wd\.Yield\(\)`).Match(got) {
+		t.Errorf("runtime.Gosched didn't become the World's Yield:\n%s", got)
 	}
 	if !regexp.MustCompile(`// a comment inside a case\s+out\.Send`).Match(got) {
 		t.Errorf("the comment isn't before its statement any more:\n%s", got)
@@ -78,12 +85,12 @@ func TestMigrateSample(t *testing.T) {
 // comment after it.
 func TestMigrateFiles(t *testing.T) {
 	got, stderr := migrateSample(t, "files", "Store=$.w")
-	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|Lstat|MkdirAll|Mkdir|ReadDir)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
+	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|Lstat|MkdirAll|Mkdir|ReadDir|Link)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
 		if regexp.MustCompile(bad).MatchString(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
 	}
-	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`,
+	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `dst\.Link\(s\.w\.FS\(\), tmp, tmp\+"3"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`,
 		`\n// size takes a file: its type becomes dst\.File\.\nfunc size`} {
 		if !regexp.MustCompile(want).MatchString(got) {
 			t.Errorf("want %q in:\n%s", want, got)
@@ -158,4 +165,55 @@ func migrateSample(t *testing.T, name, world string, flags ...string) (string, s
 		t.Fatalf("vet: %v\n%s\n%s", err, out, got)
 	}
 	return string(got), stderr.String()
+}
+
+// -map rewrites calls of a project's own clock wrapper, a function and a
+// method, to functions taking the World first (importing their package),
+// and -world finds the receiver of a generic type with two type
+// parameters.
+// Fails if clock.Now or Elapsed survives, the result doesn't build, the
+// World isn't passed first (and the receiver next for the method), or
+// the generic method gets the placeholder World.
+func TestMigrateMap(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
+	dir := t.TempDir()
+	for _, f := range []string{"p.go", "clock/clock.go", "dstclock/dstclock.go"} {
+		src, err := os.ReadFile(filepath.Join(filepath.Dir(here), "testdata", "maps", f+".txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f == "p.go" {
+			src = []byte(strings.Replace(string(src), "import (", "import (\n\t\"github.com/prince776/go-dst-kit/dst\"", 1))
+		}
+		os.MkdirAll(filepath.Join(dir, filepath.Dir(f)), 0o755)
+		os.WriteFile(filepath.Join(dir, f), src, 0o644)
+	}
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/migr\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => "+kit+"\n"), 0o644)
+	bin := filepath.Join(dir, "dstmigrate")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = filepath.Dir(here)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	cmd := exec.Command(bin, "-world", "Queue=$.w,shard=$.w",
+		"-map", "example.com/migr/clock.Now=example.com/migr/dstclock.Now,(example.com/migr/clock.Mono).Elapsed=example.com/migr/dstclock.Elapsed", ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dstmigrate: %v\n%s", err, out)
+	}
+	vet := exec.Command("go", "vet", "./...")
+	vet.Dir = dir
+	got, _ := os.ReadFile(filepath.Join(dir, "p.go"))
+	if out, err := vet.CombinedOutput(); err != nil {
+		t.Fatalf("vet: %v\n%s\n%s", err, out, got)
+	}
+	for _, want := range []string{`q\.last = dstclock\.Now\(q\.w\)`, `return dstclock\.Elapsed\(q\.w, q\.last\)`, `s\.ch = dst\.MakeChan\[V\]\(s\.w, 1\)`, `"example\.com/migr/dstclock"`} {
+		if !regexp.MustCompile(want).Match(got) {
+			t.Errorf("want %q in:\n%s", want, got)
+		}
+	}
+	if regexp.MustCompile(`clock\.Now\(\)|\.Elapsed\(\)|__w`).Match(got) {
+		t.Errorf("a mapped call or the placeholder World survived:\n%s", got)
+	}
 }

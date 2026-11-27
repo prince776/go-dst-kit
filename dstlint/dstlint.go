@@ -7,6 +7,10 @@
 //
 //	//dst:simulated
 //
+// Every use of dst.Current (the calling goroutine's World) is reported
+// in every package, opted in or not: it is a last resort, for leaf code
+// that no World can reach. Excuse each use with //dst:ok and the reason.
+//
 // A line can be excused with a comment on it or the line above:
 //
 //	mu.Lock() //dst:ok guards a cache no goroutine waits on
@@ -17,7 +21,10 @@
 // Verified:
 //   - [flags-escapes] Every construct in the escape list is reported, with
 //     its World replacement, in an opted-in package.
-//   - [respects-opt-in] Packages without //dst:simulated aren't reported.
+//   - [respects-opt-in] Packages without //dst:simulated aren't reported,
+//     except for dst.Current.
+//   - [flags-current] Every use of dst.Current is reported, in every
+//     package: it is the last resort for code no World reaches.
 //   - [respects-ok] A //dst:ok comment on or above a line suppresses its
 //     report.
 //
@@ -67,13 +74,14 @@ var funcs = map[string]map[string]string{
 		"ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
 	},
 	"sync":        {"NewCond": "dst.NewCond"},
+	"runtime":     {"Gosched": "w.Yield"},
 	"crypto/rand": {"Read": "w.Rand().CryptoRead", "Int": "crypto/rand.Int(dst.CryptoReader(w), max)", "Text": "w.Rand().CryptoRead"},
 	"os": {
 		"Open": "dst.Open(w.FS(), ...)", "Create": "dst.Create(w.FS(), ...)", "OpenFile": "w.FS().OpenFile",
 		"ReadFile": "dst.ReadFile(w.FS(), ...)", "WriteFile": "dst.WriteFile(w.FS(), ...)",
 		"Remove": "w.FS().Remove", "RemoveAll": "w.FS().RemoveAll", "Rename": "w.FS().Rename",
 		"Mkdir": "w.FS().Mkdir", "MkdirAll": "w.FS().MkdirAll", "ReadDir": "w.FS().ReadDir",
-		"Stat": "w.FS().Stat", "Lstat": "w.FS().Stat", "Truncate": "File.Truncate",
+		"Stat": "w.FS().Stat", "Lstat": "w.FS().Stat", "Truncate": "File.Truncate", "Link": "dst.Link(w.FS(), ...)",
 	},
 	"net": {
 		"Dial": "w.Net().Dial", "DialTimeout": "w.Net().DialContext", "Listen": "w.Net().Listen",
@@ -107,10 +115,10 @@ var vars = map[string]map[string]string{
 	"crypto/rand": {"Reader": "dst.CryptoReader(w)"},
 }
 
+const dstPath = "github.com/prince776/go-dst-kit/dst"
+
 func run(pass *analysis.Pass) (any, error) {
-	if !optedIn(pass.Files) {
-		return nil, nil
-	}
+	simulated := optedIn(pass.Files)
 	for _, f := range pass.Files {
 		ok := okLines(pass.Fset, f)
 		report := func(pos token.Pos, format string, args ...any) {
@@ -121,6 +129,16 @@ func run(pass *analysis.Pass) (any, error) {
 			pass.Reportf(pos, format, args...)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, isSel := n.(*ast.SelectorExpr); isSel {
+				if obj := pass.TypesInfo.Uses[sel.Sel]; obj != nil && obj.Pkg() != nil && obj.Pkg().Path() == dstPath && obj.Name() == "Current" {
+					if _, isFunc := obj.(*types.Func); isFunc {
+						report(sel.Pos(), "dst.Current is a last resort: pass a World where one is reachable (excuse with //dst:ok and why none is)")
+					}
+				}
+			}
+			if !simulated {
+				return true
+			}
 			switch n := n.(type) {
 			case *ast.GoStmt:
 				report(n.Pos(), "go statement escapes the World; use w.Go")

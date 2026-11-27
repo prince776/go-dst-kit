@@ -16,15 +16,17 @@
 //   - time.Now, Since, Until, Sleep, After, AfterFunc, NewTimer and
 //     NewTicker to the World's methods, *time.Timer and *time.Ticker to
 //     *dst.Timer and *dst.Ticker;
-//   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types;
+//   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types,
+//     sync.NewCond to dst.NewCond;
 //   - go statements to w.Go, evaluating the call's arguments first as go
-//     does;
+//     does, and wg.Go(f) on a sync.WaitGroup to wg.Go(w, f);
+//   - runtime.Gosched to w.Yield (a spin loop must let others run);
 //   - math/rand calls to the World's Rand (math/rand/v2's generic N to a
 //     converted Int64N; functions with no equivalent are reported), and
 //     crypto/rand.Read and crypto/rand.Reader to the World's;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
 //     RemoveAll, Rename, Stat (and Lstat), ReadDir to w.FS()'s methods;
-//     os.Open, Create, ReadFile, WriteFile (and ioutil's) to dst's
+//     os.Open, Create, ReadFile, WriteFile, Link (and ioutil's) to dst's
 //     helpers; *os.File to dst.File, f.WriteString to io.WriteString.
 //     Names pass through unchanged, and a World's FS is rooted, so they
 //     must be relative to its root. Calls with no World equivalent
@@ -32,6 +34,13 @@
 //     -real-fs names files whose file I/O stays on the real filesystem
 //     on purpose (tests' temporary directories, operator tools): base
 //     name patterns, as path.Match takes them.
+//
+// -map rewrites calls of other functions and methods (a project's own
+// clock wrappers, say) to functions that take the World first:
+// -map 'example.com/clock.Now=example.com/app/dstclock.Now' turns
+// clock.Now() into dstclock.Now(w), and
+// '(example.com/clock.Mono).Elapsed=example.com/app/dstclock.Elapsed'
+// turns m.Elapsed() into dstclock.Elapsed(w, m).
 //
 // The World expression is chosen by the enclosing method's receiver:
 // -world 'Raft=$.w,NetworkTransport=$.w' uses r.w in methods of Raft
@@ -54,9 +63,11 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -72,6 +83,7 @@ func main() {
 	dryRun := flag.Bool("n", false, "print the files instead of writing them")
 	tests := flag.Bool("tests", false, "also rewrite the packages' tests (from the package's test build, in the same pass)")
 	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies")
+	mapFlag := flag.String("map", "", "calls rewritten to a function taking the World first: 'importpath.Func=importpath.Func,(importpath.Type).Method=importpath.Func'")
 	realFS := flag.String("real-fs", "", "files whose os file I/O is left as is, by base name pattern: 'peersjson.go,*_test.go'")
 	flag.Parse()
 	worlds := map[string]string{}
@@ -79,6 +91,10 @@ func main() {
 		if k, v, ok := strings.Cut(strings.TrimSpace(kv), "="); ok {
 			worlds[k] = v
 		}
+	}
+	callMaps, err := parseMaps(*mapFlag)
+	if err != nil {
+		fatal(err)
 	}
 	cfg := &packages.Config{Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo, Tests: *tests}
 	pkgs, err := packages.Load(cfg, flag.Args()...)
@@ -93,7 +109,7 @@ func main() {
 		if *tests && skipForTests(pkg, pkgs) {
 			continue
 		}
-		m := &migrator{testWorld: *testWorld, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
+		m := &migrator{testWorld: *testWorld, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds, maps: callMaps}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
 			if strings.HasSuffix(name, ".go") == false || seen[name] {
@@ -157,6 +173,8 @@ type migrator struct {
 	fset      *token.FileSet
 	info      *types.Info
 	worlds    map[string]string
+	maps      map[string]mapping // -map: calls rewritten to a function taking the World
+	imports   map[string]bool    // packages the file's rewrites need
 	changes   int
 	needRecv  bool
 	world     string       // the World expression in the current function
@@ -222,7 +240,26 @@ func (m *migrator) warn(n ast.Node, msg string) {
 }
 
 func (m *migrator) chanElem(e ast.Expr) string {
-	return types.TypeString(m.info.TypeOf(e).Underlying().(*types.Chan).Elem(), m.qualifier)
+	return m.typeString(m.info.TypeOf(e).Underlying().(*types.Chan).Elem())
+}
+
+// typeString prints t as the migrated code spells it: a channel type
+// inside it (a channel of channels, a slice of them) is a dst.Chan, as the
+// rewritten declarations say.
+func (m *migrator) typeString(t types.Type) string {
+	switch t := t.(type) {
+	case *types.Chan:
+		return "dst.Chan[" + m.typeString(t.Elem()) + "]"
+	case *types.Pointer:
+		return "*" + m.typeString(t.Elem())
+	case *types.Slice:
+		return "[]" + m.typeString(t.Elem())
+	case *types.Array:
+		return fmt.Sprintf("[%d]%s", t.Len(), m.typeString(t.Elem()))
+	case *types.Map:
+		return "map[" + m.typeString(t.Key()) + "]" + m.typeString(t.Elem())
+	}
+	return types.TypeString(t, m.qualifier)
 }
 
 // qualifier names types as code in the migrated package would: its own
@@ -263,9 +300,108 @@ func (m *migrator) file(f *ast.File) bool {
 	}
 	if m.changes > before {
 		astutil.AddImport(m.fset, f, dstPath)
+		for _, p := range slices.Sorted(maps.Keys(m.imports)) {
+			astutil.AddImport(m.fset, f, p)
+		}
+		m.imports = nil
 		return true
 	}
 	return false
+}
+
+// mapping is one -map entry: calls of a function or method become calls of
+// pkg.fn with the World first, then the receiver (for a method), then the
+// arguments.
+type mapping struct{ pkg, fn string }
+
+// parseMaps reads -map: 'from=to,...', where from is importpath.Func or
+// (importpath.Type).Method and to is importpath.Func.
+func parseMaps(spec string) (map[string]mapping, error) {
+	out := map[string]mapping{}
+	for _, kv := range strings.Split(spec, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		from, to, ok := strings.Cut(kv, "=")
+		i := strings.LastIndex(to, ".")
+		if !ok || i <= 0 || i == len(to)-1 || strings.LastIndex(from, ".") <= 0 {
+			return nil, fmt.Errorf("-map %q: want importpath.Func=importpath.Func or (importpath.Type).Method=importpath.Func", kv)
+		}
+		out[from] = mapping{pkg: to[:i], fn: to[i+1:]}
+	}
+	return out, nil
+}
+
+// mapKey names the function or method a call calls, as -map does, or "".
+func (m *migrator) mapKey(s *ast.SelectorExpr) (key string, method bool) {
+	fn, ok := m.info.Uses[s.Sel].(*types.Func)
+	if !ok || fn.Pkg() == nil {
+		return "", false
+	}
+	sig := fn.Type().(*types.Signature)
+	if sig.Recv() == nil {
+		return fn.Pkg().Path() + "." + fn.Name(), false
+	}
+	t := sig.Recv().Type()
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return "", false
+	}
+	return "(" + named.Obj().Pkg().Path() + "." + named.Obj().Name() + ")." + fn.Name(), true
+}
+
+// waitGroupGo rewrites wg.Go(f) on a sync.WaitGroup (Go 1.25) to
+// wg.Go(w, f): dst.WaitGroup.Go takes the World that runs f.
+func (m *migrator) waitGroupGo(n *ast.CallExpr, s *ast.SelectorExpr) bool {
+	if s.Sel.Name != "Go" || len(n.Args) != 1 {
+		return false
+	}
+	fn, ok := m.info.Uses[s.Sel].(*types.Func)
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "sync" {
+		return false
+	}
+	recv := fn.Type().(*types.Signature).Recv()
+	if recv == nil || !strings.HasSuffix(recv.Type().String(), "sync.WaitGroup") {
+		return false
+	}
+	n.Args = append([]ast.Expr{m.w()}, n.Args...)
+	m.changes++
+	return true
+}
+
+// mapCall rewrites a call that -map names; it reports whether it did.
+func (m *migrator) mapCall(c *astutil.Cursor, n *ast.CallExpr, s *ast.SelectorExpr) bool {
+	if len(m.maps) == 0 {
+		return false
+	}
+	key, method := m.mapKey(s)
+	to, ok := m.maps[key]
+	if !ok {
+		return false
+	}
+	pos := n.Pos()
+	args := []ast.Expr{m.w()}
+	if method {
+		args = append(args, s.X)
+	}
+	name := path.Base(to.pkg)
+	if to.pkg == m.pkg.Path() {
+		n.Fun = ast.NewIdent(to.fn) // a function of the package being migrated
+	} else {
+		n.Fun = sel(ast.NewIdent(name), to.fn)
+		if m.imports == nil {
+			m.imports = map[string]bool{}
+		}
+		m.imports[to.pkg] = true
+	}
+	n.Args = append(args, n.Args...)
+	setPos(n, pos)
+	m.changes++
+	return true
 }
 
 // skipForTests reports whether, loading with tests, pkg is done by
@@ -293,6 +429,8 @@ func recvType(e ast.Expr) string {
 	case *ast.Ident:
 		return t.Name
 	case *ast.IndexExpr:
+		return recvType(t.X)
+	case *ast.IndexListExpr: // a generic receiver with several type parameters
 		return recvType(t.X)
 	}
 	return ""
@@ -323,7 +461,7 @@ func (m *migrator) decl(d ast.Node) {
 				for i, r := range n.Results {
 					if i < res.Len() && isNil(r) {
 						if ch, ok := res.At(i).Type().Underlying().(*types.Chan); ok {
-							n.Results[i] = &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}}
+							n.Results[i] = &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.typeString(ch.Elem()))}}}
 							setPos(n, n.Pos())
 							m.changes++
 						}
@@ -435,7 +573,9 @@ func (m *migrator) decl(d ast.Node) {
 			}
 			if id, ok := n.X.(*ast.Ident); ok {
 				switch id.Name + "." + n.Sel.Name {
-				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond":
+				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond", "sync.NewCond":
+					// sync.NewCond(l) is dst.NewCond(l): the Cond fields
+					// become dst.Cond, so their constructor must too.
 					id.Name = "dst"
 					m.changes++
 				case "time.Timer", "time.Ticker":
@@ -494,7 +634,7 @@ func (m *migrator) nilChanArgs(n *ast.CallExpr) {
 			continue
 		}
 		if ch, ok := pt.Underlying().(*types.Chan); ok {
-			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.typeString(ch.Elem()))}}
 			setPos(z, a.Pos()) // where nil was, so comments stay put
 			n.Args[i] = z
 			m.changes++
@@ -546,7 +686,7 @@ func (m *migrator) nilChanElems(n *ast.CompositeLit) {
 			continue
 		}
 		if ch, ok := ft.Underlying().(*types.Chan); ok {
-			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.typeString(ch.Elem()))}}
 			setPos(z, (*val).Pos())
 			*val = z
 			m.changes++
@@ -584,6 +724,12 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	}
 	s, ok := n.Fun.(*ast.SelectorExpr)
 	if !ok {
+		return
+	}
+	if m.mapCall(c, n, s) {
+		return
+	}
+	if m.waitGroupGo(n, s) {
 		return
 	}
 	if !m.realFS {
@@ -650,6 +796,14 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 		if !m.realFS && s.Sel.Name == "Walk" || s.Sel.Name == "WalkDir" || s.Sel.Name == "Glob" {
 			m.warn(n, "filepath."+s.Sel.Name+" reads the real filesystem; walk the World's FS with ReadDir")
 		}
+	case "runtime":
+		if s.Sel.Name == "Gosched" {
+			// A spin waiting for another goroutine: in a simulation only
+			// World.Yield lets that goroutine run.
+			n.Fun = sel(m.w(), "Yield")
+			setPos(n, pos)
+			m.changes++
+		}
 	case "crypto/rand":
 		if s.Sel.Name == "Read" {
 			n.Fun = sel(call(sel(m.w(), "Rand")), "CryptoRead")
@@ -666,12 +820,12 @@ var fsMethods = map[string]string{"OpenFile": "OpenFile", "Mkdir": "Mkdir", "Mkd
 
 // fsHelpers are the os (and io/ioutil) functions package dst has as
 // helpers taking the FS first.
-var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile"}
+var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile", "Link": "Link"}
 
 // fsMissing are os functions that touch the filesystem but have no World
 // equivalent: left as they are, with a warning.
 var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "Chtimes": true, "Truncate": true,
-	"Link": true, "Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
+	"Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
 	"Getwd": true, "DirFS": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true, "TempFile": true, "TempDir": true}
 
 // fileCall rewrites a filesystem call of package os (or io/ioutil) to

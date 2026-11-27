@@ -13,7 +13,11 @@ a law in the package that implements it, with a test.
   chosen by the seed. That includes `Lock` and `RLock`, so races between
   separate critical sections are explored. Plain memory and `sync/atomic`
   accesses between World operations are not interleaved (use `-race` for
-  data races).
+  data races). A loop that waits on an atomic must call `w.Yield()`
+  (runtime.Gosched in the real World): it returns once another goroutine
+  has taken a step or time has advanced, so the goroutine waited for runs
+  and its timers fire, and a spin no one can end is reported as a
+  deadlock.
 - Half the seeds choose uniformly among runnable goroutines; the other
   half use PCT (probabilistic concurrency testing): random priorities,
   the highest runnable goroutine runs, and at 0 to 2 random steps the
@@ -78,10 +82,12 @@ against both). What survives a crash is anything POSIX and real
 journaling filesystems allow, chosen by the seed:
 
 - File data is durable only after the file's `Sync`.
-- Directory changes (create, mkdir, rename, remove) form one ordered
+- Directory changes (create, mkdir, link, rename, remove) form one ordered
   journal: a crash keeps a prefix of the unsynced ones, and `Sync` on a
   directory (`dst.SyncDir`) makes it durable up to that directory's last
   change. A rename is atomic: the old file or the new, never neither.
+  A hard link (`dst.Link`) is a second name for the same data, made
+  durable like a create.
 - Per seed, one of two modes:
   - **harsh** (like ext4 `data=writeback`, XFS): each file's unsynced writes
     survive independently of other files', and a file's `Sync` covers only
@@ -89,6 +95,16 @@ journaling filesystems allow, chosen by the seed:
   - **ordered** (like ext4's default `data=ordered`): writes reach the disk
     in issue order, and any `Sync` commits everything before it.
 - The first lost write of a file may survive in part (torn).
+- In harsh mode, a crash may instead write a file's unsynced data back
+  out of order, page by page (4KB): each page the lost writes touched
+  holds either its last written content or what was durable, and the
+  file's size is either the durable one or the last written one. So a
+  file can end in zeros past what reached the disk, and a page that
+  didn't reach it shows the file's older content (in a reused or
+  recycled file, the old records). Files with an unsynced truncate keep
+  the prefix rule. Two thirds of the seeds with disk faults draw a chance
+  per crash and file (`Swarm.DiskHoleProb`), from a stream of its own:
+  every other draw of a seed is as it was without holes.
 - Power can fail inside a `Write`, `Sync` or directory operation.
 - Files opened before a crash return `ESTALE`.
 - After a kill, nothing is lost: the page cache survives, so every

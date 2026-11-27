@@ -81,6 +81,10 @@
 //     lossy links, resets at heal, slow machines, slow disks, UDP
 //     blackholes) stay on, and the rest are off; every other field, and
 //     every field of the other seeds, is what the seed draws without it.
+//   - [disk-holes] With Disk, about two thirds of the seeds draw a chance
+//     (Swarm.DiskHoleProb) that a crash writes a file back out of order,
+//     page by page; without Disk it is zero; every other field is what
+//     the seed draws without it.
 //   - [gray-udp] With Gray faults, across seeds, lossy links lose datagrams
 //     and some links drop all UDP while TCP flows; neither happens after
 //     the fault phase, nor without Gray.
@@ -446,6 +450,7 @@ func (h *Harness) Machine(name string, start func(w *dst.World), opts ...Machine
 		h.Sometimes(map[string]string{"full": "a write found the disk full", "sync": "an fsync failed (EIO)",
 			"write": "a write failed (EIO)", "read": "a read failed (EIO)"}[kind])
 	}
+	sm.Disk.OnHoles = func() { h.Sometimes("disk wrote a file back out of order (holes)") }
 	sm.Disk.OnCrashLoss = func(_ int, torn bool) {
 		h.Sometimes("disk lost unsynced writes")
 		if torn {
@@ -780,6 +785,7 @@ type Swarm struct {
 	TornWriteProb float64       // chance the first lost write is torn rather than lost whole
 	IOCrashProb   float64       // chance of power loss inside each disk I/O call
 	SyncLatency   time.Duration // how long an fsync takes
+	DiskHoleProb  float64       // chance, per crash and file, of out-of-order page write-back (harsh mode; [disk-holes])
 
 	MinLatency  time.Duration // network latency floor
 	MeanLatency time.Duration // mean of the latency tail
@@ -829,7 +835,7 @@ type Swarm struct {
 }
 
 func (s Swarm) disk() simfs.Options {
-	return simfs.Options{Ordered: s.DiskOrdered, TornWriteProb: s.TornWriteProb, IOCrashProb: s.IOCrashProb, SyncLatency: s.SyncLatency,
+	return simfs.Options{Ordered: s.DiskOrdered, TornWriteProb: s.TornWriteProb, IOCrashProb: s.IOCrashProb, SyncLatency: s.SyncLatency, HoleProb: s.DiskHoleProb,
 		SyncErrProb: s.SyncErrProb, WriteErrProb: s.WriteErrProb, ReadErrProb: s.ReadErrProb}
 }
 
@@ -840,9 +846,9 @@ func (s Swarm) net() simnet.Options {
 }
 
 func (s Swarm) String() string {
-	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f}, net{latency %v+%v, reset %.4f}",
+	return fmt.Sprintf("crash every ~%v (down ~%v), partition every ~%v (for ~%v, one-way %v), disk{ordered %v, torn %.2f, power-loss-in-io %.4f, holes %.2f}, net{latency %v+%v, reset %.4f}",
 		s.CrashEvery, s.Downtime, s.PartitionEvery, s.PartitionFor, s.OneWay,
-		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
+		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.DiskHoleProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
 		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
 			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
 		fmt.Sprintf(", loss every ~%v, kills %.2f", s.LossEvery, s.KillShare) +
@@ -995,6 +1001,25 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	}
 	if !noMildGray {
 		s = mildGray(s, seed, f)
+	}
+	if !noDiskHoles {
+		s = diskHoles(s, seed, f)
+	}
+	return s
+}
+
+// noDiskHoles skips diskHoles's draws (tests of [disk-holes] compare with it).
+var noDiskHoles bool
+
+// diskHoles draws the chance that a crash writes a file back out of order,
+// page by page (simfs's HoleProb): in two thirds of the seeds with disk
+// faults, uniform in [0, 1). It draws from a stream of its own, whatever
+// Faults says, so every other field is what the seed draws without it.
+func diskHoles(s Swarm, seed uint64, f Faults) Swarm {
+	r := rand.New(rand.NewPCG(seed, 0x686f6c65)) // "hole"
+	p := sometimes(r, r.Float64())
+	if f.Disk {
+		s.DiskHoleProb = p
 	}
 	return s
 }

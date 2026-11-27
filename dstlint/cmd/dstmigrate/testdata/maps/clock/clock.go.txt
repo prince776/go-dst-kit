@@ -1,0 +1,11 @@
+package clock
+
+import "time"
+
+var start = time.Now()
+
+type Mono int64
+
+func Now() Mono { return Mono(time.Since(start)) }
+
+func (m Mono) Elapsed() time.Duration { return time.Duration(Now() - m) }

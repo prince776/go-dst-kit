@@ -67,6 +67,7 @@ It's a mechanical substitution, and it can be done one package at a time
 | `time.Now`, `time.Sleep`, `time.NewTimer`, `time.After` | `w.Now()`, `w.Sleep(d)`, `w.NewTimer(d)`, `w.After(d)` |
 | `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` | `dst.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` (zero values work) |
 | `context.WithTimeout`, `WithCancel` | `dst.WithTimeout(w, ctx, d)`, `dst.WithCancel(w, ctx)` |
+| `runtime.Gosched` | `w.Yield()` |
 | `math/rand` | `w.Rand()` |
 | `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` |
 | `os.OpenFile`, `os.Rename`, ... | `w.FS().OpenFile`, `w.FS().Rename`, ... |
@@ -117,7 +118,7 @@ every planted bug is caught, for the right reason.
 
 | Example | Planted bugs, all caught |
 |---|---|
-| [wal](examples/wal): checksummed write-ahead log | no fsync, no directory fsync, appending after a torn tail |
+| [wal](examples/wal): checksummed write-ahead log | no fsync, no directory fsync, appending after a torn tail, a checksum that doesn't cover the length (zeros read as records; found only with holes) |
 | [dedupe](examples/dedupe): exactly-once over retries | dedupe set in memory, "seen" logged separately from the effect |
 | [objstore](examples/objstore): a fake object store with fault points, and a log client on it | blind retry after a timeout (duplicates), timeout reported as failure (lost ack), writes without an ETag precondition (lost update) |
 | [heartbeat](examples/heartbeat): UDP failure detector | no sequence numbers (found only with UDP faults), sequence numbers that restart with the process, a monitor that learns members from heartbeats |
