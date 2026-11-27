@@ -34,6 +34,13 @@
 //     on purpose (tests' temporary directories, operator tools): base
 //     name patterns, as path.Match takes them.
 //
+// -map rewrites calls of other functions and methods (a project's own
+// clock wrappers, say) to functions that take the World first:
+// -map 'example.com/clock.Now=example.com/app/dstclock.Now' turns
+// clock.Now() into dstclock.Now(w), and
+// '(example.com/clock.Mono).Elapsed=example.com/app/dstclock.Elapsed'
+// turns m.Elapsed() into dstclock.Elapsed(w, m).
+//
 // The World expression is chosen by the enclosing method's receiver:
 // -world 'Raft=$.w,NetworkTransport=$.w' uses r.w in methods of Raft
 // whose receiver is named r. Elsewhere it writes __w, which won't
@@ -55,9 +62,11 @@ import (
 	"go/printer"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -73,6 +82,7 @@ func main() {
 	dryRun := flag.Bool("n", false, "print the files instead of writing them")
 	tests := flag.Bool("tests", false, "also rewrite the packages' tests (from the package's test build, in the same pass)")
 	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies")
+	mapFlag := flag.String("map", "", "calls rewritten to a function taking the World first: 'importpath.Func=importpath.Func,(importpath.Type).Method=importpath.Func'")
 	realFS := flag.String("real-fs", "", "files whose os file I/O is left as is, by base name pattern: 'peersjson.go,*_test.go'")
 	flag.Parse()
 	worlds := map[string]string{}
@@ -80,6 +90,10 @@ func main() {
 		if k, v, ok := strings.Cut(strings.TrimSpace(kv), "="); ok {
 			worlds[k] = v
 		}
+	}
+	callMaps, err := parseMaps(*mapFlag)
+	if err != nil {
+		fatal(err)
 	}
 	cfg := &packages.Config{Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo, Tests: *tests}
 	pkgs, err := packages.Load(cfg, flag.Args()...)
@@ -94,7 +108,7 @@ func main() {
 		if *tests && skipForTests(pkg, pkgs) {
 			continue
 		}
-		m := &migrator{testWorld: *testWorld, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
+		m := &migrator{testWorld: *testWorld, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds, maps: callMaps}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
 			if strings.HasSuffix(name, ".go") == false || seen[name] {
@@ -158,6 +172,8 @@ type migrator struct {
 	fset      *token.FileSet
 	info      *types.Info
 	worlds    map[string]string
+	maps      map[string]mapping // -map: calls rewritten to a function taking the World
+	imports   map[string]bool    // packages the file's rewrites need
 	changes   int
 	needRecv  bool
 	world     string       // the World expression in the current function
@@ -264,9 +280,89 @@ func (m *migrator) file(f *ast.File) bool {
 	}
 	if m.changes > before {
 		astutil.AddImport(m.fset, f, dstPath)
+		for _, p := range slices.Sorted(maps.Keys(m.imports)) {
+			astutil.AddImport(m.fset, f, p)
+		}
+		m.imports = nil
 		return true
 	}
 	return false
+}
+
+// mapping is one -map entry: calls of a function or method become calls of
+// pkg.fn with the World first, then the receiver (for a method), then the
+// arguments.
+type mapping struct{ pkg, fn string }
+
+// parseMaps reads -map: 'from=to,...', where from is importpath.Func or
+// (importpath.Type).Method and to is importpath.Func.
+func parseMaps(spec string) (map[string]mapping, error) {
+	out := map[string]mapping{}
+	for _, kv := range strings.Split(spec, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		from, to, ok := strings.Cut(kv, "=")
+		i := strings.LastIndex(to, ".")
+		if !ok || i <= 0 || i == len(to)-1 || strings.LastIndex(from, ".") <= 0 {
+			return nil, fmt.Errorf("-map %q: want importpath.Func=importpath.Func or (importpath.Type).Method=importpath.Func", kv)
+		}
+		out[from] = mapping{pkg: to[:i], fn: to[i+1:]}
+	}
+	return out, nil
+}
+
+// mapKey names the function or method a call calls, as -map does, or "".
+func (m *migrator) mapKey(s *ast.SelectorExpr) (key string, method bool) {
+	fn, ok := m.info.Uses[s.Sel].(*types.Func)
+	if !ok || fn.Pkg() == nil {
+		return "", false
+	}
+	sig := fn.Type().(*types.Signature)
+	if sig.Recv() == nil {
+		return fn.Pkg().Path() + "." + fn.Name(), false
+	}
+	t := sig.Recv().Type()
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
+		return "", false
+	}
+	return "(" + named.Obj().Pkg().Path() + "." + named.Obj().Name() + ")." + fn.Name(), true
+}
+
+// mapCall rewrites a call that -map names; it reports whether it did.
+func (m *migrator) mapCall(c *astutil.Cursor, n *ast.CallExpr, s *ast.SelectorExpr) bool {
+	if len(m.maps) == 0 {
+		return false
+	}
+	key, method := m.mapKey(s)
+	to, ok := m.maps[key]
+	if !ok {
+		return false
+	}
+	pos := n.Pos()
+	args := []ast.Expr{m.w()}
+	if method {
+		args = append(args, s.X)
+	}
+	name := path.Base(to.pkg)
+	if to.pkg == m.pkg.Path() {
+		n.Fun = ast.NewIdent(to.fn) // a function of the package being migrated
+	} else {
+		n.Fun = sel(ast.NewIdent(name), to.fn)
+		if m.imports == nil {
+			m.imports = map[string]bool{}
+		}
+		m.imports[to.pkg] = true
+	}
+	n.Args = append(args, n.Args...)
+	setPos(n, pos)
+	m.changes++
+	return true
 }
 
 // skipForTests reports whether, loading with tests, pkg is done by
@@ -294,6 +390,8 @@ func recvType(e ast.Expr) string {
 	case *ast.Ident:
 		return t.Name
 	case *ast.IndexExpr:
+		return recvType(t.X)
+	case *ast.IndexListExpr: // a generic receiver with several type parameters
 		return recvType(t.X)
 	}
 	return ""
@@ -585,6 +683,9 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	}
 	s, ok := n.Fun.(*ast.SelectorExpr)
 	if !ok {
+		return
+	}
+	if m.mapCall(c, n, s) {
 		return
 	}
 	if !m.realFS {

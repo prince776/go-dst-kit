@@ -1,0 +1,30 @@
+package migr
+
+import (
+	"time"
+
+	"example.com/migr/clock"
+)
+
+// Queue's methods start with a World field; its helpers don't.
+type Queue struct {
+	w    *dst.World
+	last clock.Mono
+}
+
+// touch reads the project's own clock: -map turns both calls into the
+// World's.
+func (q *Queue) touch() time.Duration {
+	q.last = clock.Now()
+	return q.last.Elapsed()
+}
+
+// shard has two type parameters: -world must still find its receiver.
+type shard[K comparable, V any] struct {
+	w  *dst.World
+	ch chan V
+}
+
+func (s *shard[K, V]) init() {
+	s.ch = make(chan V, 1)
+}

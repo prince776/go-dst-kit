@@ -133,6 +133,23 @@ dst.Select2(w,
 - **A leftover `go` statement** whose goroutine uses the World is reported
   as a misuse, with that goroutine's stack.
 
+## dstmigrate
+
+`go run github.com/prince776/go-dst-kit/dstlint/cmd/dstmigrate -world
+'Server=$.w' ./pkg` does the substitutions above in place. `-world` names
+the World expression for each receiver type (`$` is the receiver);
+elsewhere it writes `__w`, which won't compile until a person passes a
+World in. A project's own wrappers around the clock (or anything else
+that needs a World) are rewritten with `-map`: each call becomes a call
+of a function taking the World first, then the receiver for a method:
+
+```
+-map 'example.com/clock.Now=example.com/app/dstclock.Now,(example.com/clock.Mono).Elapsed=example.com/app/dstclock.Elapsed'
+```
+
+turns `clock.Now()` into `dstclock.Now(w)` and `m.Elapsed()` into
+`dstclock.Elapsed(w, m)`, importing `dstclock`.
+
 ## 4. Do it a package at a time
 
 1. Mark the package: `//dst:simulated` in any file.
