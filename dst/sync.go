@@ -70,6 +70,11 @@ func (m *Mutex) TryLock() bool { return m.mu.TryLock() }
 
 // Unlock is (*sync.Mutex).Unlock.
 func (m *Mutex) Unlock() {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return // a killed goroutine's deferred unlock: its process is gone
+		}
+	}
 	m.mu.Unlock()
 	if m.waiters.Load() > 0 {
 		if s := simSchedSlow(&m.s); s != nil {
@@ -107,6 +112,11 @@ func (m *RWMutex) Lock() {
 
 // Unlock is (*sync.RWMutex).Unlock.
 func (m *RWMutex) Unlock() {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return // a killed goroutine's deferred unlock: its process is gone
+		}
+	}
 	m.mu.Unlock()
 	m.wake()
 }
@@ -129,6 +139,11 @@ func (m *RWMutex) RLock() {
 
 // RUnlock is (*sync.RWMutex).RUnlock.
 func (m *RWMutex) RUnlock() {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return // a killed goroutine's deferred unlock: its process is gone
+		}
+	}
 	m.mu.RUnlock()
 	m.wake()
 }
@@ -146,6 +161,7 @@ type WaitGroup struct {
 	wg      sync.WaitGroup
 	n       atomic.Int64
 	waiters atomic.Int32
+	s       atomic.Pointer[sched.Scheduler] // the waiters' scheduler
 }
 
 // Add is (*sync.WaitGroup).Add.
@@ -158,6 +174,12 @@ func (g *WaitGroup) Add(delta int) {
 	if n == 0 && g.waiters.Load() > 0 {
 		if t := sched.CurrentTask(); t != nil {
 			t.Sched().WakeAll(g)
+		} else if s := g.s.Load(); s != nil {
+			// Simulated goroutines wait, and this goroutine isn't one of
+			// theirs: their wake-up would be lost. Current reports the
+			// misuse and doesn't return here.
+			s.Current()
+			s.WakeAll(g)
 		}
 	}
 }
@@ -182,6 +204,7 @@ func (g *WaitGroup) Wait() {
 	}
 	if t := sched.CurrentTask(); t != nil {
 		s := t.Sched()
+		g.s.Store(s)
 		for g.n.Load() != 0 {
 			g.waiters.Add(1)
 			s.ParkOn(g, "WaitGroup.Wait")
