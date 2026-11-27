@@ -1,6 +1,7 @@
 package migr
 
 import (
+	"time"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -11,6 +12,9 @@ type Store struct {
 	dir string
 	f   *os.File
 }
+
+// world is the Store's World, for -world 'Store=$.world()'.
+func (s *Store) world() *dst.World { return s.w }
 
 func (s *Store) open() error {
 	if _, err := os.Stat(s.dir); os.IsNotExist(err) {
@@ -69,6 +73,18 @@ func (s *Store) list() ([]string, error) {
 	c.Close()
 	_ = os.Chmod(filepath.Join(s.dir, "new"), 0o600)
 	return out, os.RemoveAll(filepath.Join(s.dir, "old"))
+}
+
+// drop removes the store.
+func (s *Store) drop() error {
+	// Attempt to remove all artifacts
+	return os.RemoveAll(s.dir)
+}
+
+// age is how long ago t was.
+func (s *Store) age(t time.Time) time.Duration {
+	// Since becomes the World's.
+	return time.Since(t)
 }
 
 // size takes a file: its type becomes dst.File.

@@ -26,6 +26,9 @@
 //     Names pass through unchanged, and a World's FS is rooted, so they
 //     must be relative to its root. Calls with no World equivalent
 //     (os.Chmod, filepath.Walk, (*os.File).Fd, ...) are reported.
+//     -real-fs names files whose file I/O stays on the real filesystem
+//     on purpose (tests' temporary directories, operator tools): base
+//     name patterns, as path.Match takes them.
 //
 // The World expression is chosen by the enclosing method's receiver:
 // -world 'Raft=$.w,NetworkTransport=$.w' uses r.w in methods of Raft
@@ -49,6 +52,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -65,6 +69,7 @@ func main() {
 	dryRun := flag.Bool("n", false, "print the files instead of writing them")
 	tests := flag.Bool("tests", false, "also rewrite the packages' tests (from the package's test build, in the same pass)")
 	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies")
+	realFS := flag.String("real-fs", "", "files whose os file I/O is left as is, by base name pattern: 'peersjson.go,*_test.go'")
 	flag.Parse()
 	worlds := map[string]string{}
 	for _, kv := range strings.Split(*worldFlag, ",") {
@@ -93,6 +98,7 @@ func main() {
 			}
 			seen[name] = true
 			m.inTest = strings.HasSuffix(name, "_test.go")
+			m.realFS = matchAny(*realFS, filepath.Base(name))
 			m.plans = nil
 			if !m.file(f) {
 				continue
@@ -143,6 +149,7 @@ type migrator struct {
 	warned    map[string]bool
 	testWorld string
 	inTest    bool
+	realFS    bool // the file's os file I/O is left as is (-real-fs)
 	pkg       *types.Package
 	fset      *token.FileSet
 	info      *types.Info
@@ -404,7 +411,7 @@ func (m *migrator) decl(d ast.Node) {
 			m.changes++
 		case *ast.StarExpr:
 			// *os.File: the World's dst.File (an interface).
-			if s, ok := n.X.(*ast.SelectorExpr); ok {
+			if s, ok := n.X.(*ast.SelectorExpr); ok && !m.realFS {
 				if tn, ok := m.info.Uses[s.Sel].(*types.TypeName); ok && tn.Name() == "File" && tn.Pkg() != nil && tn.Pkg().Path() == "os" {
 					m.replace(c, sel(ast.NewIdent("dst"), "File"))
 					m.changes++
@@ -450,6 +457,7 @@ func (m *migrator) zeroChan(ch ast.Expr) ast.Expr {
 func isNil(e ast.Expr) bool { id, ok := e.(*ast.Ident); return ok && id.Name == "nil" }
 
 func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
+	pos := n.Pos() // before any rewrite replaces n.Fun, which has it
 	if id, ok := n.Fun.(*ast.Ident); ok {
 		switch id.Name {
 		case "make":
@@ -478,7 +486,9 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	if !ok {
 		return
 	}
-	m.fileMethod(c, n)
+	if !m.realFS {
+		m.fileMethod(c, n)
+	}
 	pkg, ok := s.X.(*ast.Ident)
 	if !ok {
 		return
@@ -492,7 +502,7 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 		switch s.Sel.Name {
 		case "Now", "Since", "Until", "Sleep", "After", "AfterFunc", "NewTimer", "NewTicker":
 			n.Fun = sel(m.w(), s.Sel.Name)
-			setPos(n, n.Pos())
+			setPos(n, pos)
 			m.changes++
 		}
 	case "math/rand", "math/rand/v2":
@@ -503,7 +513,7 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 				name = s.Sel.Name
 			}
 			n.Fun = sel(call(sel(m.w(), "Rand")), name)
-			setPos(n, n.Pos())
+			setPos(n, pos)
 			m.changes++
 		}
 	case "context":
@@ -516,19 +526,21 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 				n.Args = n.Args[:len(n.Args)-1]
 			}
 			n.Args = append([]ast.Expr{m.w()}, n.Args...)
-			setPos(n, n.Pos())
+			setPos(n, pos)
 			m.changes++
 		}
 	case "os", "io/ioutil":
-		m.fileCall(n, s, obj.Imported().Path())
+		if !m.realFS {
+			m.fileCall(n, s, obj.Imported().Path())
+		}
 	case "path/filepath":
-		if s.Sel.Name == "Walk" || s.Sel.Name == "WalkDir" || s.Sel.Name == "Glob" {
+		if !m.realFS && s.Sel.Name == "Walk" || s.Sel.Name == "WalkDir" || s.Sel.Name == "Glob" {
 			m.warn(n, "filepath."+s.Sel.Name+" reads the real filesystem; walk the World's FS with ReadDir")
 		}
 	case "crypto/rand":
 		if s.Sel.Name == "Read" {
 			n.Fun = sel(call(sel(m.w(), "Rand")), "CryptoRead")
-			setPos(n, n.Pos())
+			setPos(n, pos)
 			m.changes++
 		}
 	}
@@ -555,6 +567,7 @@ var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "C
 // World's FS is rooted, so they must be relative to its root.
 func (m *migrator) fileCall(n *ast.CallExpr, s *ast.SelectorExpr, pkg string) {
 	name := s.Sel.Name
+	pos := n.Pos() // before the rewrite: the new Fun has none
 	fsys := func() ast.Expr { return call(sel(m.w(), "FS")) }
 	switch {
 	case pkg == "os" && fsMethods[name] != "":
@@ -573,7 +586,9 @@ func (m *migrator) fileCall(n *ast.CallExpr, s *ast.SelectorExpr, pkg string) {
 	default:
 		return
 	}
-	setPos(n, n.Pos())
+	// The generated nodes take the call's position, or the printer lets
+	// the comments after the call drift into its argument list.
+	setPos(n, pos)
 	m.changes++
 }
 
@@ -805,4 +820,17 @@ func sel(x ast.Expr, name string) *ast.SelectorExpr {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "dstmigrate:", err)
 	os.Exit(1)
+}
+
+// matchAny reports whether name matches one of the comma-separated
+// path.Match patterns.
+func matchAny(patterns, name string) bool {
+	for _, p := range strings.Split(patterns, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			if ok, _ := path.Match(p, name); ok {
+				return true
+			}
+		}
+	}
+	return false
 }

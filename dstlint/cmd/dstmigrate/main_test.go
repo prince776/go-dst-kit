@@ -59,9 +59,11 @@ func TestMigrateSample(t *testing.T) {
 // File I/O through package os (and io/ioutil) migrates to the World's FS:
 // the result compiles and vets, no os filesystem call or *os.File is
 // left, WriteString becomes io.WriteString, and a call with no World
-// equivalent (os.Chmod) is reported, not silently kept.
+// equivalent (os.Chmod) is reported, not silently kept; comments stay
+// where they were.
 // Fails if any os filesystem call or *os.File survives, the result
-// doesn't build, or os.Chmod goes unreported.
+// doesn't build, os.Chmod goes unreported, or a rewritten call moves the
+// comment after it.
 func TestMigrateFiles(t *testing.T) {
 	got, stderr := migrateSample(t, "files", "Store=$.w")
 	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|Lstat|MkdirAll|Mkdir|ReadDir)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
@@ -69,7 +71,8 @@ func TestMigrateFiles(t *testing.T) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
 	}
-	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`} {
+	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`,
+		`\n// size takes a file: its type becomes dst\.File\.\nfunc size`} {
 		if !regexp.MustCompile(want).MatchString(got) {
 			t.Errorf("want %q in:\n%s", want, got)
 		}
@@ -79,10 +82,39 @@ func TestMigrateFiles(t *testing.T) {
 	}
 }
 
+// The same with a World expression that is a call (s.world()): the
+// rewritten calls nest deeper, and comments must still stay put, after
+// a file call (drop) and a time call (age) alike.
+// Fails if the comment before age or size moves.
+func TestMigrateFilesWorldCall(t *testing.T) {
+	got, _ := migrateSample(t, "files", "Store=$.world()")
+	for _, want := range []string{`\n// age is how long ago t was\.\nfunc`, `\n// size takes a file: its type becomes dst\.File\.\nfunc size`} {
+		if !regexp.MustCompile(want).MatchString(got) {
+			t.Errorf("a comment moved (want %q):\n%s", want, got)
+		}
+	}
+}
+
+// A file named by -real-fs keeps its os file I/O: it uses the real
+// filesystem on purpose (a test's temporary directory).
+// Fails if any of the sample's os calls or *os.File is rewritten, or
+// os.Chmod is reported.
+func TestMigrateFilesRealFS(t *testing.T) {
+	got, stderr := migrateSample(t, "files", "Store=$.w", "-real-fs", "x.go,p.go")
+	for _, want := range []string{`os\.Rename\(`, `os\.Open\(`, `\*os\.File`, `f\.WriteString\(`} {
+		if !regexp.MustCompile(want).MatchString(got) {
+			t.Errorf("want %q kept in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(stderr, "no World equivalent") {
+		t.Errorf("a -real-fs file's call was reported; stderr:\n%s", stderr)
+	}
+}
+
 // migrateSample migrates testdata/<name>/p.go.txt in a scratch module with
 // the -world mapping, checks the result vets, and returns it and the
 // tool's stderr.
-func migrateSample(t *testing.T, name, world string) (string, string) {
+func migrateSample(t *testing.T, name, world string, flags ...string) (string, string) {
 	t.Helper()
 	_, here, _, _ := runtime.Caller(0)
 	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
@@ -100,7 +132,7 @@ func migrateSample(t *testing.T, name, world string) (string, string) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	cmd := exec.Command(bin, "-world", world, ".")
+	cmd := exec.Command(bin, append(append([]string{"-world", world}, flags...), ".")...)
 	cmd.Dir = dir
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
