@@ -1,0 +1,66 @@
+package migr
+
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
+
+type Pool struct {
+	wd    *dst.World
+	mu    sync.Mutex
+	jobs  chan int
+	done  chan struct{}
+	notes <-chan string
+	t     *time.Timer
+}
+
+// run handles jobs until done.
+func (p *Pool) run(out chan<- int) int {
+	n := 0
+	for {
+		select {
+		case j, ok := <-p.jobs:
+			if !ok {
+				return n
+			}
+			if j < 0 {
+				continue
+			}
+			// a comment inside a case
+			out <- j * 2
+			n++
+		case <-p.done:
+			return n
+		case <-time.After(time.Second):
+			break
+		case s := <-p.notes:
+			_ = s
+		case out <- -1:
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func (p *Pool) start() {
+	p.jobs = make(chan int, 4)
+	p.done = make(chan struct{})
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	go p.worker(rand.Intn(3))
+	go func() { close(p.done) }()
+	if p.notes == nil || len(p.jobs) > 2 {
+		p.jobs <- 1
+	}
+	v := <-p.jobs
+	_ = v
+	for x := range p.jobs {
+		_ = x
+	}
+	_ = time.Now()
+}
+
+func (p *Pool) worker(i int) { _ = i; _ = <-p.jobs + 1 }
+
+func dstRecv[T any](c dst.Chan[T]) T { v, _ := c.Recv(); return v }
