@@ -23,6 +23,27 @@
 //     every completed write and directory change is still there after
 //     restart, and still unsynced.
 //
+// Disk errors, as Linux reports them (Options' error rates, and Fill):
+//
+//   - A full disk (Fill) stays full: from then on, until StopFaults, the
+//     disk holds no more bytes than it did. A write that doesn't fit
+//     writes what does and fails with ENOSPC (as os.File does after a
+//     short write); creating a file or directory fails with ENOSPC while
+//     no byte is free; removing or truncating files frees space under the
+//     cap. Nothing
+//     already written is lost. (Space is freed at Remove, even while the
+//     file is open.)
+//   - A Sync of a file with unsynced writes may fail with EIO, and then
+//     those writes will never be durable: they stay readable until a
+//     crash, which loses them, and the next Sync succeeds (Linux marks
+//     the pages clean after a writeback error and reports the error
+//     once: PostgreSQL's "fsyncgate"). Retrying the Sync doesn't help;
+//     only rewriting the data does. Directory Syncs don't fail.
+//   - A Write or Read may fail with EIO, doing nothing.
+//
+// Not modelled: a failed fsync's pages being evicted (so reads return the
+// old data), bit rot, misdirected writes.
+//
 // Verified:
 //   - [behaves-like-os] Without crashes, every operation matches the os
 //     package (the FS contract suite passes against both).
@@ -34,6 +55,17 @@
 //   - [kill-keeps-cache] After a kill, every completed write and directory
 //     change is visible, and none became durable: a later power loss may
 //     still lose any of it.
+//   - [full-stays-full] After Fill, nothing grows the disk past what it
+//     held: a write writes exactly the bytes that fit and fails with
+//     ENOSPC, creates fail with ENOSPC while no byte is free, removing or
+//     truncating frees space that can be written again, nothing written before is lost, and
+//     StopFaults lifts the cap.
+//   - [fsync-error-forgets] A Sync that fails with EIO makes exactly that
+//     file's unsynced writes non-durable for good (still readable until a
+//     crash, gone after it, though a later Sync succeeds); other files'
+//     writes are unaffected.
+//   - [io-error-does-nothing] A Write or Read that fails with EIO
+//     transfers no bytes and moves no offset.
 //
 // Depends on: internal/sched
 package simfs
@@ -71,6 +103,10 @@ type Options struct {
 	// NoDurability makes every operation durable at once: crashes lose
 	// nothing. For tests that aren't about the disk.
 	NoDurability bool
+	// SyncErrProb, WriteErrProb and ReadErrProb are the chances that a
+	// Sync of a file with unsynced writes, a Write, or a Read fails with
+	// EIO (see the package doc).
+	SyncErrProb, WriteErrProb, ReadErrProb float64
 }
 
 // ErrStale is returned by a file handle opened before a crash.
@@ -92,6 +128,12 @@ type FS struct {
 	// OnCrashLoss, if set, is told after each crash how many unsynced
 	// operations were lost and whether a write was torn (for coverage).
 	OnCrashLoss func(lost int, torn bool)
+	// OnError, if set, is told of each injected error: "full" (an ENOSPC),
+	// "sync", "write" or "read" (an EIO). For coverage.
+	OnError func(kind string)
+	// full: Fill capped the disk at capacity bytes (until StopFaults).
+	full     bool
+	capacity int64
 }
 
 type inode struct {
@@ -183,6 +225,63 @@ func (f *FS) powerLoss() {
 	}
 }
 
+// ioError decides an injected EIO with probability prob (drawing nothing
+// when prob is 0, so seeds without errors keep their schedule).
+func (f *FS) ioError(prob float64, kind string) bool {
+	if prob <= 0 || f.rng.Float64() >= prob {
+		return false
+	}
+	f.s.Logf("disk of %s: %s failed with EIO", f.m.Name, kind)
+	if f.OnError != nil {
+		f.OnError(kind)
+	}
+	return true
+}
+
+// Fill makes the disk full from now on: it holds no more bytes than it
+// does now, until StopFaults (see the package doc).
+func (f *FS) Fill() {
+	f.full, f.capacity = true, f.used()
+	f.s.Logf("disk of %s is full (%d bytes)", f.m.Name, f.capacity)
+}
+
+// room is how many more bytes the disk takes (-1: unlimited).
+func (f *FS) room() int64 {
+	if !f.full {
+		return -1
+	}
+	return max(0, f.capacity-f.used())
+}
+
+// noSpace reports an ENOSPC for coverage.
+func (f *FS) noSpace() {
+	if f.OnError != nil {
+		f.OnError("full")
+	}
+}
+
+// used is the bytes the live tree's files hold.
+func (f *FS) used() int64 {
+	var n int64
+	seen := map[*inode]bool{}
+	var walk func(d *inode)
+	walk = func(d *inode) {
+		for _, c := range d.liveDents {
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			if c.dir {
+				walk(c)
+			} else {
+				n += int64(len(c.live))
+			}
+		}
+	}
+	walk(f.root)
+	return n
+}
+
 // enter is the start of every operation: a scheduling point.
 func (f *FS) enter() { f.s.Yield() }
 
@@ -253,6 +352,10 @@ func (f *FS) OpenFile(name string, flag int, perm fs.FileMode) (dst.File, error)
 		if perr != nil {
 			return nil, pathErr("open", name, perr)
 		}
+		if f.room() == 0 {
+			f.noSpace()
+			return nil, pathErr("open", name, syscall.ENOSPC)
+		}
 		ino = f.newInode(false, perm&fs.ModePerm)
 		d.liveDents[base] = ino
 		d.modTime = f.now()
@@ -287,6 +390,10 @@ func (f *FS) Mkdir(name string, perm fs.FileMode) error {
 	d, base, err := f.parent(p)
 	if err != nil {
 		return pathErr("mkdir", name, err)
+	}
+	if f.room() == 0 {
+		f.noSpace()
+		return pathErr("mkdir", name, syscall.ENOSPC)
 	}
 	ino := f.newInode(true, fs.ModeDir|perm&fs.ModePerm)
 	d.liveDents[base] = ino
@@ -475,12 +582,19 @@ func (i info) Sys() any           { return nil }
 // ---- durability ----
 
 // sync makes durable every pending operation that a Sync of x covers.
-func (f *FS) sync(x *inode) {
+func (f *FS) sync(x *inode) error {
 	f.powerLoss()
 	if f.opts.SyncLatency > 0 {
 		mean := float64(f.opts.SyncLatency)
 		d := time.Duration(min(f.rng.ExpFloat64()*mean, 10*mean))
 		f.s.Sleep(d)
+	}
+	if !x.dir && f.opts.SyncErrProb > 0 && slices.ContainsFunc(f.pending, func(o *op) bool { return o.isData() && o.ino == x }) &&
+		f.ioError(f.opts.SyncErrProb, "sync") {
+		// A writeback error: the file's unsynced writes are dropped from
+		// the page cache's dirty set, never to be durable.
+		f.pending = slices.DeleteFunc(f.pending, func(o *op) bool { return o.isData() && o.ino == x })
+		return syscall.EIO
 	}
 	last := -1
 	for i, o := range f.pending {
@@ -506,6 +620,7 @@ func (f *FS) sync(x *inode) {
 		}
 	}
 	f.pending = keep
+	return nil
 }
 
 func (f *FS) makeDurable(o *op) {
@@ -665,6 +780,9 @@ func (h *file) Read(p []byte) (int, error) {
 	if h.flag&(os.O_WRONLY) != 0 {
 		return 0, pathErr("read", h.name, syscall.EBADF)
 	}
+	if len(p) > 0 && h.fs.ioError(h.fs.opts.ReadErrProb, "read") {
+		return 0, pathErr("read", h.name, syscall.EIO)
+	}
 	if h.off >= int64(len(h.ino.live)) {
 		if len(p) == 0 {
 			return 0, nil
@@ -684,6 +802,9 @@ func (h *file) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, pathErr("readat", h.name, errors.New("negative offset"))
 	}
+	if len(p) > 0 && h.fs.ioError(h.fs.opts.ReadErrProb, "read") {
+		return 0, pathErr("read", h.name, syscall.EIO)
+	}
 	if off >= int64(len(h.ino.live)) {
 		return 0, io.EOF
 	}
@@ -700,9 +821,7 @@ func (h *file) Write(p []byte) (int, error) {
 		off = int64(len(h.ino.live))
 	}
 	n, err := h.writeAt(p, off, "write")
-	if err == nil {
-		h.off = off + int64(n)
-	}
+	h.off = off + int64(n) // a short write moves the offset by what it wrote, as os does
 	return n, err
 }
 
@@ -724,12 +843,28 @@ func (h *file) writeAt(p []byte, off int64, opName string) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	data := slices.Clone(p)
-	h.ino.live = writeAt(h.ino.live, off, data)
-	h.ino.modTime = h.fs.now()
-	h.fs.issue(&op{kind: opWrite, ino: h.ino, off: off, data: data})
-	h.fs.powerLoss()
-	return len(p), nil
+	if h.fs.ioError(h.fs.opts.WriteErrProb, "write") {
+		return 0, pathErr(opName, h.name, syscall.EIO)
+	}
+	n := len(p)
+	if room := h.fs.room(); room >= 0 {
+		// Bytes past the end (and any hole before them) need space.
+		if grow := off + int64(len(p)) - int64(len(h.ino.live)); grow > room {
+			n = max(0, len(p)-int(grow-room))
+		}
+	}
+	if n > 0 {
+		data := slices.Clone(p[:n])
+		h.ino.live = writeAt(h.ino.live, off, data)
+		h.ino.modTime = h.fs.now()
+		h.fs.issue(&op{kind: opWrite, ino: h.ino, off: off, data: data})
+		h.fs.powerLoss()
+	}
+	if n < len(p) {
+		h.fs.noSpace()
+		return n, pathErr(opName, h.name, syscall.ENOSPC)
+	}
+	return n, nil
 }
 
 func (h *file) Seek(offset int64, whence int) (int64, error) {
@@ -758,6 +893,10 @@ func (h *file) Truncate(size int64) error {
 	if h.flag&(os.O_WRONLY|os.O_RDWR) == 0 {
 		return pathErr("truncate", h.name, syscall.EINVAL)
 	}
+	if room := h.fs.room(); room >= 0 && size-int64(len(h.ino.live)) > room {
+		h.fs.noSpace()
+		return pathErr("truncate", h.name, syscall.ENOSPC)
+	}
 	h.ino.live = truncate(h.ino.live, size)
 	h.ino.modTime = h.fs.now()
 	h.fs.issue(&op{kind: opTruncate, ino: h.ino, size: size})
@@ -770,7 +909,9 @@ func (h *file) Sync() error {
 	if err := h.check("sync"); err != nil {
 		return err
 	}
-	h.fs.sync(h.ino)
+	if err := h.fs.sync(h.ino); err != nil {
+		return pathErr("sync", h.name, err)
+	}
 	return nil
 }
 
@@ -819,9 +960,13 @@ func (h *file) Close() error {
 	return nil
 }
 
-// StopFaults turns off power loss inside I/O calls (the runner's recovery
-// phase). Crashes the runner still causes keep their usual effect.
-func (f *FS) StopFaults() { f.opts.IOCrashProb = 0 }
+// StopFaults turns off power loss inside I/O calls and injected errors,
+// and lifts a full disk's cap (the runner's recovery phase). Crashes the
+// runner still causes keep their usual effect.
+func (f *FS) StopFaults() {
+	f.opts.IOCrashProb, f.opts.SyncErrProb, f.opts.WriteErrProb, f.opts.ReadErrProb = 0, 0, 0, 0
+	f.full = false
+}
 
 // LockFile is dst.LockFile on the simulated disk: an exclusive lock per
 // file (inode), held until unlock, a crash or a kill.

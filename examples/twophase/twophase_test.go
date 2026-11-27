@@ -1,10 +1,12 @@
 package twophase_test
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,6 +22,11 @@ func harness(bugs twophase.Bugs) func(h *dsttest.Harness) {
 	return func(h *dsttest.Harness) {
 		h.Machine("coord", func(w *dst.World) {
 			c, err := twophase.StartCoordinator(w, parts, bugs)
+			for transient(err) { // a full disk or an I/O error: retry the startup
+				h.Sometimes("a startup failed on the disk")
+				w.Sleep(50 * time.Millisecond)
+				c, err = twophase.StartCoordinator(w, parts, bugs)
+			}
 			if err != nil {
 				h.Failf("coordinator: %v", err)
 				return
@@ -35,6 +42,11 @@ func harness(bugs twophase.Bugs) func(h *dsttest.Harness) {
 		for _, name := range []string{"p1", "p2"} {
 			machines = append(machines, h.Machine(name, func(w *dst.World) {
 				p, err := twophase.StartParticipant(w, "coord:4000", bugs)
+				for transient(err) {
+					h.Sometimes("a startup failed on the disk")
+					w.Sleep(50 * time.Millisecond)
+					p, err = twophase.StartParticipant(w, "coord:4000", bugs)
+				}
 				if err != nil {
 					h.Failf("%s: %v", name, err)
 					return
@@ -150,4 +162,10 @@ func TestPlantedBugs(t *testing.T) {
 			t.Logf("caught at seed %d: %v", rep.Failed[0].Seed, err)
 		})
 	}
+}
+
+// transient reports whether err is a disk error that passes: a full disk
+// (until the faults stop) or an I/O error.
+func transient(err error) bool {
+	return errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EIO)
 }

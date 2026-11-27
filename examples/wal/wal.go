@@ -8,6 +8,12 @@
 // records until the first incomplete or corrupt one (a write torn by a
 // crash), truncates the file there, and continues after it.
 //
+// When Append fails (a full disk writes part of the record; a failed fsync
+// leaves it readable but never durable, though the next fsync succeeds),
+// the log truncates the file back to the end of its last durable record
+// before appending again: appending after the failed bytes would leave
+// garbage, or a hole, before records acknowledged later.
+//
 // Bugs plants known mistakes; the test shows the simulator catches each.
 //
 // Verified:
@@ -16,6 +22,9 @@
 //   - [recovery-is-a-prefix] After a crash, Open returns a prefix of the
 //     appended records. It may lack only unacknowledged ones at the end:
 //     never garbage, never a gap.
+//   - [failed-append-vanishes] A record whose Append failed (a full disk,
+//     an I/O error, a failed fsync) never appears after recovery, and
+//     records appended after it are kept.
 //   - [real-and-simulated] The same code runs on the real filesystem.
 //
 // Depends on: dst
@@ -46,6 +55,11 @@ type Bugs struct {
 	// appends after it, so the next recovery stops at the torn record and
 	// loses everything appended later.
 	NoTruncateTornTail bool
+	// NoRepairAfterError keeps appending after a failed Append: after a
+	// short write the next record follows a partial one, and after a
+	// failed fsync (whose data is gone for good) it follows a hole, so
+	// recovery stops there and loses records acknowledged later.
+	NoRepairAfterError bool
 }
 
 // Log is an open write-ahead log. It is not safe for concurrent use.
@@ -53,6 +67,8 @@ type Log struct {
 	f       dst.File
 	bugs    Bugs
 	records [][]byte
+	size    int64 // the end of the last durable record
+	broken  bool  // a failed Append may have left bytes after size
 	// Recovered reports what Open found: whether it discarded a torn tail.
 	TornTail bool
 }
@@ -83,7 +99,7 @@ func Open(fsys dst.FS, name string, bugs Bugs) (*Log, error) {
 		return nil, err
 	}
 	records, valid := parse(b)
-	l := &Log{f: f, bugs: bugs, records: records, TornTail: valid < int64(len(b))}
+	l := &Log{f: f, bugs: bugs, records: records, size: valid, TornTail: valid < int64(len(b))}
 	if l.TornTail && !bugs.NoTruncateTornTail {
 		if err := f.Truncate(valid); err != nil {
 			return nil, err
@@ -99,6 +115,7 @@ func Open(fsys dst.FS, name string, bugs Bugs) (*Log, error) {
 	if _, err := f.Seek(end, io.SeekStart); err != nil {
 		return nil, err
 	}
+	l.size = end
 	return l, nil
 }
 
@@ -135,20 +152,54 @@ func Read(fsys dst.FS, name string) ([][]byte, error) {
 
 // Append adds a record and returns its index once it is durable.
 func (l *Log) Append(data []byte) (int, error) {
+	if l.broken {
+		if err := l.repair(); err != nil {
+			return 0, err
+		}
+	}
 	rec := make([]byte, header+len(data))
 	binary.BigEndian.PutUint32(rec, uint32(len(data)))
 	binary.BigEndian.PutUint32(rec[4:], crc32.ChecksumIEEE(data))
 	copy(rec[header:], data)
 	if _, err := l.f.Write(rec); err != nil {
-		return 0, fmt.Errorf("wal: append: %w", err)
+		return 0, l.failed(fmt.Errorf("wal: append: %w", err))
 	}
 	if !l.bugs.NoFsync {
 		if err := l.f.Sync(); err != nil {
-			return 0, fmt.Errorf("wal: sync: %w", err)
+			return 0, l.failed(fmt.Errorf("wal: sync: %w", err))
 		}
 	}
+	l.size += int64(len(rec))
 	l.records = append(l.records, append([]byte(nil), data...))
 	return len(l.records) - 1, nil
+}
+
+// failed handles a failed Append: the record isn't durable, and the file
+// may hold part of it, or all of it unsynced (a failed fsync's data never
+// becomes durable), after the last durable record. The log cuts it off
+// now, or before the next Append if that fails too.
+func (l *Log) failed(err error) error {
+	if l.bugs.NoRepairAfterError {
+		l.size, _ = l.f.Seek(0, io.SeekCurrent) // carry on after it
+		return err
+	}
+	l.broken = true
+	if rerr := l.repair(); rerr != nil {
+		return errors.Join(err, rerr)
+	}
+	return err
+}
+
+// repair truncates the file to the end of the last durable record.
+func (l *Log) repair() error {
+	if err := l.f.Truncate(l.size); err != nil {
+		return fmt.Errorf("wal: repair: %w", err)
+	}
+	if _, err := l.f.Seek(l.size, io.SeekStart); err != nil {
+		return fmt.Errorf("wal: repair: %w", err)
+	}
+	l.broken = false
+	return nil
 }
 
 // Records returns every record, recovered and appended.

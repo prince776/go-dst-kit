@@ -427,6 +427,28 @@ Library findings:
   choice sequence (Hypothesis-style), which is also what guided
   exploration and shrinking need (Deferred).
 
+**Disk errors (2026-11-27, raft phase 1 item 5; Prince approved the
+design):** `Faults.DiskErrors`, in `AllFaults` from the start (Prince).
+A full disk is a moment, not a size model (Prince): at a drawn time the
+disk is capped at what it holds, stays full until the faults stop, and
+frees space on remove and truncate; the cap lifts when the faults stop so
+liveness checks stay fair (my push-back on "stays full forever"). EIO on
+fsync follows Linux (Prince chose it over "retrying works"): the file's
+unsynced writes are dropped from durability and the next fsync succeeds.
+EIO on writes and reads does nothing. Laws [full-stays-full],
+[fsync-error-forgets], [io-error-does-nothing] in simfs, each broken by
+hand once. Turning it on in `AllFaults` broke four of the examples, each
+a real mistake the examples had been making: the WAL appended after a
+failed append (garbage or a hole before later acknowledged records; now
+it truncates back, and `NoRepairAfterError` plants the mistake);
+gcounter decremented its own count after a failed persist (a G-counter
+must never go back: the next increment would reuse a count peers
+already hold); heartbeat panicked on any disk error (now it rewrites the
+state file until it succeeds, which is also the right answer to a failed
+fsync); twophase gave up logging a decision (the transaction stayed in
+flight and its participants in doubt for good) and left a failed begin
+in flight. Harnesses now retry startups on ENOSPC and EIO.
+
 ## Exploration plan (approved by Prince, 2026-11-26)
 
 Goal: find more bugs, measurably. Targets: llm-tor (request/response

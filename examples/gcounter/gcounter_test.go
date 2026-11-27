@@ -1,9 +1,11 @@
 package gcounter_test
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -27,6 +29,13 @@ func harness(bugs gcounter.Bugs) func(h *dsttest.Harness) {
 			}
 			h.Machine(name, func(w *dst.World) {
 				n, err := gcounter.Start(w, name, peers, bugs)
+				// An I/O error reading the state is transient: retry, as a
+				// service retries its startup. Anything else is a failure.
+				for errors.Is(err, syscall.EIO) {
+					h.Sometimes("reading the state failed")
+					w.Sleep(50 * time.Millisecond)
+					n, err = gcounter.Start(w, name, peers, bugs)
+				}
 				if err != nil {
 					h.Failf("%s: %v", name, err)
 					return
@@ -97,7 +106,9 @@ func TestGCounter(t *testing.T) {
 	dsttest.Run(t, opts, harness(gcounter.Bugs{}))
 }
 
-// Each planted bug must be caught as a wrong or unsettled count.
+// Each planted bug must be caught as a wrong or unsettled count, or (a
+// rename without fsync) as the truncated state file it leaves after a
+// power loss.
 func TestPlantedBugs(t *testing.T) {
 	for name, bugs := range map[string]gcounter.Bugs{
 		"MergeSum":            {MergeSum: true},
@@ -110,7 +121,9 @@ func TestPlantedBugs(t *testing.T) {
 			if len(rep.Failed) == 0 {
 				t.Fatalf("%d seeds never caught %s", rep.Runs, name)
 			}
-			if err := rep.Failed[0].Err.Error(); !strings.Contains(err, "outside") && !strings.Contains(err, "disagree") {
+			err := rep.Failed[0].Err.Error()
+			truncated := bugs.NoFsyncBeforeRename && strings.Contains(err, "corrupt state")
+			if !strings.Contains(err, "outside") && !strings.Contains(err, "disagree") && !truncated {
 				t.Fatalf("%s caught for the wrong reason: %v", name, err)
 			}
 			t.Logf("caught at seed %d: %v", rep.Failed[0].Seed, rep.Failed[0].Err)

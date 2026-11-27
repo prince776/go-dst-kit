@@ -100,7 +100,39 @@ journaling filesystems allow, chosen by the seed:
 - `ReadDir` on an open directory returns entries in a seeded order, like
   real filesystems; `FS.ReadDir` sorts, like `os.ReadDir`.
 
-Not modelled yet: a full disk, I/O errors, bit rot, misdirected writes.
+Disk errors (`Faults.DiskErrors`), as Linux reports them:
+
+- **A full disk stays full.** At a time drawn per seed a machine's disk
+  fills: from then until the faults stop it holds no more bytes than it
+  did. A write that doesn't fit writes what does and fails with ENOSPC
+  (as `os.File` reports a short write); creating a file or directory
+  fails with ENOSPC while no byte is free; removing or truncating files
+  frees space under the cap, so compaction can make room. Nothing already
+  written is lost. When the faults stop the cap lifts (an operator added
+  space), so a correct system can recover. Space is freed at `Remove`,
+  even while the file is open.
+- **A failed fsync loses the data for good.** A `Sync` of a file with
+  unsynced writes may fail with EIO; those writes then never become
+  durable (they stay readable until a crash, which loses them), and the
+  next `Sync` succeeds: Linux marks the pages clean after a writeback
+  error and reports it once (PostgreSQL's "fsyncgate", 2018). Retrying the
+  fsync is the bug this catches; the safe responses are to rewrite the
+  data or to crash. Directory syncs don't fail.
+- **Writes and reads may fail with EIO**, doing nothing (no bytes, the
+  offset unmoved).
+- Rates are drawn per seed (none in a third of seeds per kind): a disk
+  fills every 1 to 6s on average, fsyncs with data to write fail up to 5%
+  of the time, writes and reads up to 0.5%. Machines marked `NeverCrash`
+  are spared. Errors are `*fs.PathError`s wrapping `syscall.ENOSPC` or
+  `syscall.EIO`, as `os` returns them.
+
+What a correct system owes: an error may fail a request or stop a
+process, but acknowledged data must stay durable and nothing
+unacknowledged may appear half-written. Startup steps that hit the disk
+should retry: the errors pass.
+
+Not modelled yet: a failed fsync's pages being evicted (reads returning
+the old data), bit rot, misdirected writes.
 
 ## Network (`internal/simnet`)
 

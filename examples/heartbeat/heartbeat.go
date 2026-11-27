@@ -86,48 +86,60 @@ type Worker struct {
 
 // state is what a worker keeps on disk: its incarnation and whether it
 // has left.
-func loadState(fsys dst.FS) (inc uint64, left bool) {
+func loadState(fsys dst.FS) (inc uint64, left bool, err error) {
 	b, err := dst.ReadFile(fsys, "state")
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		panic(err)
+		return 0, false, err
 	}
 	f := strings.Fields(string(b))
 	if len(f) == 2 {
 		inc, _ = strconv.ParseUint(f[0], 10, 64)
 		left = f[1] == "left"
 	}
-	return inc, left
+	return inc, left, nil
 }
 
-// saveState replaces the state file atomically and durably.
-func saveState(fsys dst.FS, inc uint64, left bool) {
+// saveState replaces the state file atomically and durably. After an
+// error nothing is known about state.tmp (a failed fsync's data is gone
+// for good): the caller tries again, rewriting it whole.
+func saveState(fsys dst.FS, inc uint64, left bool) error {
 	f, err := fsys.OpenFile("state.tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		panic(err)
+		return err
 	}
+	defer f.Close()
 	word := "member"
 	if left {
 		word = "left"
 	}
-	fmt.Fprintf(f, "%d %s\n", inc, word)
+	if _, err := fmt.Fprintf(f, "%d %s\n", inc, word); err != nil {
+		return err
+	}
 	if err := f.Sync(); err != nil {
-		panic(err)
+		return err
 	}
-	f.Close()
 	if err := fsys.Rename("state.tmp", "state"); err != nil {
-		panic(err)
+		return err
 	}
-	if err := dst.SyncDir(fsys, "."); err != nil {
-		panic(err)
+	return dst.SyncDir(fsys, ".")
+}
+
+// retry calls fn until it succeeds (a full disk or an I/O error lasts a
+// while), pausing between tries.
+func retry(w *dst.World, fn func() error) {
+	for fn() != nil {
+		w.Sleep(10 * time.Millisecond)
 	}
 }
 
 // NewWorker boots a worker: it bumps its incarnation on disk before
 // sending anything.
 func NewWorker(w *dst.World, name, monitor string, bugs Bugs) *Worker {
-	inc, left := loadState(w.FS())
+	var inc uint64
+	var left bool
+	retry(w, func() (err error) { inc, left, err = loadState(w.FS()); return err })
 	inc++
-	saveState(w.FS(), inc, left)
+	retry(w, func() error { return saveState(w.FS(), inc, left) })
 	wk := &Worker{w: w, name: name, monitor: monitor, bugs: bugs, inc: inc, status: Active}
 	if left {
 		wk.status = Leaving
@@ -141,7 +153,7 @@ func (wk *Worker) Leave(pc net.PacketConn, to net.Addr) {
 	if wk.status == Leaving {
 		return
 	}
-	saveState(wk.w.FS(), wk.inc, true)
+	retry(wk.w, func() error { return saveState(wk.w.FS(), wk.inc, true) })
 	wk.status = Leaving
 	wk.send(pc, to)
 }

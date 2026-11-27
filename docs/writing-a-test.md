@@ -271,6 +271,7 @@ Model the service's documented failure modes, not only its happy path:
 | Your machine loses power | machine crashes (`Faults.Crash`) | nothing: the code must recover on restart |
 | Your process dies (SIGKILL, a panic, OOM), the host stays up | process kills (`Faults.Kill`): the disk keeps unsynced writes | nothing: the code must recover on restart |
 | Your disk loses or tears unsynced writes | `w.FS()` (`Faults.Disk`) | nothing |
+| Your disk fills up, or fsyncs, writes and reads fail | `w.FS()` (`Faults.DiskErrors`): ENOSPC and EIO, a failed fsync losing the data | nothing: the code must handle the errors |
 | The network between your own machines | `w.Net()` (`Faults.Partition`, `Network`) | nothing |
 | Your process stalls (GC pause, VM freeze) | `Faults.Pause` | nothing |
 | A service you don't run fails, times out or is slow | fault points in a wrapper around its fake (`Faults.Points`) | one `dst.Call` per method |

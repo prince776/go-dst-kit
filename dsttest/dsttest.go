@@ -159,13 +159,20 @@ type Faults struct {
 	// its disk (a dead server, replaced by a new one). The test says which
 	// machines may be lost and what happens then with Harness.OnLoss.
 	Loss bool
+	// DiskErrors are the errors disks return: a disk fills up and stays
+	// full until the faults stop (writes that don't fit fail with ENOSPC;
+	// freeing space makes room again), and fsyncs, writes and reads fail
+	// with EIO, a failed fsync losing the file's unsynced writes for good
+	// though the next fsync succeeds, as on Linux (docs/fault-model.md).
+	// Machines marked NeverCrash are spared.
+	DiskErrors bool
 }
 
 // AllFaults enables every fault class but Loss, which only a system that
 // replaces lost machines can take (see Harness.OnLoss). Gray failure is
 // in: a correct system's timeouts must outlast its slowest path, and slow
 // links and disks stay slow in the recovery phase.
-var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true, Gray: true}
+var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true, Gray: true, DiskErrors: true}
 
 // Point sets a fault point's behaviour for every seed, replacing the
 // per-seed draw (see Options.Points). The zero Point never fires.
@@ -404,7 +411,7 @@ func (h *Harness) Machine(name string, start func(w *dst.World), opts ...Machine
 	}
 	disk := h.swarm.disk()
 	if m.neverCrash {
-		disk.IOCrashProb = 0
+		disk.IOCrashProb, disk.SyncErrProb, disk.WriteErrProb, disk.ReadErrProb = 0, 0, 0, 0
 	}
 	// Gray: whether this machine, and its disk, are slow (configuration,
 	// drawn per machine: kept at a fork).
@@ -417,6 +424,10 @@ func (h *Harness) Machine(name string, start func(w *dst.World), opts ...Machine
 		m.slow = r.Float64() < sw.SlowMachineShare
 	}
 	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: disk, Clock: h.drawClock(name)})
+	sm.Disk.OnError = func(kind string) {
+		h.Sometimes(map[string]string{"full": "a write found the disk full", "sync": "an fsync failed (EIO)",
+			"write": "a write failed (EIO)", "read": "a read failed (EIO)"}[kind])
+	}
 	sm.Disk.OnCrashLoss = func(_ int, torn bool) {
 		h.Sometimes("disk lost unsynced writes")
 		if torn {
@@ -700,6 +711,12 @@ type Swarm struct {
 	SlowDiskShare    float64       // share of machines whose disk is slow
 	SlowDiskFactor   float64       // a slow disk's fsync latency, as a multiple of the others' (at least 1ms)
 
+	// Disk errors (Faults.DiskErrors).
+	FullEvery    time.Duration // mean time between disks filling up (0: never); a full disk stays full until the faults stop
+	SyncErrProb  float64       // chance an fsync with data to write fails with EIO
+	WriteErrProb float64       // chance a write fails with EIO
+	ReadErrProb  float64       // chance a read fails with EIO
+
 	// Start is what clocks read at the start of the run: in half the seeds
 	// a random instant in 2030, in the other half just before a midnight,
 	// a month or a new year, so the boundary falls inside the run.
@@ -710,7 +727,8 @@ type Swarm struct {
 }
 
 func (s Swarm) disk() simfs.Options {
-	return simfs.Options{Ordered: s.DiskOrdered, TornWriteProb: s.TornWriteProb, IOCrashProb: s.IOCrashProb, SyncLatency: s.SyncLatency}
+	return simfs.Options{Ordered: s.DiskOrdered, TornWriteProb: s.TornWriteProb, IOCrashProb: s.IOCrashProb, SyncLatency: s.SyncLatency,
+		SyncErrProb: s.SyncErrProb, WriteErrProb: s.WriteErrProb, ReadErrProb: s.ReadErrProb}
 }
 
 func (s Swarm) net() simnet.Options {
@@ -727,7 +745,8 @@ func (s Swarm) String() string {
 			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
 		fmt.Sprintf(", loss every ~%v, kills %.2f", s.LossEvery, s.KillShare) +
 		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f)}",
-			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor)
+			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor) +
+		fmt.Sprintf(", disk errors{full every ~%v, fsync %.3f, write %.4f, read %.4f}", s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb)
 }
 
 func (s Swarm) sched() string {
@@ -852,6 +871,16 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 		s.KillShare = killShare
 	case f.Kill:
 		s.KillShare = 1
+	}
+	// Disk errors, last again: a disk fills every 1 to 6s on average (and
+	// stays full), fsyncs with data to write fail up to 5% of the time,
+	// writes and reads up to 0.5%.
+	fullEvery := sometimes(r, time.Duration(1000+r.IntN(5000))*time.Millisecond)
+	syncErr := sometimes(r, 0.05*r.Float64())
+	writeErr := sometimes(r, 0.005*r.Float64())
+	readErr := sometimes(r, 0.005*r.Float64())
+	if f.DiskErrors {
+		s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb = fullEvery, syncErr, writeErr, readErr
 	}
 	return s
 }
@@ -1077,7 +1106,20 @@ func (h *Harness) nemesis(w *dst.World) {
 	schedule := func(after time.Duration, fn func()) {
 		events = append(events, event{w.Now().Add(after), fn})
 	}
-	var crash, partition, pause, outage, loss func()
+	var crash, partition, pause, outage, loss, fill func()
+	rf := h.sim.S.Rand("nemesis/full")
+	filled := map[*Machine]bool{}
+	fill = func() {
+		cands := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.lost || m.neverCrash || filled[m] })
+		if len(cands) > 0 {
+			m := cands[rf.IntN(len(cands))]
+			h.Logf("nemesis: the disk of %s fills up", m.Name())
+			h.Sometimes("a disk filled up")
+			m.m.Disk.Fill()
+			filled[m] = true
+		}
+		schedule(expFrom(rf, sw.FullEvery), fill)
+	}
 	loss = func() {
 		cands := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.lost || m.neverCrash || !h.canLose(m) })
 		if len(cands) > 0 {
@@ -1188,6 +1230,9 @@ func (h *Harness) nemesis(w *dst.World) {
 			}
 			schedule(expFrom(rs, sw.SlowStallEvery), stall)
 		}
+	}
+	if sw.FullEvery > 0 && slices.ContainsFunc(h.machines, func(m *Machine) bool { return !m.neverCrash }) {
+		schedule(expFrom(rf, sw.FullEvery), fill)
 	}
 	if sw.LossEvery > 0 {
 		if h.canLose == nil {

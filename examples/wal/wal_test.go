@@ -42,19 +42,23 @@ func harness(bugs wal.Bugs) func(h *dsttest.Harness) {
 			boots++
 			// The directory must be durable too: create it and sync its
 			// parent. (The first version of this harness didn't, and the
-			// simulator caught the log vanishing with its directory.)
-			if err := w.FS().MkdirAll("data", 0o755); err != nil {
-				h.Failf("mkdir: %v", err)
-				return
-			}
-			if err := dst.SyncDir(w.FS(), "."); err != nil {
-				h.Failf("sync dir: %v", err)
-				return
-			}
-			l, err := wal.Open(w.FS(), "data/wal", bugs)
-			if err != nil {
-				h.Failf("open: %v", err)
-				return
+			// simulator caught the log vanishing with its directory.) A
+			// full disk or an I/O error fails these steps for a while: try
+			// again, as a service retries its startup.
+			var l *wal.Log
+			for {
+				err := w.FS().MkdirAll("data", 0o755)
+				if err == nil {
+					err = dst.SyncDir(w.FS(), ".")
+				}
+				if err == nil {
+					l, err = wal.Open(w.FS(), "data/wal", bugs)
+				}
+				if err == nil {
+					break
+				}
+				h.Sometimes("opening the log failed")
+				w.Sleep(50 * time.Millisecond)
 			}
 			if l.TornTail {
 				h.Sometimes("recovered a torn tail")
@@ -70,8 +74,11 @@ func harness(bugs wal.Bugs) func(h *dsttest.Harness) {
 				rec := fmt.Sprintf("boot%d-%d", boots, i)
 				written = append(written, rec)
 				if _, err := l.Append([]byte(rec)); err != nil {
-					h.Failf("append: %v", err)
-					return
+					// A failed Append's record never appears.
+					written = written[:len(written)-1]
+					h.Sometimes("an append failed")
+					w.Sleep(time.Duration(1+w.Rand().IntN(30)) * time.Millisecond)
+					continue
 				}
 				acked = append(acked, rec)
 				w.Sleep(time.Duration(1+w.Rand().IntN(30)) * time.Millisecond)
@@ -124,6 +131,37 @@ func TestPlantedBugs(t *testing.T) {
 			t.Logf("caught at seed %d: %v", rep.Failed[0].Seed, err)
 		})
 	}
+}
+
+// diskErrors adds full disks and I/O errors (a failed fsync's data lost
+// for good) to the crash faults.
+var diskErrors = func() dsttest.Options {
+	o := opts
+	o.Faults.DiskErrors = true
+	return o
+}()
+
+// Verifies: [acked-is-durable], [recovery-is-a-prefix] under disk errors,
+// and [failed-append-vanishes].
+// Fails if: the correct log loses or invents records when the disk fills
+// and fsyncs, writes and reads fail; or NoRepairAfterError, which appends
+// after a failed one, isn't caught.
+func TestWALDiskErrors(t *testing.T) {
+	dsttest.Run(t, diskErrors, func(h *dsttest.Harness) {
+		harness(wal.Bugs{})(h)
+		h.Expect("an append failed")
+	})
+	o := diskErrors
+	o.DeterminismChecks = -1
+	rep := dsttest.Sweep(o, harness(wal.Bugs{NoRepairAfterError: true}))
+	if len(rep.Failed) == 0 {
+		t.Fatalf("%d seeds never caught NoRepairAfterError", rep.Runs)
+	}
+	err := rep.Failed[0].Err.Error()
+	if !strings.Contains(err, "lost acknowledged records") && !strings.Contains(err, "aren't a prefix") {
+		t.Fatalf("NoRepairAfterError caught for the wrong reason: %v", err)
+	}
+	t.Logf("NoRepairAfterError caught on %d of %d seeds, first %d: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Seed, err)
 }
 
 // Verifies: [real-and-simulated]

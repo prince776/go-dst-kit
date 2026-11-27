@@ -327,6 +327,9 @@ func (c *Coordinator) transfer(from, to int, amount int64) (int64, string, error
 	tx := c.next
 	c.inflight[tx] = true
 	_, err := c.log.Append(fmt.Appendf(nil, "begin %d", tx))
+	if err != nil {
+		delete(c.inflight, tx) // never began: its status reads as aborted
+	}
 	c.mu.Unlock()
 	if err != nil {
 		return 0, "", err
@@ -349,16 +352,21 @@ func (c *Coordinator) transfer(from, to int, amount int64) (int64, string, error
 	}
 	if c.bugs.SendBeforeLog {
 		tell()
-		if err := c.logDecision(tx, d); err != nil {
-			return 0, "", err
-		}
+		c.mustLogDecision(tx, d)
 		return tx, d, nil
 	}
-	if err := c.logDecision(tx, d); err != nil {
-		return 0, "", err
-	}
+	c.mustLogDecision(tx, d)
 	c.w.Go(tell) // participants also ask; this is only quicker
 	return tx, d, nil
+}
+
+// mustLogDecision logs the decision, retrying while the disk fails (a full
+// disk or an I/O error lasts a while). Giving up would leave the
+// transaction in flight for good, and its participants in doubt.
+func (c *Coordinator) mustLogDecision(tx int64, d string) {
+	for c.logDecision(tx, d) != nil {
+		c.w.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (c *Coordinator) handle(req string) string {

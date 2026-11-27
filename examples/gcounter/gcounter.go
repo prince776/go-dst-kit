@@ -122,13 +122,11 @@ func (n *Node) increment() error {
 	n.counts[n.name]++
 	b, _ := json.Marshal(n.counts) // map keys are sorted: deterministic
 	n.mu.Unlock()
-	if err := n.persist(b); err != nil {
-		n.mu.Lock()
-		n.counts[n.name]--
-		n.mu.Unlock()
-		return err
-	}
-	return nil
+	// A failed persist (a full disk, an I/O error) keeps the count: gossip
+	// may already have spread it, and a G-counter's entries never go back
+	// (a decrement would let the next increment reuse a count peers hold,
+	// losing it). The increment wasn't acknowledged, so it may count.
+	return n.persist(b)
 }
 
 func (n *Node) merge(other map[string]uint64) {

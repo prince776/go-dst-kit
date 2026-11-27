@@ -40,7 +40,8 @@ can't reproduce it. Under simulation:
 - **Everything is explored**: goroutine order (uniform and PCT), network
   latency, partitions, resets, datagram loss and duplication, process
   crashes and pauses, power loss that drops unsynced writes or tears
-  them, process kills that keep the page cache, clock skew between
+  them, full disks and I/O errors (a failed fsync losing its data, as on
+  Linux), process kills that keep the page cache, clock skew between
   machines, and failures, timeouts and outages of the services you fake
   (`dst.Call`), and rare paths in your own code (`w.Buggify`). Each seed
   draws its own mix of faults (swarm testing).
@@ -176,8 +177,7 @@ both Worlds to keep them honest.
   the determinism check reports the seed; sort the keys.
 - **Exploration is random**, not exhaustive: rare interleavings need many
   seeds. Run a long sweep nightly (`-dst.seeds=20000`).
-- **Not modelled yet:** wall-clock jumps, disk-full and I/O errors,
-  bit rot.
+- **Not modelled yet:** wall-clock jumps, bit rot.
 - **Overhead in production** is small but not zero: a channel round trip
   costs about 295ns against 266ns raw and an uncontended mutex 14ns. The
   general `dst.Select` uses reflection (about 250ns against 54ns native);
