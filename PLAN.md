@@ -597,6 +597,18 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   line) is found 4 times in 600 runs against 1 by sweep and by markers;
   with both branches on one line, 0 (broken by hand). Next: measure on
   raft's benchmark, sweep vs markers vs all.
+  *First raft measurement (all signals, 100 runs per cell, 2026-11-27):
+  no gain.* Distinct failing roots, exploration vs sweep: vote-twice
+  5/13/13 vs 7/27/18 (partitions/everything/4 nodes); vote-ignores-log
+  9/4/7/2 vs 10/3/8/3; accept-stale-leader 8/4/1 vs 7/5/2;
+  skip-prev-log-term 2/2/3/3 vs 1/1/5/3; readindex-without-barrier
+  6/1/6/3 vs 9/1/6/5. More failing runs (forks of failing roots), about
+  the same or fewer roots; first failures mostly identical, since the
+  first generation is the sweep's first 32 seeds (skip-prev-log-term on
+  4 nodes: run #38 vs #60; accept-stale-leader on 4 nodes: #51 vs #38).
+  quorum-off-by-one under amnesia: 0/100 (the sweep: 1/300, first at
+  #118). Prince (2026-11-27): improve the DSTs' fault model first, then
+  return to guided exploration; this is the baseline.
 - **F. Shrinking.** Minimize fault events, then fork points, then phase
   lengths (shortlex); measured by trace length on B's failures.
 
