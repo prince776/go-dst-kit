@@ -67,6 +67,10 @@
 //   - [fault-classes-independent] Turning on pauses, outages, fault
 //     points or losses leaves the times of each seed's crashes and
 //     partitions as they were.
+//   - [gray-explores] With Gray faults, across seeds: slow links, lossy
+//     links losing segments, connections reset at a heal, slow machines
+//     stalling, and slow disks all occur; none of the stalls, losses or
+//     resets happen after the fault phase.
 //   - [losses-are-final] A lost machine never boots again, even when a
 //     restart was already scheduled; the runner loses only machines the
 //     test's OnLoss accepts at that moment, and reports each loss once.
@@ -132,6 +136,15 @@ type Faults struct {
 	Pause     bool // pause machines without crashing them (GC pauses, VM stalls)
 	Points    bool // fault points (dst.Inject) and Buggify points fire
 	Services  bool // service outages: every point of a service fails for a while
+	// Gray is gray failure: components that are slow or flaky rather than
+	// down. Some links are slow (added latency) or lossy (lost segments,
+	// retransmitted after a timeout: the stream stalls); a partition's heal
+	// may reset the connections that crossed it (a middlebox that forgot
+	// them); some machines are slow (their goroutines keep stalling for
+	// short spells, a starved CPU); some disks are slow (fsync many times
+	// slower). Slow links and disks are properties of a run, so they stay
+	// in the recovery phase; losses, resets and stalls stop there.
+	Gray bool
 	// Loss loses machines for good: one crashes and never restarts, with
 	// its disk (a dead server, replaced by a new one). The test says which
 	// machines may be lost and what happens then with Harness.OnLoss.
@@ -139,7 +152,10 @@ type Faults struct {
 }
 
 // AllFaults enables every fault class but Loss, which only a system that
-// replaces lost machines can take (see Harness.OnLoss).
+// replaces lost machines can take (see Harness.OnLoss), and Gray, which
+// changes what a correct system needs: its timeouts must outlast the
+// slowest path, and slow links and disks stay slow in the recovery phase.
+// A test opts in to each.
 var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true}
 
 // Point sets a fault point's behaviour for every seed, replacing the
@@ -365,6 +381,7 @@ type Machine struct {
 	h          *Harness
 	neverCrash bool
 	lost       bool
+	slow       bool // Gray: keeps stalling during the fault phase
 }
 
 // MachineOption configures a machine.
@@ -385,6 +402,16 @@ func (h *Harness) Machine(name string, start func(w *dst.World), opts ...Machine
 	disk := h.swarm.disk()
 	if m.neverCrash {
 		disk.IOCrashProb = 0
+	}
+	// Gray: whether this machine, and its disk, are slow (configuration,
+	// drawn per machine: kept at a fork).
+	if sw := h.swarm; sw.SlowDiskShare > 0 || sw.SlowMachineShare > 0 {
+		r := h.sim.S.ConfigRand("gray/" + name)
+		if r.Float64() < sw.SlowDiskShare {
+			disk.SyncLatency = time.Duration(float64(max(disk.SyncLatency, time.Millisecond)) * sw.SlowDiskFactor)
+			h.Sometimes("a machine has a slow disk")
+		}
+		m.slow = r.Float64() < sw.SlowMachineShare
 	}
 	sm := h.sim.AddMachine(name, simworld.MachineOptions{Disk: disk, Clock: h.drawClock(name)})
 	sm.Disk.OnCrashLoss = func(_ int, torn bool) {
@@ -582,6 +609,10 @@ func (h *Harness) Sometimes(name string) {
 	h.sim.S.Mark(name)
 }
 
+// Count is how many times the behaviour name (a Sometimes marker, a fault
+// or point the runner recorded) has happened so far in this run.
+func (h *Harness) Count(name string) int { return h.cover[name] }
+
 // Expect declares behaviours that must happen in at least one seed of the
 // sweep; otherwise the sweep fails (the test never exercised them).
 func (h *Harness) Expect(names ...string) { h.expect = append(h.expect, names...) }
@@ -639,6 +670,18 @@ type Swarm struct {
 
 	LossEvery time.Duration // mean time between permanent losses (0: none)
 
+	// Gray failure (Faults.Gray).
+	SlowLinkShare    float64       // share of links that are slow
+	SlowLinkMean     time.Duration // a slow link's added latency (per link, half to 1.5x this)
+	LossyLinkShare   float64       // share of links that are lossy
+	LinkLossProb     float64       // a lossy link's chance of losing a segment
+	HealResetProb    float64       // chance a connection crossing a partition is reset at heal
+	SlowMachineShare float64       // share of machines that are slow
+	SlowStall        time.Duration // a slow machine's mean stall
+	SlowStallEvery   time.Duration // and mean time between its stalls
+	SlowDiskShare    float64       // share of machines whose disk is slow
+	SlowDiskFactor   float64       // a slow disk's fsync latency, as a multiple of the others' (at least 1ms)
+
 	// Start is what clocks read at the start of the run: in half the seeds
 	// a random instant in 2030, in the other half just before a midnight,
 	// a month or a new year, so the boundary falls inside the run.
@@ -653,7 +696,9 @@ func (s Swarm) disk() simfs.Options {
 }
 
 func (s Swarm) net() simnet.Options {
-	return simnet.Options{MinLatency: s.MinLatency, MeanLatency: s.MeanLatency, ResetProb: s.ResetProb, UDPLossProb: s.UDPLossProb, UDPDupProb: s.UDPDupProb}
+	return simnet.Options{MinLatency: s.MinLatency, MeanLatency: s.MeanLatency, ResetProb: s.ResetProb, UDPLossProb: s.UDPLossProb, UDPDupProb: s.UDPDupProb,
+		Links:         simnet.LinkOptions{SlowShare: s.SlowLinkShare, SlowMean: s.SlowLinkMean, LossyShare: s.LossyLinkShare, LossProb: s.LinkLossProb},
+		HealResetProb: s.HealResetProb}
 }
 
 func (s Swarm) String() string {
@@ -662,7 +707,9 @@ func (s Swarm) String() string {
 		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
 		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
 			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
-		fmt.Sprintf(", loss every ~%v", s.LossEvery)
+		fmt.Sprintf(", loss every ~%v", s.LossEvery) +
+		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f)}",
+			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor)
 }
 
 func (s Swarm) sched() string {
@@ -757,6 +804,28 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	if f.Loss {
 		s.LossEvery = lossEvery
 	}
+	// Gray failure, last again. Shares up to half the links and 40% of
+	// machines; slow links add 5ms to 300ms (log-uniform); lossy links lose
+	// 1% to 20% of segments; slow machines stall 2ms to 50ms every 10ms to
+	// 100ms; slow disks fsync 10x to 100x slower.
+	g := Swarm{
+		SlowLinkShare:    sometimes(r, 0.5*r.Float64()),
+		SlowLinkMean:     time.Duration(5*math.Pow(60, r.Float64())) * time.Millisecond,
+		LossyLinkShare:   sometimes(r, 0.5*r.Float64()),
+		LinkLossProb:     0.01 + 0.19*r.Float64(),
+		HealResetProb:    sometimes(r, r.Float64()),
+		SlowMachineShare: sometimes(r, 0.4*r.Float64()),
+		SlowStall:        time.Duration(2+r.IntN(48)) * time.Millisecond,
+		SlowStallEvery:   time.Duration(10+r.IntN(90)) * time.Millisecond,
+		SlowDiskShare:    sometimes(r, 0.4*r.Float64()),
+		SlowDiskFactor:   10 + 90*r.Float64(),
+	}
+	if f.Gray {
+		s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb = g.SlowLinkShare, g.SlowLinkMean, g.LossyLinkShare, g.LinkLossProb
+		s.HealResetProb = g.HealResetProb
+		s.SlowMachineShare, s.SlowStall, s.SlowStallEvery = g.SlowMachineShare, g.SlowStall, g.SlowStallEvery
+		s.SlowDiskShare, s.SlowDiskFactor = g.SlowDiskShare, g.SlowDiskFactor
+	}
 	return s
 }
 
@@ -836,12 +905,14 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 		swarm.Start = opts.Start
 	}
 	h := &Harness{opts: opts, swarm: swarm, cover: map[string]int{}, seed: seed}
+	netOpts := swarm.net()
+	netOpts.Note = func(event string) { h.Sometimes(event) }
 	h.sim = simworld.New(simworld.Options{
 		Seed:           seed,
 		Logf:           logf,
 		MaxTime:        opts.FaultPhase + opts.RecoveryPhase + time.Hour,
 		MaxSteps:       opts.MaxSteps,
-		Net:            swarm.net(),
+		Net:            netOpts,
 		StrictIdentity: strict || opts.StrictIdentity,
 		PCTDepth:       swarm.PCTDepth,
 		PCTHorizon:     swarm.PCTHorizon,
@@ -871,8 +942,8 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 		h.nemesis(w)
 		h.points.SetActive(false) // and every outage with it
 		h.phase = Recovery
+		h.sim.Net.StopFaults() // first, so the last heal resets nothing
 		h.Heal()
-		h.sim.Net.StopFaults()
 		for _, m := range h.machines {
 			m.m.Disk.StopFaults() // no more power loss inside I/O
 			m.Resume()
@@ -1063,6 +1134,30 @@ func (h *Harness) nemesis(w *dst.World) {
 	}
 	if sw.OutageEvery > 0 { // after pauses, for the same reason
 		schedule(expFrom(ro, sw.OutageEvery), outage)
+	}
+	// Slow machines stall for short spells (a starved CPU), each on its own
+	// rhythm, from their own stream.
+	if sw.SlowMachineShare > 0 {
+		rs := h.sim.S.Rand("nemesis/slow")
+		for _, m := range h.machines {
+			if !m.slow {
+				continue
+			}
+			var stall func()
+			stall = func() {
+				if !m.Dead() && !m.Paused() {
+					h.Sometimes("a slow machine stalled")
+					m.m.Pause()
+					schedule(expFrom(rs, sw.SlowStall), func() {
+						if !m.lost {
+							m.m.Resume()
+						}
+					})
+				}
+				schedule(expFrom(rs, sw.SlowStallEvery), stall)
+			}
+			schedule(expFrom(rs, sw.SlowStallEvery), stall)
+		}
 	}
 	if sw.LossEvery > 0 {
 		if h.canLose == nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -600,8 +601,8 @@ func TestRealNeverInjects(t *testing.T) {
 }
 
 // Verifies: [fault-classes-independent]
-// Fails if: turning on pauses, service outages, fault points or losses
-// changes when a seed's
+// Fails if: turning on pauses, service outages, fault points, losses or
+// gray failure changes when a seed's
 // crashes and partitions happen; or (negative) a different seed's schedule
 // is the same.
 func TestFaultClassesIndependent(t *testing.T) {
@@ -629,7 +630,7 @@ func TestFaultClassesIndependent(t *testing.T) {
 	}
 	base := dsttest.Faults{Crash: true, Partition: true}
 	more := base
-	more.Pause, more.Services, more.Points, more.Loss = true, true, true, true
+	more.Pause, more.Services, more.Points, more.Loss, more.Gray = true, true, true, true, true
 	compared := 0
 	for seed := uint64(1); seed <= 10; seed++ {
 		a, b := schedule(seed, base), schedule(seed, more)
@@ -1087,5 +1088,102 @@ func TestRestartFromWorkload(t *testing.T) {
 	})
 	if !rep.OK() {
 		t.Fatalf("%v", rep.Failed[0].Err)
+	}
+}
+
+// Verifies: [gray-explores]
+// Fails if: across seeds some gray failure never occurs (a slow link, a
+// lost segment, a reset at heal, a slow machine's stall, a slow disk), or a
+// stall, loss or reset happens after the fault phase.
+func TestGrayExplores(t *testing.T) {
+	var mu sync.Mutex
+	late, pausedSeen := 0, 0
+	rep := dsttest.Sweep(dsttest.Options{Seeds: 60, Faults: dsttest.Faults{Gray: true, Partition: true}, FaultPhase: 5 * time.Second, RecoveryPhase: 2 * time.Second}, func(h *dsttest.Harness) {
+		names := []string{"a", "b", "c", "d"}
+		for _, n := range names {
+			h.Machine(n, func(w *dst.World) {
+				ln, err := w.Net().Listen("tcp", n+":1")
+				if err != nil {
+					h.Fail(err)
+					return
+				}
+				w.Go(func() {
+					for {
+						c, err := ln.Accept()
+						if err != nil {
+							return
+						}
+						w.Go(func() { io.Copy(c, c) })
+					}
+				})
+				f, _ := w.FS().OpenFile("f", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+				for {
+					// Echo through each peer, keeping one connection while it works.
+					for _, peer := range names {
+						if peer == n {
+							continue
+						}
+						if c, err := w.Net().Dial("tcp", peer+":1"); err == nil {
+							c.SetDeadline(w.Now().Add(time.Second))
+							c.Write([]byte("ping"))
+							io.ReadFull(c, make([]byte, 4))
+							c.Close()
+						}
+					}
+					f.Write([]byte("x"))
+					f.Sync()
+					w.Sleep(5 * time.Millisecond)
+				}
+			})
+		}
+		// After the fault phase no gray event may happen: count the markers
+		// at the start of recovery and at the end.
+		// A stall really pauses its machine (Pause faults are off here).
+		h.Always("observe stalls", func() error {
+			for _, m := range h.Machines() {
+				if m.Paused() {
+					mu.Lock()
+					pausedSeen++
+					mu.Unlock()
+					break
+				}
+			}
+			return nil
+		})
+		events := []string{"link lost a segment", "connection reset at heal", "a slow machine stalled"}
+		atRecovery := map[string]int{}
+		h.Go(func(w *dst.World) {
+			for h.Phase() != dsttest.Faulty {
+				w.Sleep(time.Millisecond)
+			}
+			for h.Phase() == dsttest.Faulty {
+				w.Sleep(time.Millisecond)
+			}
+			for _, e := range events {
+				atRecovery[e] = h.Count(e)
+			}
+		})
+		h.Final("no gray event after the fault phase", func(*dst.World) error {
+			for _, e := range events {
+				if h.Count(e) != atRecovery[e] {
+					mu.Lock()
+					late++
+					mu.Unlock()
+					return fmt.Errorf("%q happened %d times after the fault phase", e, h.Count(e)-atRecovery[e])
+				}
+			}
+			return nil
+		})
+	})
+	if !rep.OK() {
+		t.Fatalf("%v", rep.Failed[0].Err)
+	}
+	if pausedSeen == 0 {
+		t.Errorf("slow machines stalled, but no machine was ever seen paused")
+	}
+	for _, e := range []string{"a link is slow", "link lost a segment", "connection reset at heal", "a slow machine stalled", "a machine has a slow disk"} {
+		if rep.Coverage[e] == 0 {
+			t.Errorf("%q never happened in %d seeds", e, rep.Runs)
+		}
 	}
 }

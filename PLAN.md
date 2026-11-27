@@ -614,6 +614,16 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
+- **Gray failure finds the examples' fixed timeouts** (2026-11-27, raft
+  phase 1 item 2): with Faults.Gray, three examples' correct systems lose
+  liveness. dedupe gives each delivery attempt 300ms, shorter than a slow
+  path (a slow link plus a slow disk), so every attempt times out and the
+  message is never delivered (reported stuck); gcounter's final check reads
+  with a fixed timeout; twophase needs longer to resolve in-doubt
+  transfers. That's the classic gray-failure bug, which is why Gray isn't in
+  AllFaults. Open: make the examples' timeouts adaptive and add a gray
+  sweep to each, or leave them as they are.
+
 - ~~Machine.Restart from a workload goroutine~~ **done** (found on
   raft): a machine's boot now has no parent task, so a restarted
   machine isn't the caller's work ([boots-are-no-ones-work]).

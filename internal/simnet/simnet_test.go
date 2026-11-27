@@ -3,6 +3,7 @@ package simnet_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -224,4 +225,170 @@ func TestCloseWithUnreadInputResets(t *testing.T) {
 		t.Fatal("closing with unread input never reset the connection")
 	}
 	t.Logf("response delivered %d times, destroyed by the reset %d times", delivered, lost)
+}
+
+// sendAll sends n chunks main→srv and returns what srv received, whether
+// both ends were clean, and the time the transfer took.
+func sendAll(t *testing.T, opts simworld.Options, n int) (sent, got []byte, ok bool, took time.Duration) {
+	t.Helper()
+	sim := simworld.New(opts)
+	var gotErr, sendErr error
+	res := sim.Run(func(w *dst.World) {
+		start := w.Now()
+		c := pair(sim, w, &got, &gotErr)
+		for i := range n {
+			chunk := bytes.Repeat([]byte{byte(i)}, 1+w.Rand().IntN(9))
+			if _, err := c.Write(chunk); err != nil {
+				sendErr = err
+				break
+			}
+			sent = append(sent, chunk...)
+		}
+		c.Close()
+		for got == nil && gotErr == nil {
+			w.Sleep(time.Millisecond)
+		}
+		took = w.Since(start)
+	})
+	if res.Err != nil {
+		t.Fatalf("seed %d: %v", opts.Seed, res.Err)
+	}
+	return sent, got, sendErr == nil && gotErr == nil, took
+}
+
+// Verifies: [loss-delays]
+// Fails if: a lossy link loses, duplicates or reorders bytes, or (negative)
+// doesn't delay the stream, or loses nothing at all.
+func TestLossDelays(t *testing.T) {
+	losses := 0
+	var slower int
+	for seed := uint64(1); seed <= 100; seed++ {
+		base := simworld.Options{Seed: seed, Net: simnet.Options{MinLatency: time.Millisecond, MeanLatency: time.Millisecond}}
+		lossy := base
+		lossy.Net.Links = simnet.LinkOptions{LossyShare: 1, LossProb: 0.2}
+		lossy.Net.Note = func(e string) {
+			if e == "link lost a segment" {
+				losses++
+			}
+		}
+		sent, got, ok, took := sendAll(t, lossy, 100)
+		if !ok || !bytes.Equal(got, sent) {
+			t.Fatalf("seed %d: received %d bytes of %d (or out of order), clean %v", seed, len(got), len(sent), ok)
+		}
+		if _, _, _, plain := sendAll(t, base, 100); took > plain {
+			slower++
+		}
+	}
+	if losses == 0 || slower < 90 {
+		t.Fatalf("%d segments lost; lossy transfers slower in %d of 100 seeds", losses, slower)
+	}
+}
+
+// Verifies: [links-per-seed]
+// Fails if: a link's behaviour depends on the traffic sent before it is
+// first used, every link is alike when only some should be slow, or
+// (negative) all seeds draw the same links; or Links unset changes a run.
+func TestLinksPerSeed(t *testing.T) {
+	opts := func(seed uint64) simworld.Options {
+		return simworld.Options{Seed: seed, Net: simnet.Options{Links: simnet.LinkOptions{SlowShare: 0.5, SlowMean: 50 * time.Millisecond, LossyShare: 0.5, LossProb: 0.1}}}
+	}
+	draw := func(seed uint64, warm bool) []time.Duration {
+		sim := simworld.New(opts(seed))
+		var out []time.Duration
+		sim.Run(func(w *dst.World) {
+			if warm { // traffic on another link first
+				var got []byte
+				var err error
+				c := pair(sim, w, &got, &err)
+				c.Write([]byte("warm"))
+				c.Close()
+				w.Sleep(time.Second)
+			}
+			for _, l := range [][2]string{{"a", "b"}, {"b", "a"}, {"a", "c"}, {"c", "a"}, {"b", "c"}, {"c", "b"}} {
+				extra, loss := sim.Net.Link(l[0], l[1])
+				out = append(out, extra, time.Duration(loss*1e6))
+			}
+		})
+		return out
+	}
+	seen := map[string]bool{}
+	mixed := false
+	for seed := uint64(1); seed <= 20; seed++ {
+		a, b := draw(seed, false), draw(seed, true)
+		if fmt.Sprint(a) != fmt.Sprint(b) {
+			t.Fatalf("seed %d: links depend on earlier traffic: %v vs %v", seed, a, b)
+		}
+		seen[fmt.Sprint(a)] = true
+		slow := 0
+		for i := 0; i < len(a); i += 2 {
+			if a[i] > 0 {
+				slow++
+			}
+		}
+		mixed = mixed || (slow > 0 && slow < len(a)/2)
+	}
+	if len(seen) < 10 || !mixed {
+		t.Fatalf("%d distinct link draws in 20 seeds, mixed slow and fast links in a seed: %v", len(seen), mixed)
+	}
+	// Links unset: the run is what it was.
+	for seed := uint64(1); seed <= 20; seed++ {
+		plain := simworld.Options{Seed: seed, Net: simnet.Options{MinLatency: time.Millisecond, MeanLatency: time.Millisecond}}
+		zeroLinks := plain
+		zeroLinks.Net.Links = simnet.LinkOptions{SlowMean: time.Second} // shares 0: off
+		_, _, _, a := sendAll(t, plain, 50)
+		_, _, _, b := sendAll(t, zeroLinks, 50)
+		if a != b {
+			t.Fatalf("seed %d: Links with zero shares changed the run (%v vs %v)", seed, a, b)
+		}
+	}
+}
+
+// Verifies: [heal-may-reset]
+// Fails if: with HealResetProb 1 a connection that crossed a partition
+// survives the heal, or one that didn't cross is reset; or with 0 one is
+// reset.
+func TestHealMayReset(t *testing.T) {
+	run := func(prob float64) (crossErr, sameSideErr error) {
+		sim := simworld.New(simworld.Options{Seed: 1, Net: simnet.Options{HealResetProb: prob}})
+		sim.Run(func(w *dst.World) {
+			srv := sim.Machine("srv")
+			ln, _ := srv.World.Net().Listen("tcp", "srv:7")
+			srv.World.Go(func() {
+				for {
+					c, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					srv.World.Go(func() { io.Copy(c, c) })
+				}
+			})
+			peer := sim.Machine("peer") // on main's side of the cut
+			pln, _ := peer.World.Net().Listen("tcp", "peer:7")
+			peer.World.Go(func() {
+				c, _ := pln.Accept()
+				io.Copy(c, c)
+			})
+			cross, _ := w.Net().Dial("tcp", "srv:7")
+			same, _ := w.Net().Dial("tcp", "peer:7")
+			sim.Net.Partition([]string{"main", "peer"}, []string{"srv"})
+			w.Sleep(50 * time.Millisecond)
+			sim.Net.Heal()
+			buf := make([]byte, 2)
+			_, crossErr = cross.Write([]byte("hi"))
+			if crossErr == nil {
+				_, crossErr = io.ReadFull(cross, buf)
+			}
+			_, sameSideErr = same.Write([]byte("hi"))
+			if sameSideErr == nil {
+				_, sameSideErr = io.ReadFull(same, buf)
+			}
+		})
+		return
+	}
+	if c, s := run(1); !errors.Is(c, syscall.ECONNRESET) || s != nil {
+		t.Fatalf("HealResetProb 1: crossing connection %v (want a reset), same side %v (want none)", c, s)
+	}
+	if c, s := run(0); c != nil || s != nil {
+		t.Fatalf("HealResetProb 0: crossing %v, same side %v (want both fine)", c, s)
+	}
 }

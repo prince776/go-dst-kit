@@ -19,6 +19,15 @@
 //   - Dialing an address with no listener is refused; dialing across a
 //     partition waits for Heal or the deadline.
 //   - ResetProb resets connections at random, as middleboxes and kernels do.
+//   - Links (Options.Links) are each direction between two hosts, with
+//     their own behaviour drawn once per seed: a slow link adds latency to
+//     every write; a lossy link loses segments, which TCP retransmits, so a
+//     loss delays the stream by a retransmission timeout (200ms, doubling
+//     while losses repeat, at most 3.2s) and nothing is lost or reordered.
+//   - HealResetProb: at Heal, a connection that crossed the partition is
+//     reset with this chance (a NAT, firewall or load balancer that forgot
+//     the connection answers its next packet with a reset), else it
+//     carries on with what was held.
 //
 // Addresses are "machine:port"; "localhost" is the dialing machine.
 //
@@ -27,6 +36,14 @@
 //     package's (the net contract suite passes against both).
 //   - [stream-is-exact] Bytes arrive in order, exactly once, unless the
 //     connection is reset.
+//   - [links-per-seed] A link's slowness and loss are drawn once per link
+//     and seed, whatever the traffic; with Links unset, the network draws
+//     nothing more than before.
+//   - [loss-delays] On a lossy link bytes still arrive in order, exactly
+//     once; losses only delay them.
+//   - [heal-may-reset] With HealResetProb, connections that crossed a
+//     partition may be reset at Heal (both ends fail); connections that
+//     didn't cross never are; with 0, none is.
 //   - [partition-stalls] Nothing crosses a partition; after Heal,
 //     everything held arrives in order.
 //   - [crash-is-silent] A crashed machine's peers see no EOF; after it
@@ -71,6 +88,71 @@ type Options struct {
 	// UDPLossProb and UDPDupProb are the chances that a datagram is lost,
 	// or delivered twice.
 	UDPLossProb, UDPDupProb float64
+	// Links gives links their own behaviour (zero: every link alike).
+	Links LinkOptions
+	// HealResetProb is the chance that a connection crossing a partition
+	// is reset when it heals.
+	HealResetProb float64
+	// Note, if set, is told of each event a test may want to see happen:
+	// "a link is slow", "link lost a segment", "connection reset at heal".
+	Note func(event string)
+}
+
+// LinkOptions draw each link's behaviour, once per link and seed: with
+// chance SlowShare a link is slow, adding a latency around SlowMean (half
+// to one and a half times it) to every write; with chance LossyShare it is
+// lossy, losing each segment with chance LossProb.
+type LinkOptions struct {
+	SlowShare  float64
+	SlowMean   time.Duration
+	LossyShare float64
+	LossProb   float64
+}
+
+func (o LinkOptions) on() bool { return o.SlowShare > 0 || o.LossyShare > 0 }
+
+// link is one direction between two hosts.
+type link struct {
+	extra time.Duration // a slow link's added latency (0: not slow)
+	loss  float64       // a lossy link's chance of losing a segment
+}
+
+// link returns the link from one host to another, drawn on first use from
+// a configuration stream named after it (so the draw doesn't depend on
+// traffic order, and stays put when a run is forked).
+func (n *Network) link(from, to string) *link {
+	k := [2]string{from, to}
+	if l, ok := n.links[k]; ok {
+		return l
+	}
+	r := n.s.ConfigRand("net/link/" + from + ">" + to)
+	l := &link{}
+	lo := n.opts.Links
+	if r.Float64() < lo.SlowShare {
+		l.extra = time.Duration(float64(lo.SlowMean) * (0.5 + r.Float64()))
+		n.note("a link is slow")
+	}
+	if r.Float64() < lo.LossyShare {
+		l.loss = lo.LossProb
+	}
+	n.links[k] = l
+	return l
+}
+
+// Link reports the behaviour of the link from one host to another: its
+// added latency and its chance of losing a segment.
+func (n *Network) Link(from, to string) (extra time.Duration, loss float64) {
+	if !n.opts.Links.on() {
+		return 0, 0
+	}
+	l := n.link(from, to)
+	return l.extra, l.loss
+}
+
+func (n *Network) note(event string) {
+	if n.opts.Note != nil {
+		n.opts.Note(event)
+	}
 }
 
 // Network connects machines.
@@ -83,12 +165,14 @@ type Network struct {
 	blocked map[[2]string]bool
 	pipes   []*pipe
 	dials   []*dial
+	links   map[[2]string]*link
+	calm    bool // StopFaults: links no longer lose segments
 }
 
 // New returns a network with no machines.
 func New(s *sched.Scheduler, epoch time.Time, opts Options) *Network {
 	return &Network{s: s, rng: s.Rand("network"), opts: opts, epoch: epoch,
-		hosts: map[string]*Host{}, blocked: map[[2]string]bool{}}
+		hosts: map[string]*Host{}, blocked: map[[2]string]bool{}, links: map[[2]string]*link{}}
 }
 
 // Host is one machine's attachment to the network; it implements dst.Net.
@@ -139,8 +223,28 @@ func (n *Network) Partition(a, b []string) {
 	}
 }
 
-// Heal removes every block; held traffic flows again, in order.
+// Heal removes every block; held traffic flows again, in order, except on
+// connections HealResetProb resets.
 func (n *Network) Heal() {
+	if n.opts.HealResetProb > 0 {
+		for _, p := range n.pipes {
+			a, b := p.from, p.to
+			if a.h.name >= b.h.name {
+				continue // each connection once, from its lower-named host's pipe (same-host ones never cross)
+			}
+			if a.err != nil || b.err != nil || (a.closed && b.closed) {
+				continue // already broken, or done
+			}
+			if !n.blocked[[2]string{a.h.name, b.h.name}] && !n.blocked[[2]string{b.h.name, a.h.name}] {
+				continue
+			}
+			if n.rng.Float64() < n.opts.HealResetProb {
+				a.abort()
+				b.abort()
+				n.note("connection reset at heal")
+			}
+		}
+	}
 	n.blocked = map[[2]string]bool{}
 	n.s.Logf("network: heal")
 	for _, p := range n.pipes {
@@ -394,6 +498,7 @@ type pipe struct {
 	segs     []segment
 	lastDue  time.Duration
 	armed    bool
+	rto      time.Duration // the retransmission timeout while losses repeat (lossy links)
 }
 
 type endpoint struct {
@@ -423,7 +528,23 @@ func newConn(n *Network, ha *Host, aa addr, hb *Host, ab addr) (*endpoint, *endp
 
 func (p *pipe) push(seg segment) {
 	n := p.n
-	seg.due = max(n.s.Now()+n.latency(), p.lastDue)
+	d := n.latency()
+	if n.opts.Links.on() {
+		l := n.link(p.from.h.name, p.to.h.name)
+		if l.extra > 0 {
+			d += l.extra
+		}
+		if l.loss > 0 && !n.calm && n.rng.Float64() < l.loss {
+			// Lost, and retransmitted after a timeout that doubles while
+			// losses repeat: the stream waits, in order.
+			p.rto = min(max(200*time.Millisecond, 2*p.rto), 3200*time.Millisecond)
+			d += p.rto
+			n.note("link lost a segment")
+		} else {
+			p.rto = 0
+		}
+	}
+	seg.due = max(n.s.Now()+d, p.lastDue)
 	p.lastDue = seg.due
 	p.segs = append(p.segs, seg)
 	p.pump()
@@ -608,4 +729,7 @@ func ErrTimeout(err error) bool { return errors.Is(err, os.ErrDeadlineExceeded) 
 
 // StopFaults turns off random connection resets (the runner's recovery
 // phase).
-func (n *Network) StopFaults() { n.opts.ResetProb, n.opts.UDPLossProb, n.opts.UDPDupProb = 0, 0, 0 }
+func (n *Network) StopFaults() {
+	n.opts.ResetProb, n.opts.UDPLossProb, n.opts.UDPDupProb, n.opts.HealResetProb = 0, 0, 0, 0
+	n.calm = true // lossy links stop losing; slow links stay slow (a property, not a fault)
+}
