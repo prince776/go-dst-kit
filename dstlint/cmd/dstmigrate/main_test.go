@@ -12,7 +12,8 @@ import (
 
 // The sample (every construct the tool rewrites) migrates to code that
 // compiles and vets, with no raw channel operation, select, go statement
-// or time.Now left, and a nil channel argument becomes the zero dst.Chan
+// or time.Now left, a nil channel in a literal compiles, and a nil channel
+// argument becomes the zero dst.Chan
 // without moving the comment after it; math/rand/v2's N and
 // crypto/rand.Reader become the World's, and a rand function with no
 // World equivalent is reported. Fails if any survives, the result doesn't

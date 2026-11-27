@@ -7,7 +7,8 @@
 //   - sends to c.Send(v), receives to c.Recv() (or dstRecv(c) where only
 //     the value is used), range over a channel to range c.All(), close,
 //     len and cap of channels to their methods, and a channel compared
-//     with, set to or passed as nil to the zero dst.Chan;
+//     with, set to, passed as or put in a literal as nil to the zero
+//     dst.Chan;
 //   - select statements to dst.Select, keeping their control flow: each
 //     case's callback records that it fired (and what it received), and a
 //     switch after the select runs the original case bodies, so break,
@@ -389,6 +390,8 @@ func (m *migrator) decl(d ast.Node) {
 		case *ast.CallExpr:
 			m.nilChanArgs(n)
 			m.callExpr(c, n)
+		case *ast.CompositeLit:
+			m.nilChanElems(n)
 		case *ast.BinaryExpr:
 			if (n.Op == token.EQL || n.Op == token.NEQ) && (isNil(n.Y) && m.isChan(n.X) || isNil(n.X) && m.isChan(n.Y)) {
 				ch := n.X
@@ -494,6 +497,58 @@ func (m *migrator) nilChanArgs(n *ast.CallExpr) {
 			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
 			setPos(z, a.Pos()) // where nil was, so comments stay put
 			n.Args[i] = z
+			m.changes++
+		}
+	}
+}
+
+// nilChanElems rewrites nil where a composite literal's field or element
+// is a channel (T{ch: nil}, T{nil}, []chan T{nil}) to the zero dst.Chan.
+func (m *migrator) nilChanElems(n *ast.CompositeLit) {
+	t := m.info.TypeOf(n)
+	if t == nil {
+		return
+	}
+	at := func(i int, key ast.Expr) types.Type {
+		switch u := t.Underlying().(type) {
+		case *types.Struct:
+			if id, ok := key.(*ast.Ident); ok {
+				for f := range u.Fields() {
+					if f.Name() == id.Name {
+						return f.Type()
+					}
+				}
+				return nil
+			}
+			if key == nil && i < u.NumFields() {
+				return u.Field(i).Type()
+			}
+		case *types.Slice:
+			return u.Elem()
+		case *types.Array:
+			return u.Elem()
+		case *types.Map:
+			return u.Elem()
+		}
+		return nil
+	}
+	for i, e := range n.Elts {
+		var key ast.Expr
+		val := &n.Elts[i]
+		if kv, ok := e.(*ast.KeyValueExpr); ok {
+			key, val = kv.Key, &kv.Value
+		}
+		if !isNil(*val) {
+			continue
+		}
+		ft := at(i, key)
+		if ft == nil {
+			continue
+		}
+		if ch, ok := ft.Underlying().(*types.Chan); ok {
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			setPos(z, (*val).Pos())
+			*val = z
 			m.changes++
 		}
 	}

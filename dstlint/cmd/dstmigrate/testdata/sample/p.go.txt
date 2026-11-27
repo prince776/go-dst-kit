@@ -118,6 +118,19 @@ func (p *Pool) nonce(b []byte) { io.ReadFull(crand.Reader, b) }
 
 func (p *Pool) gauss() float64 { return mrand.NormFloat64() }
 
+// waiter has channel fields set to nil in literals, keyed and positional,
+// and a slice of channels with a nil element.
+type waiter struct {
+	ready chan struct{}
+	n     int
+}
+
+var (
+	idle    = waiter{nil, 0}
+	idle2   = &waiter{ready: nil}
+	waiters = []chan struct{}{nil}
+)
+
 // park passes nil for channel parameters, plain and variadic: each becomes
 // the zero dst.Chan.
 func (p *Pool) park() {
