@@ -193,8 +193,35 @@ func recvType(e ast.Expr) string {
 // decl rewrites statements first (they need the original types: select,
 // send, receive), then types and calls.
 func (m *migrator) decl(d ast.Node) {
-	astutil.Apply(d, nil, func(c *astutil.Cursor) bool {
+	var sigs []*types.Signature // enclosing functions, innermost last
+	astutil.Apply(d, func(c *astutil.Cursor) bool {
 		switch n := c.Node().(type) {
+		case *ast.FuncDecl:
+			sig, _ := m.info.Defs[n.Name].Type().(*types.Signature)
+			sigs = append(sigs, sig)
+		case *ast.FuncLit:
+			sig, _ := m.info.TypeOf(n).(*types.Signature)
+			sigs = append(sigs, sig)
+		}
+		return true
+	}, func(c *astutil.Cursor) bool {
+		switch n := c.Node().(type) {
+		case *ast.FuncDecl, *ast.FuncLit:
+			sigs = sigs[:len(sigs)-1]
+		case *ast.ReturnStmt:
+			// return nil where a result is a channel: the zero dst.Chan.
+			if len(sigs) > 0 && sigs[len(sigs)-1] != nil {
+				res := sigs[len(sigs)-1].Results()
+				for i, r := range n.Results {
+					if i < res.Len() && isNil(r) {
+						if ch, ok := res.At(i).Type().Underlying().(*types.Chan); ok {
+							n.Results[i] = &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}}
+							setPos(n, n.Pos())
+							m.changes++
+						}
+					}
+				}
+			}
 		case *ast.SelectStmt:
 			m.plans = append(m.plans, m.planSelect(n))
 			m.changes++
@@ -204,6 +231,16 @@ func (m *migrator) decl(d ast.Node) {
 				m.changes++
 			}
 		case *ast.AssignStmt:
+			// ch = nil: the zero dst.Chan.
+			if len(n.Lhs) == len(n.Rhs) {
+				for i, r := range n.Rhs {
+					if isNil(r) && m.isChan(n.Lhs[i]) {
+						n.Rhs[i] = m.zeroChan(n.Lhs[i])
+						setPos(n, n.Pos())
+						m.changes++
+					}
+				}
+			}
 			if len(n.Rhs) == 1 {
 				if u, ok := n.Rhs[0].(*ast.UnaryExpr); ok && u.Op == token.ARROW {
 					if inComm(c) {
