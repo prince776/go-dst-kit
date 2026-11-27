@@ -164,6 +164,12 @@ connected socket that sends to and receives from one peer):
   to 30% of links **block UDP** while TCP on them still flows (a firewall
   or security group). Losses and blocks stop in the recovery phase; slow
   links stay slow.
+- About a third of the Gray seeds are **mild** (`Swarm.MildGray`): of the
+  gray kinds that would be on (slow links, lossy links, resets at heal,
+  slow machines, slow disks, UDP blocks), only one or two stay on. That
+  makes seeds with survivable gray failure common, for checks that hold
+  only inside an envelope of it. The choice comes from a stream of its
+  own, so every other field of every seed is what it was before.
 - A partition, a crashed host, or a port nobody listens on **drops**
   datagrams: UDP never holds them. A paused host's socket keeps up to 256
   for when it resumes, and drops the rest.

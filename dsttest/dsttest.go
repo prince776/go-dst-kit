@@ -76,6 +76,11 @@
 //     to their resumes (or the crash that ended them), and the blocks to
 //     their heal, at the true times they happened; no machine runs inside
 //     one of its Down or Pause intervals.
+//   - [gray-mild] In about a third of the Gray seeds (Swarm.MildGray),
+//     only one or two of the gray kinds that would be on (slow links,
+//     lossy links, resets at heal, slow machines, slow disks, UDP
+//     blackholes) stay on, and the rest are off; every other field, and
+//     every field of the other seeds, is what the seed draws without it.
 //   - [gray-udp] With Gray faults, across seeds, lossy links lose datagrams
 //     and some links drop all UDP while TCP flows; neither happens after
 //     the fault phase, nor without Gray.
@@ -806,6 +811,7 @@ type Swarm struct {
 	SlowDiskShare    float64       // share of machines whose disk is slow
 	SlowDiskFactor   float64       // a slow disk's fsync latency, as a multiple of the others' (at least 1ms)
 	UDPBlockShare    float64       // share of links that drop every datagram while TCP flows (a firewall)
+	MildGray         bool          // only one or two of the gray kinds above were kept on ([gray-mild])
 
 	// Disk errors (Faults.DiskErrors).
 	FullEvery    time.Duration // mean time between disks filling up (0: never); a full disk stays full until the faults stop
@@ -840,8 +846,8 @@ func (s Swarm) String() string {
 		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
 			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
 		fmt.Sprintf(", loss every ~%v, kills %.2f", s.LossEvery, s.KillShare) +
-		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f), udp blocked %.2f}",
-			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor, s.UDPBlockShare) +
+		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f), udp blocked %.2f, mild %v}",
+			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor, s.UDPBlockShare, s.MildGray) +
 		fmt.Sprintf(", disk errors{full every ~%v, fsync %.3f, write %.4f, read %.4f}", s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb)
 }
 
@@ -986,6 +992,41 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	}
 	if f.Gray {
 		s.UDPBlockShare = udpBlock
+	}
+	if !noMildGray {
+		s = mildGray(s, seed, f)
+	}
+	return s
+}
+
+// noMildGray skips mildGray's draws (tests of [gray-mild] compare with it).
+var noMildGray bool
+
+// mildGray makes about a third of the Gray seeds mild: of the gray kinds
+// that are on (a share above zero), only one or two, picked at random,
+// stay on, so survivable gray failure is common (a test's checks that
+// hold only inside an envelope of gray failure need such seeds). It draws
+// from a stream of its own, whatever Faults says, so every other field is
+// what the seed draws without it.
+func mildGray(s Swarm, seed uint64, f Faults) Swarm {
+	r := rand.New(rand.NewPCG(seed, 0x6d696c64)) // "mild"
+	mild := r.IntN(3) == 0
+	keep := 1 + r.IntN(2)
+	kinds := []*float64{&s.SlowLinkShare, &s.LossyLinkShare, &s.HealResetProb, &s.SlowMachineShare, &s.SlowDiskShare, &s.UDPBlockShare}
+	order := r.Perm(len(kinds))
+	if !f.Gray || !mild {
+		return s
+	}
+	s.MildGray = true
+	for _, i := range order {
+		if *kinds[i] == 0 {
+			continue
+		}
+		if keep > 0 {
+			keep--
+			continue
+		}
+		*kinds[i] = 0
 	}
 	return s
 }
