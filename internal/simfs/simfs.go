@@ -19,6 +19,9 @@
 //   - The first lost write of a file may survive in part (torn).
 //   - Power can fail inside a Write, Sync or directory operation.
 //   - Open files go stale after a crash.
+//   - A kill (the process dies, the host stays up) keeps the page cache:
+//     every completed write and directory change is still there after
+//     restart, and still unsynced.
 //
 // Verified:
 //   - [behaves-like-os] Without crashes, every operation matches the os
@@ -28,6 +31,9 @@
 //   - [crash-explores] Every state the rules allow happens for some seed.
 //   - [sync-is-durable] Data covered by a completed Sync, and names covered
 //     by a completed directory Sync, survive every crash.
+//   - [kill-keeps-cache] After a kill, every completed write and directory
+//     change is visible, and none became durable: a later power loss may
+//     still lose any of it.
 //
 // Depends on: internal/sched
 package simfs
@@ -519,9 +525,16 @@ func (f *FS) makeDurable(o *op) {
 }
 
 // crash empties the page cache: a seeded, legal subset of the pending
-// operations survives, and every open handle goes stale.
+// operations survives, and every open handle goes stale. After a kill
+// (the process died, the host didn't) the page cache survives: handles go
+// stale, and everything written stays visible and stays pending, so a
+// later power loss may still lose it.
 func (f *FS) crash() {
 	f.gen++
+	if f.m.Killed() {
+		f.s.Logf("disk of %s kept its page cache (a kill): %d unsynced operations still pending", f.m.Name, len(f.pending))
+		return
+	}
 	lost, torn := 0, false
 	survive := func(o *op) { f.makeDurable(o) }
 	tear := func(o *op) {

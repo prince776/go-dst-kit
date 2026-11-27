@@ -494,3 +494,130 @@ func TestModesDiffer(t *testing.T) {
 		t.Fatalf("ordered %d states, harsh %d: want fewer", len(o), len(h))
 	}
 }
+
+// playKill plays ops, then kills the disk's machine (or, with power,
+// crashes it), reads the disk, restarts the machine and crashes it again
+// (a power loss): what the disk held live before, after the kill, and
+// after the later power loss; and the states a power loss after ops may
+// leave. A handle opened before the kill must be stale after it.
+func playKill(t *testing.T, ops []fop, seed uint64, ordered, power bool) (live, afterKill, afterPower string, legal map[string]bool) {
+	t.Helper()
+	m := newModel(ordered)
+	var failure error
+	sim := simworld.New(simworld.Options{Seed: seed})
+	disk := sim.AddMachine("disk", simworld.MachineOptions{Disk: simfs.Options{Ordered: ordered, TornWriteProb: 0.5}})
+	read := func(fsys dst.FS, check func(error)) string {
+		ns := map[string]*obj{}
+		cont := map[*obj]string{}
+		for _, n := range files {
+			b, err := dst.ReadFile(fsys, n)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			check(err)
+			o := &obj{}
+			ns[n], cont[o] = o, string(b)
+		}
+		return render(ns, func(o *obj) string { return cont[o] })
+	}
+	res := sim.Run(func(*dst.World) {
+		fsys := disk.World.FS()
+		check := func(err error) {
+			if err != nil && failure == nil {
+				failure = err
+			}
+		}
+		check(fsys.Mkdir("d", 0o755))
+		check(dst.SyncDir(fsys, "."))
+		for _, o := range ops {
+			switch o.k {
+			case kCreate:
+				f, err := fsys.OpenFile(o.name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+				check(err)
+				if err == nil {
+					f.Close()
+				}
+			case kWrite, kTrunc, kSync:
+				f, err := fsys.OpenFile(o.name, os.O_WRONLY|os.O_APPEND, 0)
+				check(err)
+				switch o.k {
+				case kWrite:
+					_, err = f.Write([]byte(o.data))
+				case kTrunc:
+					err = f.Truncate(int64(o.size))
+				default:
+					err = f.Sync()
+				}
+				check(err)
+				f.Close()
+			case kSyncDir:
+				check(dst.SyncDir(fsys, o.name))
+			case kRename:
+				check(fsys.Rename(o.name, o.to))
+			case kRemove:
+				check(fsys.Remove(o.name))
+			}
+			m.do(o)
+		}
+		legal = m.legal()
+		live = render(m.live, func(o *obj) string { return m.liveData[o] })
+		held, _ := fsys.OpenFile(".", os.O_RDONLY, 0)
+		if power {
+			disk.Crash()
+		} else {
+			disk.Kill()
+		}
+		if _, err := held.ReadDir(-1); !errors.Is(err, simfs.ErrStale) {
+			check(fmt.Errorf("a handle opened before the crash: %v, want ESTALE", err))
+		}
+		afterKill = read(fsys, check)
+		sim.S.Restart(disk.M)
+		disk.Crash()
+		afterPower = read(fsys, check)
+	})
+	if res.Err != nil {
+		t.Fatalf("%v: %v", ops, res.Err)
+	}
+	if failure != nil {
+		t.Fatalf("%v: %v", ops, failure)
+	}
+	return live, afterKill, afterPower, legal
+}
+
+// Verifies: [kill-keeps-cache]
+// Fails if: after a kill the disk doesn't read exactly as it did live
+// (something written was lost, or a handle survived); or a power loss
+// after the kill leaves an illegal state, or never loses anything (the
+// kill made everything durable). The negative case: a power-loss crash in
+// the kill's place differs from the live state on some seed, so a kill
+// that behaved like one would fail.
+func TestKillKeepsCache(t *testing.T) {
+	for _, ordered := range []bool{false, true} {
+		r := rand.New(rand.NewPCG(11, 1))
+		lostLater, powerDiffers := 0, 0
+		for i := range 500 {
+			ops := gen(r, 1+r.IntN(10))
+			seed := uint64(i)
+			live, afterKill, afterPower, legal := playKill(t, ops, seed, ordered, false)
+			if afterKill != live {
+				t.Fatalf("%s: after %v and a kill, the disk reads %q; live it was %q", modeName(ordered), ops, afterKill, live)
+			}
+			if !legal[afterPower] {
+				t.Fatalf("%s: after %v, a kill, then a power loss: %q isn't a legal crash state", modeName(ordered), ops, afterPower)
+			}
+			if afterPower != live {
+				lostLater++
+			}
+			if pl, afterCrash, _, _ := playKill(t, ops, seed, ordered, true); afterCrash != pl {
+				powerDiffers++
+			}
+		}
+		if lostLater == 0 {
+			t.Errorf("%s: a power loss after a kill never lost anything in 500 sequences: the kill made writes durable", modeName(ordered))
+		}
+		if powerDiffers == 0 {
+			t.Errorf("%s: negative case: a power loss in the kill's place never differed from the live state", modeName(ordered))
+		}
+		t.Logf("%s: 500 sequences; a later power loss lost something in %d, a power loss instead of the kill in %d", modeName(ordered), lostLater, powerDiffers)
+	}
+}

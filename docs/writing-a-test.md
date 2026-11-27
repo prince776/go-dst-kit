@@ -268,7 +268,8 @@ Model the service's documented failure modes, not only its happy path:
 
 | What goes wrong | Use | You write |
 |---|---|---|
-| Your process dies (SIGKILL, power loss) | machine crashes (`Faults.Crash`) | nothing: the code must recover on restart |
+| Your machine loses power | machine crashes (`Faults.Crash`) | nothing: the code must recover on restart |
+| Your process dies (SIGKILL, a panic, OOM), the host stays up | process kills (`Faults.Kill`): the disk keeps unsynced writes | nothing: the code must recover on restart |
 | Your disk loses or tears unsynced writes | `w.FS()` (`Faults.Disk`) | nothing |
 | The network between your own machines | `w.Net()` (`Faults.Partition`, `Network`) | nothing |
 | Your process stalls (GC pause, VM freeze) | `Faults.Pause` | nothing |

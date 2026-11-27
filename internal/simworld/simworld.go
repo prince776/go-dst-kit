@@ -166,6 +166,11 @@ func (m *Machine) Boot() {
 // doesn't return.
 func (m *Machine) Crash() { m.sim.S.Crash(m.M) }
 
+// Kill kills the machine's process: its goroutines stop for good, but its
+// host stays up, so its disk keeps everything written (see simfs). If
+// called from the machine itself, it doesn't return.
+func (m *Machine) Kill() { m.sim.S.Kill(m.M) }
+
 // Restart brings a crashed machine back and boots it.
 func (m *Machine) Restart() {
 	m.sim.S.Restart(m.M)

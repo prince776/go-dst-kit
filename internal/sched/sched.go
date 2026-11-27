@@ -167,6 +167,7 @@ type Machine struct {
 	onCrash     []func()
 	clock       Clock
 	paused      bool
+	killed      bool // the last crash was a kill: the process died, the host didn't
 }
 
 // Paused reports whether the machine is paused.
@@ -236,8 +237,14 @@ func (m *Machine) Dead() bool { return m.dead }
 func (m *Machine) Alive(inc int) bool { return !m.dead && m.Incarnation == inc }
 
 // OnCrash registers fn to run when the machine crashes (e.g. its disk loses
-// unsynced data). Hooks run in registration order.
+// unsynced data). Hooks run in registration order; Killed tells them
+// whether this crash is a kill.
 func (m *Machine) OnCrash(fn func()) { m.onCrash = append(m.onCrash, fn) }
+
+// Killed reports whether the machine's last crash was a kill (Kill): its
+// process died but its host stayed up, so the host's page cache, and
+// everything written to it, survived.
+func (m *Machine) Killed() bool { return m.killed }
 
 type state int
 
@@ -780,17 +787,29 @@ func (s *Scheduler) Sleep(d time.Duration) {
 // functions don't run (a process that loses power runs no defers), and
 // the machine's OnCrash hooks run. If the current task is on m, Crash
 // doesn't return.
-func (s *Scheduler) Crash(m *Machine) {
+func (s *Scheduler) Crash(m *Machine) { s.crash(m, false) }
+
+// Kill is Crash for the process alone (kill -9, a panic, the OOM killer):
+// its tasks die the same way, and the crash hooks run with m.Killed() true
+// (the disk keeps what was written, unsynced or not).
+func (s *Scheduler) Kill(m *Machine) { s.crash(m, true) }
+
+func (s *Scheduler) crash(m *Machine, kill bool) {
 	if m.dead {
 		return
 	}
-	m.dead = true
+	m.dead, m.killed = true, kill
 	if m.paused { // a crash ends a pause (and Restart starts unpaused)
 		m.paused = false
 		s.pausedN--
 	}
-	s.Logf("crash %s", m.Name)
-	s.Trace(0xc7a5, uint64(m.ID))
+	if kill {
+		s.Logf("kill %s (its host stays up)", m.Name)
+		s.Trace(0x4b11, uint64(m.ID))
+	} else {
+		s.Logf("crash %s", m.Name)
+		s.Trace(0xc7a5, uint64(m.ID))
+	}
 	s.runnable = slices.DeleteFunc(s.runnable, func(t *Task) bool { return t.Machine == m })
 	for _, t := range s.tasks {
 		if t.Machine == m && t.state != finished {

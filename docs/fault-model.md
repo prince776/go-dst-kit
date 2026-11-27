@@ -51,6 +51,15 @@ a law in the package that implements it, with a test.
   Deferred functions don't run (as with `kill -9` or power loss). Its
   timers and tickers never fire again, and its open connections go
   silent.
+- **Kill** (`Faults.Kill`, `Machine.Kill`) is a crash of the process
+  alone (kill -9, a panic, the OOM killer): its goroutines stop the same
+  way, but the host stays up, so the disk keeps everything written,
+  synced or not, and a later power loss may still lose what wasn't
+  synced. With `Faults.Crash` too, each crash is a kill or a power loss,
+  by a share drawn per seed (a quarter of seeds all kills, a quarter
+  none); turning kills on doesn't move any crash. On the network a kill
+  is a crash for now (silent): a real one makes the host reset its
+  connections.
 - **Restart** runs the machine's start function again on what its disk
   kept. It's a new incarnation: nothing in memory survives.
 - A machine can also lose power inside an I/O call (below).
@@ -81,6 +90,9 @@ journaling filesystems allow, chosen by the seed:
 - The first lost write of a file may survive in part (torn).
 - Power can fail inside a `Write`, `Sync` or directory operation.
 - Files opened before a crash return `ESTALE`.
+- After a kill, nothing is lost: the page cache survives, so every
+  completed write and directory change is still visible, and still
+  unsynced.
 - `ReadDir` on an open directory returns entries in a seeded order, like
   real filesystems; `FS.ReadDir` sorts, like `os.ReadDir`.
 
