@@ -151,7 +151,7 @@ type Scheduler struct {
 	streak   int // consecutive picks of lastPick while others could run
 	pausedN  int // machines paused now
 	eligible []int
-	loopGoid int64
+	loopGoid uint64
 	// abort is closed when a misuse breaks the baton protocol: the loop
 	// stops at once instead of waiting for a handoff that may never come.
 	abort     chan struct{}
@@ -266,7 +266,7 @@ type Task struct {
 	state   state
 	killed  bool
 	blocked string
-	goid    int64
+	goid    uint64
 	prio    float64 // PCT priority (higher runs first)
 	site    uint64  // where it last handed off, or started (Options.Pairs)
 }
@@ -591,9 +591,9 @@ func (e *PanicError) Error() string {
 //
 // The check is cheap by default: the task must still be in the running
 // state (an operation made on its behalf by another goroutine changes
-// that), and every 256th call compares goroutine IDs (reading one costs
-// about 1.8µs and takes a process-wide lock). StrictIdentity compares them
-// on every call.
+// that), and every 256th call compares goroutine identities (goid: a few
+// nanoseconds on amd64 and arm64; elsewhere about 2µs and a process-wide
+// lock). StrictIdentity compares them on every call.
 func (s *Scheduler) Current() *Task {
 	t := s.cur
 	if t == nil {

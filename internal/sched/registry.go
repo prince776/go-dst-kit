@@ -15,7 +15,7 @@ import (
 // a World. Lookups cost about a microsecond, so callers use them only on
 // slow paths (contention, waiting).
 var (
-	registry sync.Map // goid -> *Task
+	registry sync.Map // goid() -> *Task
 	active   atomic.Int64
 )
 
@@ -42,14 +42,17 @@ func CurrentTask() *Task {
 	return v.(*Task)
 }
 
-func goid() int64 {
+// goidSlow is the goroutine's ID, read from runtime.Stack: about 1.8µs,
+// and it takes the runtime's process-wide print lock, so parallel
+// simulations queue on it. goid uses it where it can't read the g pointer.
+func goidSlow() uint64 {
 	var buf [64]byte
 	b := buf[:runtime.Stack(buf[:], false)]
 	b = bytes.TrimPrefix(b, []byte("goroutine "))
 	if i := bytes.IndexByte(b, ' '); i > 0 {
 		b = b[:i]
 	}
-	id, _ := strconv.ParseInt(string(b), 10, 64)
+	id, _ := strconv.ParseUint(string(b), 10, 64)
 	return id
 }
 
