@@ -460,7 +460,12 @@ func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
 		case *ast.AssignStmt:
 			elem = m.chanElem(comm.Rhs[0].(*ast.UnaryExpr).X)
 		case *ast.SendStmt:
-			elem = m.chanElem(comm.Chan) // explicit: a send converts its value to it
+			// Named only when the value has another type (the send converts
+			// it): naming it always fails where a variable shadows the
+			// type's name (logFuture := &logFuture{...}).
+			if !types.Identical(m.info.TypeOf(comm.Value), m.info.TypeOf(comm.Chan).Underlying().(*types.Chan).Elem()) {
+				elem = m.chanElem(comm.Chan)
+			}
 		}
 		p.elems = append(p.elems, elem)
 	}
@@ -508,7 +513,11 @@ func spliceSelects(name string, src []byte, plans []selectPlan) ([]byte, error) 
 			case nil:
 				fmt.Fprintf(&ops, "dst.Default(func() { %s = %d }),\n", id, n)
 			case *ast.SendStmt:
-				fmt.Fprintf(&ops, "dst.OnSend[%s](%s, %s, func() { %s = %d }),\n", plan.elems[k], text(comm.Chan), text(comm.Value), id, n)
+				typeArg := ""
+				if plan.elems[k] != "" {
+					typeArg = "[" + plan.elems[k] + "]"
+				}
+				fmt.Fprintf(&ops, "dst.OnSend%s(%s, %s, func() { %s = %d }),\n", typeArg, text(comm.Chan), text(comm.Value), id, n)
 			case *ast.ExprStmt:
 				fmt.Fprintf(&ops, "dst.OnRecv(%s, func(_ %s, _ bool) { %s = %d }),\n", text(comm.X.(*ast.UnaryExpr).X), plan.elems[k], id, n)
 			case *ast.AssignStmt:

@@ -73,6 +73,15 @@ type sizer interface{ size() int }
 
 func (j *job) size() int { return j.n }
 
+// give sends a job where a variable shadows the type's name.
+func (p *Pool) give(ch chan *job) {
+	job := &job{n: 1}
+	select {
+	case ch <- job:
+	case <-p.done:
+	}
+}
+
 // offer sends a *job on a channel of an interface it implements.
 func (p *Pool) offer(ch chan sizer, j *job) {
 	select {
