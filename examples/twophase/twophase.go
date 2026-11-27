@@ -63,8 +63,10 @@ const Initial = 100
 const timeout = 200 * time.Millisecond
 
 // call sends one request line to addr and returns the reply line.
-func call(w *dst.World, addr, req string) (string, error) {
-	ctx, cancel := dst.WithTimeout(w, context.Background(), timeout)
+func call(w *dst.World, addr, req string) (string, error) { return callWithin(w, addr, req, timeout) }
+
+func callWithin(w *dst.World, addr, req string, d time.Duration) (string, error) {
+	ctx, cancel := dst.WithTimeout(w, context.Background(), d)
 	defer cancel()
 	conn, err := w.Net().DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -223,8 +225,12 @@ func (p *Participant) inDoubt(tx int64) bool {
 	return ok
 }
 
-// resolve asks the coordinator about transactions in doubt, forever.
+// resolve asks the coordinator about transactions in doubt, forever. Its
+// request timeout doubles while requests fail (up to 5s) and resets after
+// one succeeds: a fixed timeout shorter than a slow link's round trip
+// would leave a transaction in doubt forever.
 func (p *Participant) resolve() {
+	wait := timeout
 	for {
 		p.w.Sleep(50 * time.Millisecond)
 		p.mu.Lock()
@@ -235,7 +241,12 @@ func (p *Participant) resolve() {
 		slices.Sort(txs) // map order isn't deterministic
 		p.mu.Unlock()
 		for _, tx := range txs {
-			d, err := call(p.w, p.coord, fmt.Sprintf("status %d", tx))
+			d, err := callWithin(p.w, p.coord, fmt.Sprintf("status %d", tx), wait)
+			if err != nil {
+				wait = min(2*wait, 5*time.Second)
+			} else {
+				wait = timeout
+			}
 			p.mu.Lock()
 			switch {
 			case err == nil && (d == "commit" || d == "abort"):

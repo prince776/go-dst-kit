@@ -59,10 +59,12 @@ func harness(bugs gcounter.Bugs) func(h *dsttest.Harness) {
 			for _, name := range names {
 				var v uint64
 				var err error
-				for range 10 { // the network is whole; retry resets
-					if v, err = gcounter.Get(w, addr(name)); err == nil {
+				d := 200 * time.Millisecond
+				for range 10 { // the network is whole; retry resets, and wait longer on slow links
+					if v, err = gcounter.Get(w, addr(name), d); err == nil {
 						break
 					}
+					d = min(2*d, 5*time.Second)
 				}
 				if err != nil {
 					return fmt.Errorf("get %s: %v", name, err)

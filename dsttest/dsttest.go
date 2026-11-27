@@ -152,11 +152,10 @@ type Faults struct {
 }
 
 // AllFaults enables every fault class but Loss, which only a system that
-// replaces lost machines can take (see Harness.OnLoss), and Gray, which
-// changes what a correct system needs: its timeouts must outlast the
-// slowest path, and slow links and disks stay slow in the recovery phase.
-// A test opts in to each.
-var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true}
+// replaces lost machines can take (see Harness.OnLoss). Gray failure is
+// in: a correct system's timeouts must outlast its slowest path, and slow
+// links and disks stay slow in the recovery phase.
+var AllFaults = Faults{Crash: true, Partition: true, Disk: true, Network: true, Pause: true, Points: true, Services: true, Gray: true}
 
 // Point sets a fault point's behaviour for every seed, replacing the
 // per-seed draw (see Options.Points). The zero Point never fires.

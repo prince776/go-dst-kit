@@ -614,15 +614,23 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
-- **Gray failure finds the examples' fixed timeouts** (2026-11-27, raft
-  phase 1 item 2): with Faults.Gray, three examples' correct systems lose
-  liveness. dedupe gives each delivery attempt 300ms, shorter than a slow
-  path (a slow link plus a slow disk), so every attempt times out and the
-  message is never delivered (reported stuck); gcounter's final check reads
-  with a fixed timeout; twophase needs longer to resolve in-doubt
-  transfers. That's the classic gray-failure bug, which is why Gray isn't in
-  AllFaults. Open: make the examples' timeouts adaptive and add a gray
-  sweep to each, or leave them as they are.
+- ~~**Gray failure finds the examples' fixed timeouts**~~ **done**
+  (2026-11-27, Prince: Gray goes into AllFaults, fix the examples). With
+  Faults.Gray three examples' correct systems lost liveness, each a
+  classic gray-failure bug:
+  - dedupe gave every delivery attempt 300ms, shorter than a slow path,
+    so every attempt timed out forever. Now a `Sender` doubles an
+    address's timeout after a failed attempt (up to 5s) and keeps what it
+    learned (shrinking it by a quarter after a success); starting from
+    300ms for every message made delivery too slow.
+  - twophase resolved in-doubt transactions with a fixed 200ms request
+    timeout; now it doubles while requests fail and resets on success.
+  - gcounter held its mutex across the state file's two fsyncs, so a
+    slow disk starved merges, reads and gossip (41 gossips in an 8s run
+    instead of hundreds) and nodes never converged. The lock now guards
+    only the counts; a separate one serializes writes. Its gossip and its
+    final check's reads also back off per peer.
+  Gray is in AllFaults; every example passes, planted bugs still caught.
 
 - ~~Machine.Restart from a workload goroutine~~ **done** (found on
   raft): a machine's boot now has no parent task, so a restarted

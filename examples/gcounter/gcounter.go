@@ -55,8 +55,12 @@ type Node struct {
 	name   string
 	peers  []string // addresses of the other nodes
 	bugs   Bugs
-	mu     dst.Mutex
+	mu     dst.Mutex // guards counts; never held across disk I/O
 	counts map[string]uint64
+	// persistMu serializes increments' writes of the state file. It is
+	// separate from mu so that a slow disk delays only increments, not
+	// merges, reads and gossip.
+	persistMu dst.Mutex
 }
 
 // Start recovers a node from w's disk.
@@ -86,8 +90,8 @@ func (n *Node) Value() uint64 {
 	return v
 }
 
-func (n *Node) persist() error {
-	b, _ := json.Marshal(n.counts) // map keys are sorted: deterministic
+// persist writes state b (the counts, as JSON) durably to the state file.
+func (n *Node) persist(b []byte) error {
 	fsys := n.w.FS()
 	f, err := fsys.OpenFile(stateFile+".tmp", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -108,13 +112,20 @@ func (n *Node) persist() error {
 	return dst.SyncDir(fsys, ".")
 }
 
-// increment counts one increment, durably.
+// increment counts one increment, durably. Gossip may spread the new
+// count before it is on disk; that's allowed, since an increment that
+// isn't acknowledged may or may not count.
 func (n *Node) increment() error {
+	n.persistMu.Lock()
+	defer n.persistMu.Unlock()
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.counts[n.name]++
-	if err := n.persist(); err != nil {
+	b, _ := json.Marshal(n.counts) // map keys are sorted: deterministic
+	n.mu.Unlock()
+	if err := n.persist(b); err != nil {
+		n.mu.Lock()
 		n.counts[n.name]--
+		n.mu.Unlock()
 		return err
 	}
 	return nil
@@ -165,21 +176,34 @@ func (n *Node) Serve(ln net.Listener) error {
 	}
 }
 
-// Gossip pushes this node's state to a random peer, forever.
+// Gossip pushes this node's state to a random peer, forever. Each peer has
+// its own request timeout, doubled while requests to it fail (up to 5s)
+// and reset when one succeeds, so a slow link still carries gossip.
 func (n *Node) Gossip() {
+	wait := map[string]time.Duration{}
 	for {
 		n.w.Sleep(time.Duration(20+n.w.Rand().IntN(30)) * time.Millisecond)
 		n.mu.Lock()
 		b, _ := json.Marshal(n.counts)
 		n.mu.Unlock()
 		peer := n.peers[n.w.Rand().IntN(len(n.peers))]
-		call(n.w, peer, "merge "+string(b))
+		d := max(wait[peer], timeout)
+		if _, err := callWithin(n.w, peer, "merge "+string(b), d); err != nil {
+			wait[peer] = min(2*d, 2*time.Second) // one slow peer holds up this loop: keep it short
+		} else {
+			wait[peer] = timeout
+		}
 	}
 }
 
+// timeout is a request's first timeout.
+const timeout = 200 * time.Millisecond
+
 // call sends one request and returns the reply line.
-func call(w *dst.World, addr, req string) (string, error) {
-	ctx, cancel := dst.WithTimeout(w, context.Background(), 200*time.Millisecond)
+func call(w *dst.World, addr, req string) (string, error) { return callWithin(w, addr, req, timeout) }
+
+func callWithin(w *dst.World, addr, req string, d time.Duration) (string, error) {
+	ctx, cancel := dst.WithTimeout(w, context.Background(), d)
 	defer cancel()
 	conn, err := w.Net().DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -202,9 +226,9 @@ func Inc(w *dst.World, addr string) bool {
 	return err == nil && r == "ok"
 }
 
-// Get asks the node at addr for its value.
-func Get(w *dst.World, addr string) (uint64, error) {
-	r, err := call(w, addr, "get")
+// Get asks the node at addr for its value, waiting at most d.
+func Get(w *dst.World, addr string, d time.Duration) (uint64, error) {
+	r, err := callWithin(w, addr, "get", d)
 	if err != nil {
 		return 0, err
 	}

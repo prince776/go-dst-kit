@@ -124,18 +124,35 @@ func (c *Consumer) Serve(ln net.Listener) error {
 	}
 }
 
-// Deliver sends message id to the consumer at addr until it is
-// acknowledged, retrying with backoff; each attempt has a timeout.
-func Deliver(w *dst.World, addr, id string) {
-	backoff := 10 * time.Millisecond
-	for !try(w, addr, id) {
-		w.Sleep(backoff + time.Duration(w.Rand().Int64N(int64(backoff))))
-		backoff = min(2*backoff, time.Second)
-	}
+// Sender delivers messages, one at a time. Each attempt has a timeout,
+// which doubles after a failed attempt (up to 5s) and shrinks by a quarter
+// after a success (down to 300ms), per address: a fixed timeout shorter
+// than the path's round trip (a slow or lossy link) would fail every
+// attempt forever, and starting from scratch for every message would
+// relearn the path each time.
+type Sender struct {
+	timeout map[string]time.Duration
 }
 
-func try(w *dst.World, addr, id string) bool {
-	ctx, cancel := dst.WithTimeout(w, context.Background(), 300*time.Millisecond)
+// Deliver sends message id to the consumer at addr until it is
+// acknowledged, retrying with backoff.
+func (s *Sender) Deliver(w *dst.World, addr, id string) {
+	if s.timeout == nil {
+		s.timeout = map[string]time.Duration{}
+	}
+	const first = 300 * time.Millisecond
+	backoff := 10 * time.Millisecond
+	t := max(s.timeout[addr], first)
+	for !try(w, addr, id, t) {
+		w.Sleep(backoff + time.Duration(w.Rand().Int64N(int64(backoff))))
+		backoff = min(2*backoff, time.Second)
+		t = min(2*t, 5*time.Second)
+	}
+	s.timeout[addr] = max(t*3/4, first)
+}
+
+func try(w *dst.World, addr, id string, timeout time.Duration) bool {
+	ctx, cancel := dst.WithTimeout(w, context.Background(), timeout)
 	defer cancel()
 	conn, err := w.Net().DialContext(ctx, "tcp", addr)
 	if err != nil {

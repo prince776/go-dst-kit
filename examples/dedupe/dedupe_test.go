@@ -33,9 +33,10 @@ func harness(bugs dedupe.Bugs) func(h *dsttest.Harness) {
 		acked := map[string]bool{}
 		for p := range 2 {
 			h.Go(func(w *dst.World) {
+				var s dedupe.Sender
 				for i := p; i < messages; i += 2 {
 					id := fmt.Sprintf("m%d", i)
-					dedupe.Deliver(w, "consumer:9000", id)
+					s.Deliver(w, "consumer:9000", id)
 					acked[id] = true
 					w.Sleep(time.Duration(w.Rand().IntN(50)) * time.Millisecond)
 				}
