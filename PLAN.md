@@ -498,6 +498,42 @@ math/rand/v2's N, crypto/rand.Reader.
 **pebble (started 2026-11-28):** cockroachdb/pebble at 4b082f41, a
 subagent, same method; blind benchmark held outside the agents' reach.
 
+**pebble's library pieces (2026-11-28, `adopt/pebble`; Prince approved
+the five at pebble's checkpoint 1):**
+- `w.Yield()` for `runtime.Gosched` spins (pebble's commit queue and
+  block cache). A plain scheduling point wasn't enough: while the
+  goroutine waited for sleeps, a spin on it never lets virtual time
+  advance (the run hits its step limit at t=0). So Yield parks until
+  another goroutine takes a step that doesn't end in Yield, or a timer
+  fires; a spin nothing can end is a deadlock naming Yield. Law
+  [yield-waits-for-progress]. dstmigrate and dstlint map Gosched.
+- `dst.Current()`, a last resort for leaf code no World reaches (pebble's
+  `invariants.Sometimes`, 44 sites, no owner). Prince's conditions: the
+  doc says so, a goroutine the World didn't start gets the real World
+  (the determinism check is the backstop), and dstlint reports every
+  use in every package. Laws [current-is-the-callers], [flags-current].
+- `dst.Link` (hard links; pebble's checkpoints and ingestion): a create
+  of the existing inode in the directory journal. Laws
+  [link-shares-data], [link-is-a-dir-change] (links in the crash
+  model's sequences). The model taught me POSIX's rule that renaming one
+  link onto another of the same file does nothing.
+- Holes on power loss, in `Faults.Disk` (harsh mode): out-of-order page
+  write-back within a file, which pebble's MemFS crash clones already
+  assume. Draws on their own streams (Prince's condition): every other
+  Swarm field identical to main over 4 fault sets x 300 seeds, and a
+  disk whose hole draws all say no crashes as before. Laws
+  [holes-own-stream], [disk-holes], hole states in [crash-is-legal] and
+  [crash-explores]. Two findings: my first version took pages from the
+  live content, resurrecting writes a failed fsync had dropped (now from
+  the pending writes; TestFsyncErrorForgets covers it); and the wal
+  example's checksum didn't cover the length, so a zero-filled tail read
+  as valid empty records (CRC-32 of nothing is 0). Fixed; the old
+  format is the planted bug ChecksumDataOnly, caught with holes and in 0
+  of 300 seeds without.
+- dstmigrate `-map` for a project's own wrappers (pebble's `crtime`, 64
+  sites): calls become a function taking the World first; and receivers
+  of generic types with several type parameters.
+
 ## Exploration plan (approved by Prince, 2026-11-26)
 
 Goal: find more bugs, measurably. Targets: llm-tor (request/response
