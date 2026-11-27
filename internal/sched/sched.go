@@ -32,6 +32,11 @@
 //   - [kill-unwind-is-silent] A killed task's deferred functions can't
 //     crash the process: a dst mutex they unlock, held or not, is left
 //     as it is (Go's defer Unlock, Unlock, wait, Lock, killed in the wait).
+//     Mid-run, a crashed or killed machine's goroutines stop where they
+//     are and run none of their defers, as in a real crash: a lock one of
+//     them held stays held, which nothing outside that dead process can
+//     see. Defers run only at the end-of-simulation Shutdown, and this
+//     law is about that unwind.
 //
 // This package is single-threaded by construction: every exported method is
 // called either by the task holding the baton or by the scheduler itself

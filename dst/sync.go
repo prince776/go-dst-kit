@@ -157,6 +157,11 @@ func (m *RWMutex) wake() {
 }
 
 // WaitGroup is sync.WaitGroup for code that runs in a World.
+//
+// Verified:
+//   - [wait-follows-done] Outside a simulation, Wait returns only after
+//     every Done has returned, as sync.WaitGroup's does, so a group
+//     reused straight after Wait (Pebble's batches) stays consistent.
 type WaitGroup struct {
 	wg      sync.WaitGroup
 	n       atomic.Int64
@@ -198,10 +203,13 @@ func (g *WaitGroup) Go(w *World, fn func()) {
 }
 
 // Wait is (*sync.WaitGroup).Wait.
+//
+// Outside a simulation it is exactly the sync.WaitGroup's Wait: it
+// returns only once every Done has returned, so the group can be reused
+// at once (a Done updates the simulation's count before the
+// sync.WaitGroup, so that count reading zero doesn't mean the last Done
+// has finished).
 func (g *WaitGroup) Wait() {
-	if g.n.Load() == 0 {
-		return
-	}
 	if t := sched.CurrentTask(); t != nil {
 		s := t.Sched()
 		g.s.Store(s)
