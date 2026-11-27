@@ -30,6 +30,13 @@
 //     datagrams for when it resumes and drops the rest.
 //   - [udp-crash-drops] Datagrams to a crashed machine are dropped; its
 //     sockets don't survive the restart, which can bind the same ports.
+//   - [udp-links] With Links, a slow link delays its datagrams by its added
+//     latency and a lossy link loses its share of them (never
+//     retransmitted), drawing from their own stream so the network's other
+//     draws stay put; once the network is calm, losses stop and slowness
+//     stays. Links with zero shares change nothing.
+//   - [udp-blocked] A link that blocks UDP drops every datagram while TCP
+//     on it flows, until the network is calm.
 //
 // Depends on: dst, internal/sched, internal/simfs
 package simworld

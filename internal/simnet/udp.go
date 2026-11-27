@@ -10,7 +10,9 @@ import (
 
 // UDP: datagrams between hosts. Each datagram is delivered whole or not at
 // all, after its own latency (so datagrams reorder). With network faults
-// on, datagrams are lost and duplicated at the rates in Options. A
+// on, datagrams are lost and duplicated at the rates in Options; with
+// Options.Links, a slow link delays them, a lossy link loses them, and a
+// link that blocks UDP drops them all until the network is calm. A
 // partition, a crashed host, or a port nobody listens on drops them (UDP
 // never holds traffic); a paused host's datagrams wait in its receive
 // buffer, which holds udpBuffer of them and drops the rest.
@@ -149,6 +151,15 @@ func (pc *packetConn) WriteTo(p []byte, to net.Addr) (int, error) {
 	if n.hosts[dst.host] == nil {
 		return 0, pc.opErr("write", &net.DNSError{Err: "no such host", Name: dst.host, IsNotFound: true})
 	}
+	var l *link
+	if n.opts.Links.on() {
+		l = n.link(pc.h.name, dst.host)
+		if l.udpBlocked && !n.calm {
+			n.s.Logf("network: link %s -> %s blocks UDP; dropped a datagram", pc.h.name, dst.host)
+			n.note("link blocked a datagram")
+			return len(p), nil
+		}
+	}
 	copies := 1
 	if n.opts.UDPDupProb > 0 && n.rng.Float64() < n.opts.UDPDupProb {
 		copies = 2
@@ -158,9 +169,25 @@ func (pc *packetConn) WriteTo(p []byte, to net.Addr) (int, error) {
 			n.s.Logf("network: lost a datagram %s -> %s", pc.a, dst)
 			continue
 		}
+		d := n.latency()
+		if l != nil {
+			d += l.extra
+			// The link's loss draws come from their own stream, after the
+			// network's, so they move no other draw.
+			if l.loss > 0 && !n.calm {
+				if n.udpRng == nil {
+					n.udpRng = n.s.Rand("network/udp-links")
+				}
+				if n.udpRng.Float64() < l.loss {
+					n.s.Logf("network: lossy link %s -> %s lost a datagram", pc.h.name, dst.host)
+					n.note("link lost a datagram")
+					continue
+				}
+			}
+		}
 		data := append([]byte(nil), p...) // the receiver gets its own copy
 		from := pc.a
-		n.s.At(n.s.Now()+n.latency(), func() { n.deliverUDP(from, dst, data) })
+		n.s.At(n.s.Now()+d, func() { n.deliverUDP(from, dst, data) })
 	}
 	return len(p), nil
 }

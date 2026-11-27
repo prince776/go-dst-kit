@@ -168,7 +168,30 @@ type Machine struct {
 	clock       Clock
 	paused      bool
 	killed      bool // the last crash was a kill: the process died, the host didn't
+	down, pause []Span
 }
+
+// Span is a stretch of true time; Open while it lasts (To is then 0).
+type Span struct {
+	From, To time.Duration
+	Open     bool
+}
+
+func open(ss []Span, now time.Duration) []Span { return append(ss, Span{From: now, Open: true}) }
+
+func closeLast(ss []Span, now time.Duration) {
+	if n := len(ss); n > 0 && ss[n-1].Open {
+		ss[n-1].To, ss[n-1].Open = now, false
+	}
+}
+
+// Downtime is when the machine was crashed or killed, each crash to its
+// restart (Open if it hasn't restarted).
+func (m *Machine) Downtime() []Span { return slices.Clone(m.down) }
+
+// Pauses is when the machine was paused, each pause to its resume or the
+// crash that ended it.
+func (m *Machine) Pauses() []Span { return slices.Clone(m.pause) }
 
 // Paused reports whether the machine is paused.
 func (m *Machine) Paused() bool { return m.paused }
@@ -799,9 +822,11 @@ func (s *Scheduler) crash(m *Machine, kill bool) {
 		return
 	}
 	m.dead, m.killed = true, kill
+	m.down = open(m.down, s.now)
 	if m.paused { // a crash ends a pause (and Restart starts unpaused)
 		m.paused = false
 		s.pausedN--
+		closeLast(m.pause, s.now)
 	}
 	if kill {
 		s.Logf("kill %s (its host stays up)", m.Name)
@@ -837,6 +862,7 @@ func (s *Scheduler) Restart(m *Machine) {
 		return
 	}
 	m.dead = false
+	closeLast(m.down, s.now)
 	m.Incarnation++
 	s.Logf("restart %s (incarnation %d)", m.Name, m.Incarnation)
 	s.Trace(0x2e57, uint64(m.ID))
@@ -852,6 +878,7 @@ func (s *Scheduler) Pause(m *Machine) {
 	}
 	m.paused = true
 	s.pausedN++
+	m.pause = open(m.pause, s.now)
 	s.Logf("pause %s", m.Name)
 	s.Trace(0x9a05e, uint64(m.ID))
 }
@@ -863,6 +890,7 @@ func (s *Scheduler) Resume(m *Machine) {
 	}
 	m.paused = false
 	s.pausedN--
+	closeLast(m.pause, s.now)
 	s.Logf("resume %s", m.Name)
 	s.Trace(0x7e50e, uint64(m.ID))
 }

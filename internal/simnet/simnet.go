@@ -107,21 +107,26 @@ type Options struct {
 
 // LinkOptions draw each link's behaviour, once per link and seed: with
 // chance SlowShare a link is slow, adding a latency around SlowMean (half
-// to one and a half times it) to every write; with chance LossyShare it is
-// lossy, losing each segment with chance LossProb.
+// to one and a half times it) to every write and datagram; with chance
+// LossyShare it is lossy, losing each segment (retransmitted: TCP waits)
+// or datagram (gone: UDP has no retransmission) with chance LossProb; with
+// chance UDPBlockShare it drops every datagram while TCP still flows (a
+// firewall or security group that blocks UDP).
 type LinkOptions struct {
-	SlowShare  float64
-	SlowMean   time.Duration
-	LossyShare float64
-	LossProb   float64
+	SlowShare     float64
+	SlowMean      time.Duration
+	LossyShare    float64
+	LossProb      float64
+	UDPBlockShare float64
 }
 
-func (o LinkOptions) on() bool { return o.SlowShare > 0 || o.LossyShare > 0 }
+func (o LinkOptions) on() bool { return o.SlowShare > 0 || o.LossyShare > 0 || o.UDPBlockShare > 0 }
 
 // link is one direction between two hosts.
 type link struct {
-	extra time.Duration // a slow link's added latency (0: not slow)
-	loss  float64       // a lossy link's chance of losing a segment
+	extra      time.Duration // a slow link's added latency (0: not slow)
+	loss       float64       // a lossy link's chance of losing a segment or datagram
+	udpBlocked bool          // drops every datagram (TCP flows)
 }
 
 // link returns the link from one host to another, drawn on first use from
@@ -142,6 +147,10 @@ func (n *Network) link(from, to string) *link {
 	if r.Float64() < lo.LossyShare {
 		l.loss = lo.LossProb
 	}
+	if r.Float64() < lo.UDPBlockShare { // drawn last: the draws above are as they were
+		l.udpBlocked = true
+		n.note("a link blocks UDP")
+	}
 	n.links[k] = l
 	return l
 }
@@ -154,6 +163,15 @@ func (n *Network) Link(from, to string) (extra time.Duration, loss float64) {
 	}
 	l := n.link(from, to)
 	return l.extra, l.loss
+}
+
+// UDPBlocked reports whether the link from one host to another drops
+// datagrams (while the network isn't calm).
+func (n *Network) UDPBlocked(from, to string) bool {
+	if !n.opts.Links.on() {
+		return false
+	}
+	return n.link(from, to).udpBlocked
 }
 
 func (n *Network) note(event string) {
@@ -173,13 +191,15 @@ type Network struct {
 	pipes   []*pipe
 	dials   []*dial
 	links   map[[2]string]*link
-	calm    bool // StopFaults: links no longer lose segments
+	calm    bool                       // StopFaults: links no longer lose segments or datagrams, nor block UDP
+	udpRng  *rand.Rand                 // lossy links' datagram losses (its own stream: other draws stay put)
+	cuts    map[[2]string][]sched.Span // when each directed pair was blocked
 }
 
 // New returns a network with no machines.
 func New(s *sched.Scheduler, epoch time.Time, opts Options) *Network {
 	return &Network{s: s, rng: s.Rand("network"), opts: opts, epoch: epoch,
-		hosts: map[string]*Host{}, blocked: map[[2]string]bool{}, links: map[[2]string]*link{}}
+		hosts: map[string]*Host{}, blocked: map[[2]string]bool{}, links: map[[2]string]*link{}, cuts: map[[2]string][]sched.Span{}}
 }
 
 // Host is one machine's attachment to the network; it implements dst.Net.
@@ -230,7 +250,11 @@ func (n *Network) Attach(m *sched.Machine) *Host {
 
 // Block stops traffic from one machine to another (one way).
 func (n *Network) Block(from, to string) {
-	n.blocked[[2]string{from, to}] = true
+	k := [2]string{from, to}
+	if !n.blocked[k] {
+		n.cuts[k] = append(n.cuts[k], sched.Span{From: n.s.Now(), Open: true})
+	}
+	n.blocked[k] = true
 	n.s.Logf("network: block %s -> %s", from, to)
 }
 
@@ -266,6 +290,11 @@ func (n *Network) Heal() {
 			}
 		}
 	}
+	for k := range n.blocked { // closing each: order doesn't matter
+		if c := n.cuts[k]; len(c) > 0 && c[len(c)-1].Open {
+			c[len(c)-1].To, c[len(c)-1].Open = n.s.Now(), false
+		}
+	}
 	n.blocked = map[[2]string]bool{}
 	n.s.Logf("network: heal")
 	for _, p := range n.pipes {
@@ -274,6 +303,12 @@ func (n *Network) Heal() {
 	for _, d := range n.dials {
 		d.retry()
 	}
+}
+
+// Cuts is when traffic from one host to another was blocked, each block
+// to the heal that ended it (Open while it lasts).
+func (n *Network) Cuts(from, to string) []sched.Span {
+	return slices.Clone(n.cuts[[2]string{from, to}])
 }
 
 // Partitioned reports whether any path is blocked.
@@ -752,5 +787,5 @@ func ErrTimeout(err error) bool { return errors.Is(err, os.ErrDeadlineExceeded) 
 // phase).
 func (n *Network) StopFaults() {
 	n.opts.ResetProb, n.opts.UDPLossProb, n.opts.UDPDupProb, n.opts.HealResetProb = 0, 0, 0, 0
-	n.calm = true // lossy links stop losing; slow links stay slow (a property, not a fault)
+	n.calm = true // lossy links stop losing, UDP blocks lift; slow links stay slow (a property, not a fault)
 }
