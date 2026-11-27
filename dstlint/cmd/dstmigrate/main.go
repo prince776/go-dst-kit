@@ -18,7 +18,9 @@
 //   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types;
 //   - go statements to w.Go, evaluating the call's arguments first as go
 //     does;
-//   - math/rand calls to the World's Rand;
+//   - math/rand calls to the World's Rand (math/rand/v2's generic N to a
+//     converted Int64N; functions with no equivalent are reported), and
+//     crypto/rand.Read and crypto/rand.Reader to the World's;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
 //     RemoveAll, Rename, Stat (and Lstat), ReadDir to w.FS()'s methods;
 //     os.Open, Create, ReadFile, WriteFile (and ioutil's) to dst's
@@ -419,6 +421,15 @@ func (m *migrator) decl(d ast.Node) {
 				}
 			}
 		case *ast.SelectorExpr:
+			// crypto/rand.Reader, under any import name: the World's
+			// dst.CryptoReader.
+			if v, ok := m.info.Uses[n.Sel].(*types.Var); ok && v.Name() == "Reader" && v.Pkg() != nil && v.Pkg().Path() == "crypto/rand" {
+				r := call(sel(ast.NewIdent("dst"), "CryptoReader"), m.w())
+				setPos(r, n.Pos())
+				m.replace(c, r)
+				m.changes++
+				break
+			}
 			if id, ok := n.X.(*ast.Ident); ok {
 				switch id.Name + "." + n.Sel.Name {
 				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond":
@@ -549,6 +560,19 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			n.Fun = sel(call(sel(m.w(), "Rand")), name)
 			setPos(n, pos)
 			m.changes++
+		case "N":
+			// rand.N(d) (math/rand/v2, generic): T(w.Rand().Int64N(int64(d))).
+			if len(n.Args) == 1 {
+				t := types.TypeString(m.info.TypeOf(n), m.qualifier)
+				r := call(expr(t), call(sel(call(sel(m.w(), "Rand")), "Int64N"), call(ast.NewIdent("int64"), n.Args[0])))
+				setPos(r, pos)
+				m.replace(c, r)
+				m.changes++
+			}
+		default:
+			if _, isFunc := m.info.Uses[s.Sel].(*types.Func); isFunc && s.Sel.Name != "New" && !strings.HasPrefix(s.Sel.Name, "New") {
+				m.warn(n, "rand."+s.Sel.Name+" has no World equivalent; it still draws from the global generator")
+			}
 		}
 	case "context":
 		switch s.Sel.Name {
