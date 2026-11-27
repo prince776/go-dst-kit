@@ -115,5 +115,3 @@ func (p *Pool) wait(js chan *job) int {
 		return 0
 	}
 }
-
-func dstRecv[T any](c dst.Chan[T]) T { v, _ := c.Recv(); return v }

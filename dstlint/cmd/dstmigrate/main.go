@@ -42,6 +42,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -55,6 +56,8 @@ const dstPath = "github.com/prince776/go-dst-kit/dst"
 func main() {
 	worldFlag := flag.String("world", "", "receiver type -> World expression, $ for the receiver: 'Raft=$.w,Pool=$.world'")
 	dryRun := flag.Bool("n", false, "print the files instead of writing them")
+	tests := flag.Bool("tests", false, "also rewrite the packages' tests (from the package's test build, in the same pass)")
+	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies")
 	flag.Parse()
 	worlds := map[string]string{}
 	for _, kv := range strings.Split(*worldFlag, ",") {
@@ -62,7 +65,7 @@ func main() {
 			worlds[k] = v
 		}
 	}
-	cfg := &packages.Config{Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo, Tests: false}
+	cfg := &packages.Config{Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo, Tests: *tests}
 	pkgs, err := packages.Load(cfg, flag.Args()...)
 	if err != nil {
 		fatal(err)
@@ -70,10 +73,19 @@ func main() {
 	if packages.PrintErrors(pkgs) > 0 {
 		os.Exit(1)
 	}
+	seen := map[string]bool{}
 	for _, pkg := range pkgs {
-		m := &migrator{pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
+		if *tests && skipForTests(pkg, pkgs) {
+			continue
+		}
+		m := &migrator{testWorld: *testWorld, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
+			if strings.HasSuffix(name, ".go") == false || seen[name] {
+				continue // generated test main, or a file already done
+			}
+			seen[name] = true
+			m.inTest = strings.HasSuffix(name, "_test.go")
 			m.plans = nil
 			if !m.file(f) {
 				continue
@@ -107,22 +119,31 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "rewrote %s (%d changes)\n", name, m.changes)
 		}
-		if m.needRecv {
-			fmt.Fprintf(os.Stderr, "%s: add the helper (once per package):\n\tfunc dstRecv[T any](c dst.Chan[T]) T { v, _ := c.Recv(); return v }\n", pkg.PkgPath)
+		if m.needRecv && !*dryRun {
+			// The helper for receives used as a value, once per package.
+			dir := filepath.Dir(pkg.CompiledGoFiles[0])
+			src := "package " + pkg.Types.Name() + "\n\nimport \"" + dstPath + "\"\n\n" +
+				"// dstRecv is <-c where only the value is used (written by dstmigrate).\n" +
+				"func dstRecv[T any](c dst.Chan[T]) T { v, _ := c.Recv(); return v }\n"
+			if err := os.WriteFile(filepath.Join(dir, "dst_recv.go"), []byte(src), 0o644); err != nil {
+				fatal(err)
+			}
 		}
 	}
 }
 
 type migrator struct {
-	pkg      *types.Package
-	fset     *token.FileSet
-	info     *types.Info
-	worlds   map[string]string
-	changes  int
-	needRecv bool
-	world    string       // the World expression in the current function
-	plans    []selectPlan // the file's selects, in source order, for the text pass
-	selN     int
+	testWorld string
+	inTest    bool
+	pkg       *types.Package
+	fset      *token.FileSet
+	info      *types.Info
+	worlds    map[string]string
+	changes   int
+	needRecv  bool
+	world     string       // the World expression in the current function
+	plans     []selectPlan // the file's selects, in source order, for the text pass
+	selN      int
 }
 
 func (m *migrator) isChan(e ast.Expr) bool {
@@ -163,6 +184,9 @@ func (m *migrator) file(f *ast.File) bool {
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
 		m.world = "__w"
+		if m.inTest {
+			m.world = m.testWorld
+		}
 		if ok && fd.Recv != nil && len(fd.Recv.List) == 1 {
 			tname := recvType(fd.Recv.List[0].Type)
 			if tmpl, ok := m.worlds[tname]; ok && len(fd.Recv.List[0].Names) == 1 {
@@ -174,6 +198,24 @@ func (m *migrator) file(f *ast.File) bool {
 	if m.changes > before {
 		astutil.AddImport(m.fset, f, dstPath)
 		return true
+	}
+	return false
+}
+
+// skipForTests reports whether, loading with tests, pkg is done by
+// another of pkgs: the plain package when its test build (which has the
+// package's files and its tests) was loaded too, or the generated main.
+func skipForTests(pkg *packages.Package, pkgs []*packages.Package) bool {
+	if strings.HasSuffix(pkg.ID, ".test") {
+		return true
+	}
+	if strings.Contains(pkg.ID, " [") {
+		return false
+	}
+	for _, p := range pkgs {
+		if strings.HasPrefix(p.ID, pkg.ID+" [") {
+			return true
+		}
 	}
 	return false
 }
