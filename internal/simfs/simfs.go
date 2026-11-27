@@ -86,7 +86,9 @@ type FS struct {
 	gen     int // incremented by each crash; older handles are stale
 	nextIno int
 	seq     uint64
-	pending []*op // unsynced operations in issue order
+	pending []*op          // unsynced operations in issue order
+	locks   map[*inode]int // advisory locks (LockFile) held, by holder
+	lockN   int
 	// OnCrashLoss, if set, is told after each crash how many unsynced
 	// operations were lost and whether a write was torn (for coverage).
 	OnCrashLoss func(lost int, torn bool)
@@ -531,6 +533,7 @@ func (f *FS) makeDurable(o *op) {
 // later power loss may still lose it.
 func (f *FS) crash() {
 	f.gen++
+	f.locks = nil // the process holding them is gone
 	if f.m.Killed() {
 		f.s.Logf("disk of %s kept its page cache (a kill): %d unsynced operations still pending", f.m.Name, len(f.pending))
 		return
@@ -819,3 +822,29 @@ func (h *file) Close() error {
 // StopFaults turns off power loss inside I/O calls (the runner's recovery
 // phase). Crashes the runner still causes keep their usual effect.
 func (f *FS) StopFaults() { f.opts.IOCrashProb = 0 }
+
+// LockFile is dst.LockFile on the simulated disk: an exclusive lock per
+// file (inode), held until unlock, a crash or a kill.
+func (f *FS) LockFile(name string) (func() error, error) {
+	h, err := f.OpenFile(name, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	ino := h.(*file).ino
+	h.Close()
+	if f.locks == nil {
+		f.locks = map[*inode]int{}
+	}
+	if _, held := f.locks[ino]; held {
+		return nil, &fs.PathError{Op: "flock", Path: name, Err: dst.ErrLocked}
+	}
+	f.lockN++
+	id, gen := f.lockN, f.gen
+	f.locks[ino] = id
+	return func() error {
+		if gen == f.gen && f.locks[ino] == id {
+			delete(f.locks, ino)
+		}
+		return nil
+	}, nil
+}

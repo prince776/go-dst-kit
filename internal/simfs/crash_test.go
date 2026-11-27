@@ -621,3 +621,51 @@ func TestKillKeepsCache(t *testing.T) {
 		t.Logf("%s: 500 sequences; a later power loss lost something in %d, a power loss instead of the kill in %d", modeName(ordered), lostLater, powerDiffers)
 	}
 }
+
+// Verifies: [lock-dies-with-process]
+// Fails if: a lock survives a crash or a kill of its holder's machine; or
+// something else releases it (the negative: while the machine lives, the
+// lock stays held, and a dead holder's unlock doesn't release the lock
+// the next incarnation took).
+func TestLockDiesWithProcess(t *testing.T) {
+	for _, kill := range []bool{false, true} {
+		sim := simworld.New(simworld.Options{Seed: 1})
+		disk := sim.AddMachine("disk", simworld.MachineOptions{Disk: simfs.Options{}})
+		var failure error
+		check := func(cond bool, format string, args ...any) {
+			if !cond && failure == nil {
+				failure = fmt.Errorf(format, args...)
+			}
+		}
+		res := sim.Run(func(*dst.World) {
+			fsys := disk.World.FS()
+			oldUnlock, err := dst.LockFile(fsys, "LOCK")
+			check(err == nil, "lock: %v", err)
+			// The lock file survives the crash too, so both incarnations
+			// lock the same file.
+			check(dst.SyncDir(fsys, ".") == nil, "sync dir")
+			_, err = dst.LockFile(fsys, "LOCK")
+			check(errors.Is(err, dst.ErrLocked), "while held, before any crash: %v, want ErrLocked", err)
+			if kill {
+				disk.Kill()
+			} else {
+				disk.Crash()
+			}
+			sim.S.Restart(disk.M)
+			newUnlock, err := dst.LockFile(fsys, "LOCK")
+			check(err == nil, "after the holder's machine died, lock: %v", err)
+			check(oldUnlock() == nil, "the dead holder's unlock failed")
+			_, err = dst.LockFile(fsys, "LOCK")
+			check(errors.Is(err, dst.ErrLocked), "the dead holder's unlock released the new holder's lock: %v", err)
+			check(newUnlock() == nil, "unlock failed")
+			_, err = dst.LockFile(fsys, "LOCK")
+			check(err == nil, "after unlock: %v", err)
+		})
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		if failure != nil {
+			t.Fatalf("kill %v: %v", kill, failure)
+		}
+	}
+}

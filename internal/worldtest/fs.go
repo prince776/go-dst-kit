@@ -26,6 +26,7 @@ var FSChecks = []Check{
 	{"fs/no-escape", fsNoEscape},
 	{"fs/sync", fsSync},
 	{"fs/name-as-opened", fsName},
+	{"fs/lock", fsLock},
 }
 
 func must(err error) {
@@ -292,4 +293,27 @@ func fsName(w *dst.World) {
 	}
 	must(f.Close())
 	must(fsys.Remove(f.Name()))
+}
+
+// fsLock: an advisory lock is exclusive, also within one process, until
+// it is released ([lock-exclusive]).
+func fsLock(w *dst.World) {
+	fsys := w.FS()
+	unlock, err := dst.LockFile(fsys, "LOCK")
+	must(err)
+	if _, err := fsys.Stat("LOCK"); err != nil {
+		failf("LockFile didn't create its file: %v", err)
+	}
+	if _, err := dst.LockFile(fsys, "LOCK"); !errors.Is(err, dst.ErrLocked) {
+		failf("a second LockFile while held: %v, want ErrLocked", err)
+	}
+	unlock2, err := dst.LockFile(fsys, "OTHER")
+	must(err) // another file's lock is independent
+	must(unlock2())
+	must(unlock())
+	unlock, err = dst.LockFile(fsys, "LOCK")
+	if err != nil {
+		failf("LockFile after unlock: %v", err)
+	}
+	must(unlock())
 }

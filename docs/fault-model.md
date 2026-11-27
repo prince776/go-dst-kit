@@ -93,6 +93,9 @@ journaling filesystems allow, chosen by the seed:
 - After a kill, nothing is lost: the page cache survives, so every
   completed write and directory change is still visible, and still
   unsynced.
+- Advisory locks (`dst.LockFile`) are exclusive, even within one process,
+  and a crash or a kill releases them, as the death of the process
+  holding a `flock(2)` does.
 - `ReadDir` on an open directory returns entries in a seeded order, like
   real filesystems; `FS.ReadDir` sorts, like `os.ReadDir`.
 
