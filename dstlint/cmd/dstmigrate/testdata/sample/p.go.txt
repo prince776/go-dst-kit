@@ -35,7 +35,11 @@ func (p *Pool) run(out chan<- int) int {
 		case <-time.After(time.Second):
 			break
 		case s := <-p.notes:
-			_ = s
+			select { // a nested select
+			case p.jobs <- len(s):
+			case <-p.done:
+				return n
+			}
 		case out <- -1:
 		default:
 			time.Sleep(time.Millisecond)

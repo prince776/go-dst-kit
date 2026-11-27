@@ -42,6 +42,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
@@ -83,6 +84,9 @@ func main() {
 				printer.Fprint(&raw, pkg.Fset, f)
 				fatal(fmt.Errorf("%s: %w\n%s", name, err, raw.String()))
 			}
+			// Plans were made after each select's children (inner first);
+			// the text pass counts in source order (outer first).
+			sort.Slice(m.plans, func(i, j int) bool { return m.plans[i].pos < m.plans[j].pos })
 			spliced, err := spliceSelects(name, buf.Bytes(), m.plans)
 			if err != nil {
 				fatal(fmt.Errorf("%s: %w", name, err))
@@ -396,12 +400,13 @@ func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 // can't get from the syntax alone: the World and the cases' element
 // types (from the original type information).
 type selectPlan struct {
+	pos   token.Pos
 	world string
 	elems []string // per case: the received element type ("" for send and default)
 }
 
 func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
-	p := selectPlan{world: m.world}
+	p := selectPlan{pos: s.Pos(), world: m.world}
 	for _, cl := range s.Body.List {
 		elem := ""
 		switch comm := cl.(*ast.CommClause).Comm.(type) {
@@ -433,8 +438,8 @@ func spliceSelects(name string, src []byte, plans []selectPlan) ([]byte, error) 
 			}
 			return true
 		})
-		if len(sels) != len(plans) {
-			return nil, fmt.Errorf("%d selects in the rewritten file, %d planned", len(sels), len(plans))
+		if len(sels) != i+1 { // the ones after i are spliced already
+			return nil, fmt.Errorf("%d selects left in the rewritten file, want %d (of %d planned)", len(sels), i+1, len(plans))
 		}
 		off := func(p token.Pos) int { return fset.Position(p).Offset }
 		text := func(n ast.Node) string { return string(src[off(n.Pos()):off(n.End())]) }
