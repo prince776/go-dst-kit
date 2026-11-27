@@ -72,6 +72,7 @@ package simfs
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"maps"
@@ -641,6 +642,101 @@ func (f *FS) makeDurable(o *op) {
 	}
 }
 
+// describeLoss names what a power loss dropped, for the event log: per
+// file, its lost writes and truncates and whether one tore; then the lost
+// directory operations. Names are paths in the live tree (a file no longer
+// linked anywhere shows as its inode). It draws nothing from the seed.
+func (f *FS) describeLoss(lostOps []*op, tornOp *op) string {
+	paths := map[*inode]string{f.root: "."}
+	var walk func(d *inode, prefix string)
+	walk = func(d *inode, prefix string) {
+		for _, name := range slices.Sorted(maps.Keys(d.liveDents)) {
+			c := d.liveDents[name]
+			if _, ok := paths[c]; ok {
+				continue
+			}
+			p := name
+			if prefix != "" {
+				p = prefix + "/" + name
+			}
+			paths[c] = p
+			if c.dir {
+				walk(c, p)
+			}
+		}
+	}
+	walk(f.root, "")
+	path := func(x *inode) string {
+		if p, ok := paths[x]; ok {
+			return p
+		}
+		return fmt.Sprintf("(unlinked inode %d)", x.id)
+	}
+	in := func(d *inode, name string) string {
+		if d == f.root {
+			return name
+		}
+		return path(d) + "/" + name
+	}
+	type fileLoss struct {
+		writes, truncates int
+		torn              bool
+	}
+	byFile := map[*inode]*fileLoss{}
+	var order []*inode
+	var dirOps []string
+	note := func(ino *inode) *fileLoss {
+		if byFile[ino] == nil {
+			byFile[ino] = &fileLoss{}
+			order = append(order, ino)
+		}
+		return byFile[ino]
+	}
+	for _, o := range lostOps {
+		switch o.kind {
+		case opWrite:
+			note(o.ino).writes++
+		case opTruncate:
+			note(o.ino).truncates++
+		case opCreate:
+			dirOps = append(dirOps, "create "+in(o.dir, o.name))
+		case opRemove:
+			dirOps = append(dirOps, "remove "+in(o.dir, o.name))
+		case opRename:
+			dirOps = append(dirOps, "rename "+in(o.dir, o.name)+" -> "+in(o.dir2, o.name2))
+		}
+	}
+	if tornOp != nil {
+		note(tornOp.ino).torn = true
+	}
+	var parts []string
+	for _, ino := range order {
+		l := byFile[ino]
+		var what []string
+		if l.writes > 0 {
+			what = append(what, plural(l.writes, "write"))
+		}
+		if l.truncates > 0 {
+			what = append(what, plural(l.truncates, "truncate"))
+		}
+		if l.torn {
+			what = append(what, "one torn")
+		}
+		parts = append(parts, path(ino)+" ("+strings.Join(what, ", ")+")")
+	}
+	if len(dirOps) > 0 {
+		parts = append(parts, "directory: "+strings.Join(dirOps, "; "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func plural(n int, what string) string {
+	if n == 1 {
+		return "1 " + what
+	}
+	return fmt.Sprintf("%d %ss", n, what)
+}
+
 // crash empties the page cache: a seeded, legal subset of the pending
 // operations survives, and every open handle goes stale. After a kill
 // (the process died, the host didn't) the page cache survives: handles go
@@ -655,11 +751,13 @@ func (f *FS) crash() {
 	}
 	lost, torn := 0, false
 	survive := func(o *op) { f.makeDurable(o) }
+	var lostOps []*op // for the log: what was lost
+	var tornOp *op
 	tear := func(o *op) {
 		if o.kind == opWrite && len(o.data) > 1 && f.rng.Float64() < f.opts.TornWriteProb {
 			n := 1 + f.rng.IntN(len(o.data)-1)
 			o.ino.durable = writeAt(o.ino.durable, o.off, o.data[:n])
-			torn = true
+			torn, tornOp = true, o
 		}
 	}
 	if f.opts.Ordered {
@@ -671,6 +769,7 @@ func (f *FS) crash() {
 			tear(f.pending[k])
 		}
 		lost = len(f.pending) - k
+		lostOps = f.pending[k:]
 	} else {
 		// Directory journal: a prefix.
 		var meta []*op
@@ -691,6 +790,7 @@ func (f *FS) crash() {
 			survive(o)
 		}
 		lost += len(meta) - k
+		lostOps = append(lostOps, meta[k:]...)
 		// Each file's writes: an independent prefix, maybe torn.
 		for _, ino := range files {
 			ops := data[ino]
@@ -702,11 +802,19 @@ func (f *FS) crash() {
 				tear(ops[k])
 			}
 			lost += len(ops) - k
+			lostOps = append(lostOps, ops[k:]...)
 		}
+	}
+	var lossLine string
+	if f.s.Verbose() && (lost > 0 || torn) {
+		lossLine = f.describeLoss(lostOps, tornOp) // names from the live tree, before it resets
 	}
 	f.pending = nil
 	f.resetLive(f.root, map[*inode]bool{})
 	f.s.Logf("disk of %s crashed: %d unsynced operations lost, torn=%v", f.m.Name, lost, torn)
+	if lossLine != "" {
+		f.s.Logf("disk of %s lost: %s", f.m.Name, lossLine)
+	}
 	if f.OnCrashLoss != nil && (lost > 0 || torn) {
 		f.OnCrashLoss(lost, torn)
 	}

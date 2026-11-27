@@ -449,6 +449,55 @@ fsync); twophase gave up logging a decision (the transaction stayed in
 flight and its participants in doubt for good) and left a failed begin
 in flight. Harnesses now retry startups on ENOSPC and EIO.
 
+**Fail-stop panics (2026-11-27):** `Harness.OnPanic(isFailStop)`. raft
+panics on purpose when it can't persist its term or vote; with disk
+errors that is the process dying, not a test failure. A panic the
+predicate accepts kills its machine's process (Kill semantics: the page
+cache survives) and restarts it after the downtime; any other panic, any
+without OnPanic, and any on a NeverCrash machine still fails the run. Law
+[panic-fail-stop], broken by hand (no kill: the machine kept running and
+never restarted).
+
+**Power-loss log names files (2026-11-28; Prince approved):** after a
+power loss the event log says what was dropped, by path: per file its
+lost writes and truncates and whether one tore, then the lost directory
+operations (`disk of n1 lost: raft.log (3 writes, one torn); directory:
+create snap/x/meta.json`). Proposed by the rosedb adoption (it needed a
+local patch to find finding 7's mechanism); it would have shortened raft's
+6.12 too. Only with `-dst.v`; draws nothing from the seed.
+
+**rosedb (concluded 2026-11-28, prince776/rosedb `dst`, DST.md):** a
+subagent's adoption on rosedb and its WAL. 11 bugs, 7 not reported
+before; 4 reproduced on unmodified upstream with plain tests on the real
+filesystem (an unfinished merge installed: 500 of 1000 keys wrong; Close
+racing a merge: every key lost; a torn tail: Open fails or panics;
+`BytesPerSync` ignored: 0 fsyncs over 256KB), fixes on `fix/*`. Disk
+errors found three of them (fsyncgate, a half-built index served after a
+failed merge, a re-run merge install deleting its own segments). Blind
+benchmark against all rosedb and wal issues: of the reported bugs it
+missed, two were outside the workload, one outside the fault model (an
+ignored rename failure), one a torn record spanning blocks it exercised
+but missed, and data races (one goroutine runs at a time: out of reach).
+Library pieces it brought: a file's Name in the real World, a goroutine
+identity check cheap enough for every call, kills that keep the page cache
+and close the process's sockets, flock-style locks. Lessons for adopters:
+anything in a start function that is a scheduling point (a directory
+listing, a lock) moves the whole run, so gate debug logging or log after
+the crash; and a fault model of an engine's knob (BytesPerSync) must
+follow the engine's real accounting, or it overclaims bugs.
+
+**memberlist (in progress, 2026-11-27):** merged from `adopt/memberlist`:
+UDP on gray links (slow links delay datagrams, lossy ones lose them, from
+their own stream), UDP blackholes (`LinkOptions.UDPBlockShare`, in a
+quarter of Gray seeds), the fault timeline (`m.Downtime()`, `m.Pauses()`,
+`m.Slow()`, `h.Cut`, `h.Link`, law [timeline-is-faithful]), and machines
+named by IP literals getting the net package's address types ([ip-hosts]).
+dstmigrate learned nil channels in composite literals and parameters,
+math/rand/v2's N, crypto/rand.Reader.
+
+**pebble (started 2026-11-28):** cockroachdb/pebble at 4b082f41, a
+subagent, same method; blind benchmark held outside the agents' reach.
+
 ## Exploration plan (approved by Prince, 2026-11-26)
 
 Goal: find more bugs, measurably. Targets: llm-tor (request/response

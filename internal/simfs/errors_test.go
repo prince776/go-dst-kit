@@ -197,3 +197,49 @@ func TestIOErrorDoesNothing(t *testing.T) {
 	}
 	t.Logf("50 seeds: %d write errors and %d read errors retried", werr, rerr)
 }
+
+// TestPowerLossNamesFiles: the event log line after a power loss names
+// each file that lost or tore writes, and the directory operations lost,
+// by path; it names nothing that was synced. Fails if the line is missing,
+// names a synced file, or misses a lost one. Not a law: a debugging aid
+// (finding where a crash cut is the first question after a failure).
+func TestPowerLossNamesFiles(t *testing.T) {
+	var lines []string
+	sim := simworld.New(simworld.Options{Seed: 1, Logf: func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}})
+	disk := sim.AddMachine("disk", simworld.MachineOptions{Disk: simfs.Options{TornWriteProb: 1}})
+	res := sim.Run(func(*dst.World) {
+		fsys := disk.World.FS()
+		fsys.MkdirAll("d", 0o755)
+		dst.SyncDir(fsys, ".")
+		synced, _ := fsys.OpenFile("d/synced", os.O_CREATE|os.O_RDWR, 0o644)
+		synced.Write([]byte("kept"))
+		synced.Sync()
+		dst.SyncDir(fsys, "d")
+		// Unsynced: writes to two files, and a create.
+		synced.Write([]byte(strings.Repeat("x", 10)))
+		other, _ := fsys.OpenFile("d/new", os.O_CREATE|os.O_RDWR, 0o644)
+		other.Write([]byte(strings.Repeat("y", 10)))
+		disk.Crash()
+		sim.S.Restart(disk.M)
+	})
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	var lost string
+	for _, l := range lines {
+		if strings.Contains(l, "disk of disk lost:") {
+			lost = l
+		}
+	}
+	if lost == "" {
+		t.Fatalf("no line naming what the power loss dropped; log:\n%s", strings.Join(lines, "\n"))
+	}
+	for _, want := range []string{"d/synced (", "create d/new"} {
+		if !strings.Contains(lost, want) {
+			t.Errorf("the loss line doesn't name %q: %s", want, lost)
+		}
+	}
+	t.Logf("%s", lost)
+}
