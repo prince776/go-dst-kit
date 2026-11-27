@@ -118,6 +118,17 @@ func (p *Pool) jitter(d time.Duration) time.Duration { return mrand.N(d) }
 
 func (p *Pool) nonce(b []byte) { io.ReadFull(crand.Reader, b) }
 
+// handOff receives a channel over a channel in a select: the callback's
+// value is a dst.Chan too.
+func (p *Pool) handOff(chs chan chan int) int {
+	select {
+	case c := <-chs:
+		return <-c
+	default:
+		return 0
+	}
+}
+
 // fanOut uses WaitGroup.Go (Go 1.25): it must get the World.
 func (p *Pool) fanOut() {
 	var wg sync.WaitGroup

@@ -240,7 +240,26 @@ func (m *migrator) warn(n ast.Node, msg string) {
 }
 
 func (m *migrator) chanElem(e ast.Expr) string {
-	return types.TypeString(m.info.TypeOf(e).Underlying().(*types.Chan).Elem(), m.qualifier)
+	return m.typeString(m.info.TypeOf(e).Underlying().(*types.Chan).Elem())
+}
+
+// typeString prints t as the migrated code spells it: a channel type
+// inside it (a channel of channels, a slice of them) is a dst.Chan, as the
+// rewritten declarations say.
+func (m *migrator) typeString(t types.Type) string {
+	switch t := t.(type) {
+	case *types.Chan:
+		return "dst.Chan[" + m.typeString(t.Elem()) + "]"
+	case *types.Pointer:
+		return "*" + m.typeString(t.Elem())
+	case *types.Slice:
+		return "[]" + m.typeString(t.Elem())
+	case *types.Array:
+		return fmt.Sprintf("[%d]%s", t.Len(), m.typeString(t.Elem()))
+	case *types.Map:
+		return "map[" + m.typeString(t.Key()) + "]" + m.typeString(t.Elem())
+	}
+	return types.TypeString(t, m.qualifier)
 }
 
 // qualifier names types as code in the migrated package would: its own
@@ -442,7 +461,7 @@ func (m *migrator) decl(d ast.Node) {
 				for i, r := range n.Results {
 					if i < res.Len() && isNil(r) {
 						if ch, ok := res.At(i).Type().Underlying().(*types.Chan); ok {
-							n.Results[i] = &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}}
+							n.Results[i] = &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.typeString(ch.Elem()))}}}
 							setPos(n, n.Pos())
 							m.changes++
 						}
@@ -615,7 +634,7 @@ func (m *migrator) nilChanArgs(n *ast.CallExpr) {
 			continue
 		}
 		if ch, ok := pt.Underlying().(*types.Chan); ok {
-			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.typeString(ch.Elem()))}}
 			setPos(z, a.Pos()) // where nil was, so comments stay put
 			n.Args[i] = z
 			m.changes++
@@ -667,7 +686,7 @@ func (m *migrator) nilChanElems(n *ast.CompositeLit) {
 			continue
 		}
 		if ch, ok := ft.Underlying().(*types.Chan); ok {
-			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.typeString(ch.Elem()))}}
 			setPos(z, (*val).Pos())
 			*val = z
 			m.changes++
