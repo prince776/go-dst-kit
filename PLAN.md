@@ -602,6 +602,13 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
+- **Machine.Restart from a workload goroutine** (found on raft,
+  2026-11-27): the restarted machine's goroutines descend from the
+  caller, so the harness counts a long-running node as workload that
+  must finish ("workload goroutines stuck"). A machine's start should
+  have no parent task wherever Restart is called from. Workaround:
+  restart from `w.AfterFunc`.
+
 - ~~`Rand.CryptoRead`~~ **done**: `Rand.Read` became `CryptoRead`
   (crypto/rand in the real World), `dst.CryptoReader(w)` is the
   `io.Reader` for libraries, dstlint maps `crypto/rand.Read`/`Reader`/
