@@ -161,6 +161,7 @@ type WaitGroup struct {
 	wg      sync.WaitGroup
 	n       atomic.Int64
 	waiters atomic.Int32
+	s       atomic.Pointer[sched.Scheduler] // the waiters' scheduler
 }
 
 // Add is (*sync.WaitGroup).Add.
@@ -173,6 +174,12 @@ func (g *WaitGroup) Add(delta int) {
 	if n == 0 && g.waiters.Load() > 0 {
 		if t := sched.CurrentTask(); t != nil {
 			t.Sched().WakeAll(g)
+		} else if s := g.s.Load(); s != nil {
+			// Simulated goroutines wait, and this goroutine isn't one of
+			// theirs: their wake-up would be lost. Current reports the
+			// misuse and doesn't return here.
+			s.Current()
+			s.WakeAll(g)
 		}
 	}
 }
@@ -197,6 +204,7 @@ func (g *WaitGroup) Wait() {
 	}
 	if t := sched.CurrentTask(); t != nil {
 		s := t.Sched()
+		g.s.Store(s)
 		for g.n.Load() != 0 {
 			g.waiters.Add(1)
 			s.ParkOn(g, "WaitGroup.Wait")

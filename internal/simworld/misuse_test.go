@@ -7,6 +7,7 @@ package simworld_test
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,6 +47,36 @@ func TestRawGoroutineMisuse(t *testing.T) {
 	}
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("took %v: the run waited for the watchdog", d)
+	}
+}
+
+// Verifies: [misuse-reported] (a WaitGroup's waiters)
+// Fails if: a raw goroutine whose Done should wake a simulated
+// WaitGroup.Wait goes unreported (the waiter stays parked: the run ends
+// in a deadlock instead).
+func TestRawGoroutineWaitGroupMisuse(t *testing.T) {
+	r := simworld.Run(simworld.Options{Seed: 1}, func(w *dst.World) {
+		var wg dst.WaitGroup
+		var parked atomic.Bool
+		wg.Add(1)
+		go func() { // a goroutine of the real World, as a nil World gives
+			for !parked.Load() {
+				runtime.Gosched()
+			}
+			time.Sleep(5 * time.Millisecond) // let the waiter park
+			wg.Done()
+		}()
+		w.Go(func() { // keeps the run going meanwhile
+			for range 200000 {
+				w.Sleep(time.Microsecond)
+			}
+		})
+		parked.Store(true)
+		wg.Wait()
+	})
+	var m *sched.MisuseError
+	if !errors.As(r.Err, &m) || !strings.Contains(m.Stack, "misuse_test.go") {
+		t.Fatalf("got %v", r.Err)
 	}
 }
 
