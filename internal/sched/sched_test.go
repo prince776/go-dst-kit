@@ -230,3 +230,46 @@ func TestOneAtATime(t *testing.T) {
 		t.Fatal("the detector never saw real goroutines overlap")
 	}
 }
+
+// Verifies: [registry-forgets-finished] with real tasks: after tasks
+// finish, raw goroutines and new tasks started in their place are never
+// identified as one of them (the runtime reuses finished goroutines' g).
+// Fails if: a task's registry entry outlives its goroutine (check by
+// hand: skip the Delete in unregister).
+func TestFinishedTasksAreForgotten(t *testing.T) {
+	for seed := uint64(1); seed <= 20; seed++ {
+		r := simworld.Run(simworld.Options{Seed: seed}, func(w *dst.World) {
+			finished := map[*sched.Task]bool{}
+			var wg dst.WaitGroup
+			for range 50 {
+				wg.Add(1)
+				w.Go(func() {
+					defer wg.Done()
+					finished[sched.CurrentTask()] = true
+				})
+			}
+			wg.Wait()
+			w.Sleep(time.Millisecond) // the tasks' goroutines exit
+			for range 200 {
+				done := make(chan *sched.Task)
+				go func() { done <- sched.CurrentTask() }() // raw: no World operation
+				if got := <-done; got != nil {
+					t.Errorf("seed %d: a raw goroutine was identified as task %v", seed, got)
+				}
+			}
+			for range 50 {
+				wg.Add(1)
+				w.Go(func() {
+					defer wg.Done()
+					if cur := sched.CurrentTask(); finished[cur] {
+						t.Errorf("seed %d: a new task was identified as finished task %v", seed, cur)
+					}
+				})
+			}
+			wg.Wait()
+		})
+		if r.Err != nil {
+			t.Fatalf("seed %d: %v", seed, r.Err)
+		}
+	}
+}
