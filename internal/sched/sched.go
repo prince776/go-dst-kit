@@ -110,6 +110,11 @@ type stream struct {
 type Scheduler struct {
 	// Points, if set, decides dst.Inject and World.Buggify calls.
 	Points *points.Registry
+	// OnPanic, if set, is asked about each panic in a task on a machine:
+	// true means the panic is the process dying (fail-stop, as a real
+	// panic kills a Go process), so the machine is killed (Kill) rather
+	// than the run failed. It runs with the baton held.
+	OnPanic func(t *Task, v any) bool
 
 	opts Options
 	rng  *rand.Rand
@@ -560,7 +565,13 @@ func (t *Task) main(fn func()) {
 		unregister(t)
 		if r := recover(); r != nil {
 			if _, ok := r.(killSignal); !ok {
-				t.s.Fail(&PanicError{Task: t.String(), Value: r, Stack: userStack()})
+				if t.Machine != nil && t.s.OnPanic != nil && t.s.OnPanic(t, r) {
+					t.state = finished // this goroutine is ending already
+					t.s.Logf("goroutine %s panicked, killing its process: %v", t, r)
+					t.s.Kill(t.Machine)
+				} else {
+					t.s.Fail(&PanicError{Task: t.String(), Value: r, Stack: userStack()})
+				}
 			}
 		}
 		t.state = finished
@@ -819,8 +830,10 @@ func (s *Scheduler) crash(m *Machine, kill bool) {
 	for _, fn := range m.onCrash {
 		fn()
 	}
-	if s.cur != nil && s.cur.Machine == m {
+	if s.cur != nil && s.cur.Machine == m && s.cur.state != finished {
 		// Stop here without unwinding; Shutdown releases the goroutine.
+		// (A finished task is a panic killing its own process: it
+		// returns to its deferred cleanup.)
 		t := s.cur
 		t.state = parked
 		t.blocked = "crashed"

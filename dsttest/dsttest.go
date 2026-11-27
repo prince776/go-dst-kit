@@ -80,6 +80,10 @@
 //   - [kill-keeps-schedule] Turning Kill on changes which crashes keep the
 //     page cache, not when crashes happen or to which machine; Kill alone
 //     only kills; and a killed machine finds everything it wrote.
+//   - [panic-fail-stop] With OnPanic, a panic it accepts kills only its
+//     machine's process (its other goroutines stop; its disk keeps the
+//     page cache) and the machine restarts; a panic it rejects, any panic
+//     without OnPanic, and any panic on a NeverCrash machine fails the run.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -366,6 +370,7 @@ type Harness struct {
 	opts     Options
 	canLose  func(*Machine) bool // OnLoss
 	lost     func(*Machine)
+	onPanic  func(v any) bool // OnPanic
 	swarm    Swarm
 	phase    Phase
 	machines []*Machine
@@ -548,6 +553,39 @@ func (m *Machine) Lost() bool { return m.lost }
 // which machines a loss may take.
 func (h *Harness) OnLoss(canLose func(m *Machine) bool, lost func(m *Machine)) {
 	h.canLose, h.lost = canLose, lost
+}
+
+// OnPanic says which panics are a process dying on purpose (fail-stop): a
+// system that panics when its disk fails, say, as hashicorp/raft does when
+// it can't save its term. A panic in a machine's goroutine for which
+// isFailStop returns true kills that machine's process (as a real panic
+// kills a Go process; its disk keeps the page cache) and restarts it after
+// a downtime, as a supervisor would. Any other panic, and any panic on a
+// NeverCrash machine, fails the run as before: keep isFailStop narrow, so
+// a real bug (a nil dereference) still fails.
+func (h *Harness) OnPanic(isFailStop func(v any) bool) { h.onPanic = isFailStop }
+
+// panicked is the scheduler's OnPanic: whether t's panic kills its process.
+func (h *Harness) panicked(t *sched.Task, v any) bool {
+	if h.onPanic == nil {
+		return false
+	}
+	i := slices.IndexFunc(h.machines, func(m *Machine) bool { return m.m.M == t.Machine })
+	if i < 0 || h.machines[i].neverCrash || h.machines[i].lost || !h.onPanic(v) {
+		return false
+	}
+	m := h.machines[i]
+	h.Logf("a panic killed the process of %s: %v", m.Name(), v)
+	h.Sometimes("a process died of a panic")
+	down := h.swarm.Downtime
+	if down <= 0 {
+		down = 100 * time.Millisecond
+	}
+	h.sim.S.SpawnRoot(h.test.M, "restart after a panic", func() {
+		h.test.World.Sleep(down)
+		m.Restart()
+	})
+	return true
 }
 
 // Machines lists the machines.
@@ -988,6 +1026,7 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 	h.points = newRegistry(seed, opts, swarm, func(name string) { h.cover[name]++ }, h.Logf)
 	h.points.NewRand = h.sim.S.Rand // per-call decisions fork with the run
 	h.sim.S.Points = h.points
+	h.sim.S.OnPanic = h.panicked
 	h.test = h.sim.Machine("test")
 	r := h.sim.RunOn(h.test, func(w *dst.World) {
 		setup(h)
