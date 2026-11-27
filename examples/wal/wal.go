@@ -3,7 +3,10 @@
 // dst.World's filesystem, and an example of what deterministic simulation
 // finds in storage code.
 //
-// A record is a 4-byte length, a 4-byte CRC-32 of the data, and the data.
+// A record is a 4-byte length, a 4-byte CRC-32 of the length and the
+// data, and the data. The checksum covers the length so that zeros (a
+// file whose size reached the disk before its data did) never read as a
+// valid record: the CRC-32 of empty data is 0.
 // Append returns only once the record is durable. Open recovers: it reads
 // records until the first incomplete or corrupt one (a write torn by a
 // crash), truncates the file there, and continues after it.
@@ -60,6 +63,10 @@ type Bugs struct {
 	// failed fsync (whose data is gone for good) it follows a hole, so
 	// recovery stops there and loses records acknowledged later.
 	NoRepairAfterError bool
+	// ChecksumDataOnly checksums the data alone, not the length: zeros
+	// past the data written back (a crash that kept the file's size but
+	// not its last pages) read as valid empty records.
+	ChecksumDataOnly bool
 }
 
 // Log is an open write-ahead log. It is not safe for concurrent use.
@@ -98,7 +105,7 @@ func Open(fsys dst.FS, name string, bugs Bugs) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, valid := parse(b)
+	records, valid := parse(b, bugs)
 	l := &Log{f: f, bugs: bugs, records: records, size: valid, TornTail: valid < int64(len(b))}
 	if l.TornTail && !bugs.NoTruncateTornTail {
 		if err := f.Truncate(valid); err != nil {
@@ -121,7 +128,7 @@ func Open(fsys dst.FS, name string, bugs Bugs) (*Log, error) {
 
 // parse returns the complete, intact records at the start of b and the
 // length of that prefix.
-func parse(b []byte) ([][]byte, int64) {
+func parse(b []byte, bugs Bugs) ([][]byte, int64) {
 	var out [][]byte
 	off := 0
 	for len(b)-off >= header {
@@ -131,7 +138,7 @@ func parse(b []byte) ([][]byte, int64) {
 			break // torn: the data didn't all make it
 		}
 		data := b[off+header : off+header+n]
-		if crc32.ChecksumIEEE(data) != sum {
+		if bugs.checksum(b[off:off+4], data) != sum {
 			break // torn or corrupt
 		}
 		out = append(out, append([]byte(nil), data...))
@@ -140,13 +147,25 @@ func parse(b []byte) ([][]byte, int64) {
 	return out, int64(off)
 }
 
+// checksum is the CRC-32 of a record's length field and its data.
+func (bugs Bugs) checksum(length, data []byte) uint32 {
+	if bugs.ChecksumDataOnly {
+		return crc32.ChecksumIEEE(data)
+	}
+	return crc32.Update(crc32.ChecksumIEEE(length), crc32.IEEETable, data)
+}
+
 // Read returns the records in file name without changing it.
-func Read(fsys dst.FS, name string) ([][]byte, error) {
+func Read(fsys dst.FS, name string) ([][]byte, error) { return ReadWith(fsys, name, Bugs{}) }
+
+// ReadWith is Read for a log written with bugs (whose record format may
+// differ).
+func ReadWith(fsys dst.FS, name string, bugs Bugs) ([][]byte, error) {
 	b, err := dst.ReadFile(fsys, name)
 	if err != nil {
 		return nil, err
 	}
-	records, _ := parse(b)
+	records, _ := parse(b, bugs)
 	return records, nil
 }
 
@@ -159,7 +178,7 @@ func (l *Log) Append(data []byte) (int, error) {
 	}
 	rec := make([]byte, header+len(data))
 	binary.BigEndian.PutUint32(rec, uint32(len(data)))
-	binary.BigEndian.PutUint32(rec[4:], crc32.ChecksumIEEE(data))
+	binary.BigEndian.PutUint32(rec[4:], l.bugs.checksum(rec[:4], data))
 	copy(rec[header:], data)
 	if _, err := l.f.Write(rec); err != nil {
 		return 0, l.failed(fmt.Errorf("wal: append: %w", err))

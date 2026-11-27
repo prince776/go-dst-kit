@@ -95,6 +95,16 @@ journaling filesystems allow, chosen by the seed:
   - **ordered** (like ext4's default `data=ordered`): writes reach the disk
     in issue order, and any `Sync` commits everything before it.
 - The first lost write of a file may survive in part (torn).
+- In harsh mode, a crash may instead write a file's unsynced data back
+  out of order, page by page (4KB): each page the lost writes touched
+  holds either its last written content or what was durable, and the
+  file's size is either the durable one or the last written one. So a
+  file can end in zeros past what reached the disk, and a page that
+  didn't reach it shows the file's older content (in a reused or
+  recycled file, the old records). Files with an unsynced truncate keep
+  the prefix rule. Two thirds of the seeds with disk faults draw a chance
+  per crash and file (`Swarm.DiskHoleProb`), from a stream of its own:
+  every other draw of a seed is as it was without holes.
 - Power can fail inside a `Write`, `Sync` or directory operation.
 - Files opened before a crash return `ESTALE`.
 - After a kill, nothing is lost: the page cache survives, so every

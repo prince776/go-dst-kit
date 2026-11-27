@@ -86,7 +86,7 @@ func harness(bugs wal.Bugs) func(h *dsttest.Harness) {
 		})
 		h.Final("acked records survive a last crash", func(w *dst.World) error {
 			db.Crash()
-			got, err := wal.Read(db.World().FS(), "data/wal")
+			got, err := wal.ReadWith(db.World().FS(), "data/wal", bugs)
 			if err != nil && !errors.Is(err, fs.ErrNotExist) { // a vanished log is an empty one
 				return fmt.Errorf("read: %v", err)
 			}
@@ -116,6 +116,7 @@ func TestPlantedBugs(t *testing.T) {
 		"NoFsync":            {NoFsync: true},
 		"NoDirSync":          {NoDirSync: true},
 		"NoTruncateTornTail": {NoTruncateTornTail: true},
+		"ChecksumDataOnly":   {ChecksumDataOnly: true}, // found only with holes (out-of-order write-back)
 	} {
 		t.Run(name, func(t *testing.T) {
 			o := opts

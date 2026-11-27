@@ -99,11 +99,18 @@ func TestFullStaysFull(t *testing.T) {
 // too; another file's writes are lost with it; or a Sync that succeeded
 // loses data. Over many seeds both outcomes must occur (non-vacuous), and
 // a retried Sync must succeed while the data is still lost (the trap the
-// law exists for).
+// law exists for). Half the seeds write the files back with holes, after
+// a further unsynced write: the dropped data must not come back through
+// a page the later write touched.
 func TestFsyncErrorForgets(t *testing.T) {
 	failed, kept, retriedLost := 0, 0, 0
 	for seed := range uint64(200) {
-		onDisk(t, seed, simfs.Options{SyncErrProb: 0.5}, func(fsys dst.FS, disk *simworld.Machine, powerLoss func(), check func(bool, string, ...any)) {
+		holes := seed%2 == 1
+		opts := simfs.Options{SyncErrProb: 0.5}
+		if holes {
+			opts.HoleProb = 1
+		}
+		onDisk(t, seed, opts, func(fsys dst.FS, disk *simworld.Machine, powerLoss func(), check func(bool, string, ...any)) {
 			files := []string{"a", "b"}
 			synced := map[string]bool{}
 			for _, name := range files {
@@ -124,6 +131,10 @@ func TestFsyncErrorForgets(t *testing.T) {
 					failed++
 					check(readAll(fsys, name) == name+"-data", "%s isn't readable after its failed Sync: %q", name, readAll(fsys, name))
 					check(f.Sync() == nil, "the Sync after a failed one failed too")
+					if holes {
+						_, err := f.Write([]byte("-more")) // unsynced, on the same page
+						check(err == nil, "write %s: %v", name, err)
+					}
 				default:
 					check(false, "sync %s: %v", name, err)
 				}
@@ -137,7 +148,8 @@ func TestFsyncErrorForgets(t *testing.T) {
 					check(got == name+"-data", "%s's Sync succeeded but a power loss left %q", name, got)
 				} else {
 					retriedLost++
-					check(got == "", "%s's Sync failed (then a retry succeeded) but its writes survived a power loss: %q", name, got)
+					check(!strings.Contains(got, name+"-data") && strings.Trim(strings.TrimSuffix(got, "-more"), "\x00") == "",
+						"%s's Sync failed (then a retry succeeded) but its writes survived a power loss: %q", name, got)
 				}
 			}
 		})

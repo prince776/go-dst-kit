@@ -17,6 +17,14 @@
 //     and any Sync commits everything before it, like a journal commit on
 //     ext4's default data=ordered.
 //   - The first lost write of a file may survive in part (torn).
+//   - With HoleProb, in harsh mode, a file's unsynced writes may instead
+//     reach the disk out of order, page by page: after a crash each page
+//     they touched holds either its last written content or what was
+//     durable, independently of the other pages, and the file's size is
+//     either the durable one or the last written one (so a size past the
+//     data written reads as zeros, and a page not written back shows the
+//     file's older content, as in a reused file). Files with an unsynced
+//     truncate keep the prefix rule.
 //   - Power can fail inside a Write, Sync or directory operation.
 //   - Open files go stale after a crash.
 //   - A kill (the process dies, the host stays up) keeps the page cache:
@@ -52,6 +60,10 @@
 //   - [crash-explores] Every state the rules allow happens for some seed.
 //   - [sync-is-durable] Data covered by a completed Sync, and names covered
 //     by a completed directory Sync, survive every crash.
+//   - [holes-own-stream] Hole decisions draw only from a stream of their
+//     own: a disk whose hole draws all come out "no" crashes exactly as a
+//     disk without holes, so turning holes on leaves every other draw as
+//     it was.
 //   - [kill-keeps-cache] After a kill, every completed write and directory
 //     change is visible, and none became durable: a later power loss may
 //     still lose any of it.
@@ -108,6 +120,12 @@ type Options struct {
 	// Sync of a file with unsynced writes, a Write, or a Read fails with
 	// EIO (see the package doc).
 	SyncErrProb, WriteErrProb, ReadErrProb float64
+	// HoleProb is the chance, per crash and file with unsynced writes (in
+	// harsh mode), that the file is written back out of order, page by
+	// page (see the package doc).
+	HoleProb float64
+	// PageSize is the page size for holes (0: 4096). Tests make it small.
+	PageSize int
 }
 
 // ErrStale is returned by a file handle opened before a crash.
@@ -119,6 +137,7 @@ type FS struct {
 	s       *sched.Scheduler
 	m       *sched.Machine
 	rng     *rand.Rand
+	holes   *rand.Rand // hole decisions only ([holes-own-stream])
 	root    *inode
 	gen     int // incremented by each crash; older handles are stale
 	nextIno int
@@ -129,6 +148,9 @@ type FS struct {
 	// OnCrashLoss, if set, is told after each crash how many unsynced
 	// operations were lost and whether a write was torn (for coverage).
 	OnCrashLoss func(lost int, torn bool)
+	// OnHoles, if set, is told after a crash that left a file with holes
+	// (for coverage).
+	OnHoles func()
 	// OnError, if set, is told of each injected error: "full" (an ENOSPC),
 	// "sync", "write" or "read" (an EIO). For coverage.
 	OnError func(kind string)
@@ -184,7 +206,7 @@ func (o *op) touches(x *inode) bool {
 // New returns an empty disk for machine m. Its root directory exists and
 // is durable.
 func New(s *sched.Scheduler, m *sched.Machine, opts Options) *FS {
-	f := &FS{opts: opts, s: s, m: m, rng: s.Rand("machine/" + m.Name + "/disk")}
+	f := &FS{opts: opts, s: s, m: m, rng: s.Rand("machine/" + m.Name + "/disk"), holes: s.Rand("machine/" + m.Name + "/disk/holes")}
 	f.root = f.newInode(true, fs.ModeDir|0o755)
 	m.OnCrash(f.crash)
 	return f
@@ -789,7 +811,7 @@ func (f *FS) crash() {
 		f.s.Logf("disk of %s kept its page cache (a kill): %d unsynced operations still pending", f.m.Name, len(f.pending))
 		return
 	}
-	lost, torn := 0, false
+	lost, torn, holed := 0, false, 0
 	survive := func(o *op) { f.makeDurable(o) }
 	var lostOps []*op // for the log: what was lost
 	var tornOp *op
@@ -831,15 +853,35 @@ func (f *FS) crash() {
 		}
 		lost += len(meta) - k
 		lostOps = append(lostOps, meta[k:]...)
-		// Each file's writes: an independent prefix, maybe torn.
+		// Each file's writes: an independent prefix, maybe torn; or, with
+		// holes, page by page. The prefix and tear are drawn either way, so
+		// holes change no other draw.
 		for _, ino := range files {
 			ops := data[ino]
+			var base []byte // the durable content before this crash, for holes
+			if f.opts.HoleProb > 0 {
+				base = slices.Clone(ino.durable)
+			}
 			k := f.rng.IntN(len(ops) + 1)
 			for _, o := range ops[:k] {
 				survive(o)
 			}
 			if k < len(ops) {
 				tear(ops[k])
+			}
+			if f.opts.HoleProb > 0 && !slices.ContainsFunc(ops, func(o *op) bool { return o.kind == opTruncate }) &&
+				f.holes.Float64() < f.opts.HoleProb {
+				// The content the pending writes would leave: not the live
+				// content, which also holds writes a failed fsync dropped
+				// ([fsync-error-forgets]).
+				full := slices.Clone(base)
+				for _, o := range ops {
+					full = writeAt(full, o.off, o.data)
+				}
+				ino.durable = f.punch(base, full)
+				holed++
+				lost, lostOps = lost+len(ops), append(lostOps, ops...)
+				continue
 			}
 			lost += len(ops) - k
 			lostOps = append(lostOps, ops[k:]...)
@@ -851,13 +893,42 @@ func (f *FS) crash() {
 	}
 	f.pending = nil
 	f.resetLive(f.root, map[*inode]bool{})
-	f.s.Logf("disk of %s crashed: %d unsynced operations lost, torn=%v", f.m.Name, lost, torn)
+	f.s.Logf("disk of %s crashed: %d unsynced operations lost, torn=%v, files with holes=%d", f.m.Name, lost, torn, holed)
 	if lossLine != "" {
 		f.s.Logf("disk of %s lost: %s", f.m.Name, lossLine)
 	}
 	if f.OnCrashLoss != nil && (lost > 0 || torn) {
 		f.OnCrashLoss(lost, torn)
 	}
+	if f.OnHoles != nil && holed > 0 {
+		f.OnHoles()
+	}
+}
+
+// punch is a file written back out of order: its size is the durable
+// one or the written one, and each page holds the written content or the
+// durable content (zeros past either's end), drawn independently from
+// the holes stream.
+func (f *FS) punch(durable, written []byte) []byte {
+	ps := f.opts.PageSize
+	if ps <= 0 {
+		ps = 4096
+	}
+	size := len(durable)
+	if f.holes.IntN(2) == 0 {
+		size = len(written)
+	}
+	out := make([]byte, size)
+	for off := 0; off < size; off += ps {
+		src := durable
+		if f.holes.IntN(2) == 0 {
+			src = written
+		}
+		if off < len(src) {
+			copy(out[off:min(off+ps, size)], src[off:min(off+ps, len(src))])
+		}
+	}
+	return out
 }
 
 // resetLive makes the live tree the durable one.
