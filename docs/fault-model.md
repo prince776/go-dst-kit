@@ -57,9 +57,10 @@ a law in the package that implements it, with a test.
   synced or not, and a later power loss may still lose what wasn't
   synced. With `Faults.Crash` too, each crash is a kill or a power loss,
   by a share drawn per seed (a quarter of seeds all kills, a quarter
-  none); turning kills on doesn't move any crash. On the network a kill
-  is a crash for now (silent): a real one makes the host reset its
-  connections.
+  none); turning kills on doesn't move any crash. On the network the host
+  stays up and its kernel closes the process's sockets: peers read what
+  it had sent, then EOF, at once; their next write is reset; dials to its
+  ports are refused until it listens again. (A power loss stays silent.)
 - **Restart** runs the machine's start function again on what its disk
   kept. It's a new incarnation: nothing in memory survives.
 - A machine can also lose power inside an I/O call (below).
