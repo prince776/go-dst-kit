@@ -63,6 +63,9 @@ func TestMigrateSample(t *testing.T) {
 	if !regexp.MustCompile(`notifyAll\(1, dst\.Chan\[struct\{\}\]\{\}\)\s*\}\s*// notifyAll's comment stays above it\.\s*func notifyAll`).Match(got) {
 		t.Errorf("a nil channel argument didn't become the zero dst.Chan, or moved a comment:\n%s", got)
 	}
+	if !regexp.MustCompile(`wg\.Go\(p\.wd, func\(\) \{ p\.worker\(1\) \}\)`).Match(got) {
+		t.Errorf("WaitGroup.Go didn't get the World:\n%s", got)
+	}
 	if !regexp.MustCompile(`for !flag\.Load\(\) \{\s+p\.wd\.Yield\(\)`).Match(got) {
 		t.Errorf("runtime.Gosched didn't become the World's Yield:\n%s", got)
 	}

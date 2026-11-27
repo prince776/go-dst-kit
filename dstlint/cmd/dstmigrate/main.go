@@ -19,7 +19,7 @@
 //   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types,
 //     sync.NewCond to dst.NewCond;
 //   - go statements to w.Go, evaluating the call's arguments first as go
-//     does;
+//     does, and wg.Go(f) on a sync.WaitGroup to wg.Go(w, f);
 //   - runtime.Gosched to w.Yield (a spin loop must let others run);
 //   - math/rand calls to the World's Rand (math/rand/v2's generic N to a
 //     converted Int64N; functions with no equivalent are reported), and
@@ -333,6 +333,25 @@ func (m *migrator) mapKey(s *ast.SelectorExpr) (key string, method bool) {
 		return "", false
 	}
 	return "(" + named.Obj().Pkg().Path() + "." + named.Obj().Name() + ")." + fn.Name(), true
+}
+
+// waitGroupGo rewrites wg.Go(f) on a sync.WaitGroup (Go 1.25) to
+// wg.Go(w, f): dst.WaitGroup.Go takes the World that runs f.
+func (m *migrator) waitGroupGo(n *ast.CallExpr, s *ast.SelectorExpr) bool {
+	if s.Sel.Name != "Go" || len(n.Args) != 1 {
+		return false
+	}
+	fn, ok := m.info.Uses[s.Sel].(*types.Func)
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "sync" {
+		return false
+	}
+	recv := fn.Type().(*types.Signature).Recv()
+	if recv == nil || !strings.HasSuffix(recv.Type().String(), "sync.WaitGroup") {
+		return false
+	}
+	n.Args = append([]ast.Expr{m.w()}, n.Args...)
+	m.changes++
+	return true
 }
 
 // mapCall rewrites a call that -map names; it reports whether it did.
@@ -689,6 +708,9 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 		return
 	}
 	if m.mapCall(c, n, s) {
+		return
+	}
+	if m.waitGroupGo(n, s) {
 		return
 	}
 	if !m.realFS {

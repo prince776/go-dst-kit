@@ -118,6 +118,13 @@ func (p *Pool) jitter(d time.Duration) time.Duration { return mrand.N(d) }
 
 func (p *Pool) nonce(b []byte) { io.ReadFull(crand.Reader, b) }
 
+// fanOut uses WaitGroup.Go (Go 1.25): it must get the World.
+func (p *Pool) fanOut() {
+	var wg sync.WaitGroup
+	wg.Go(func() { p.worker(1) })
+	wg.Wait()
+}
+
 // newCond makes a Cond with the standard constructor: it must become
 // dst.NewCond, as its type becomes *dst.Cond.
 func (p *Pool) newCond() *sync.Cond { return sync.NewCond(&p.mu) }
