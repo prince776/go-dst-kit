@@ -1190,7 +1190,8 @@ func TestGrayExplores(t *testing.T) {
 
 // Verifies: [kill-keeps-schedule]
 // Fails if: turning Kill on (with Crash) moves a crash or picks another
-// machine; Kill alone ever crashes with power loss; no seed mixes kills
+// machine; Kill alone ever crashes with power loss; Machine.Killed, read at
+// boot, doesn't say which the last crash was; no seed mixes kills
 // and power losses; or a killed machine finds less of an unsynced file
 // than it wrote. The negative case: under power-loss crashes the same
 // file shrinks on some seed.
@@ -1199,15 +1200,26 @@ func TestKillKeepsSchedule(t *testing.T) {
 		sched          string
 		kills, crashes int
 		shrank         bool
+		killedBoots    int // machine a's reboots that report Killed()
+		powerBoots     int // and those that don't
 	}
 	run := func(seed uint64, f dsttest.Faults) out {
 		var o out
 		var b strings.Builder
 		dsttest.RunSeed(seed, dsttest.Options{Faults: f, FaultPhase: 10 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
 			written := 0 // bytes the machine appended, kept across its boots
+			var ma *dsttest.Machine
+			boots := 0
 			for _, n := range []string{"a", "b", "c"} {
-				h.Machine(n, func(w *dst.World) {
+				mach := h.Machine(n, func(w *dst.World) {
 					if n == "a" {
+						if boots++; boots > 1 {
+							if ma.Killed() {
+								o.killedBoots++
+							} else {
+								o.powerBoots++
+							}
+						}
 						b, _ := dst.ReadFile(w.FS(), "log")
 						if len(b) < written {
 							o.shrank = true
@@ -1227,6 +1239,9 @@ func TestKillKeepsSchedule(t *testing.T) {
 						w.Sleep(time.Millisecond)
 					}
 				})
+				if n == "a" {
+					ma = mach
+				}
 			}
 		}, func(format string, args ...any) {
 			line := fmt.Sprintf(format, args...)
@@ -1267,6 +1282,9 @@ func TestKillKeepsSchedule(t *testing.T) {
 		}
 		if kill.crashes > 0 {
 			t.Fatalf("seed %d: Kill alone made %d power-loss crashes", seed, kill.crashes)
+		}
+		if kill.powerBoots > 0 || crash.killedBoots > 0 {
+			t.Fatalf("seed %d: Machine.Killed wrong at boot: kill-only %d boots said power loss; crash-only %d said kill", seed, kill.powerBoots, crash.killedBoots)
 		}
 		if kill.shrank {
 			t.Fatalf("seed %d: a killed machine found less of its unsynced file than it wrote", seed)

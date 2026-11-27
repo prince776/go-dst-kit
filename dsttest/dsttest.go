@@ -484,6 +484,11 @@ func (m *Machine) Kill() {
 	}
 }
 
+// Killed reports whether the machine's last crash was a kill (its disk
+// kept everything written) rather than a power loss. A machine's start
+// function reads it at boot to judge what must have survived.
+func (m *Machine) Killed() bool { return m.m.M.Killed() }
+
 // Pause stops the machine without crashing it: its goroutines don't run,
 // its timers fire late, while its clock and the network carry on.
 func (m *Machine) Pause() {
