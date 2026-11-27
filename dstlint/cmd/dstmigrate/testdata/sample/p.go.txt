@@ -1,6 +1,7 @@
 package migr
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 	"time"
@@ -79,6 +80,14 @@ func (p *Pool) give(ch chan *job) {
 	select {
 	case ch <- job:
 	case <-p.done:
+	}
+}
+
+// until waits for a job or the context.
+func (p *Pool) until(ctx context.Context) {
+	select {
+	case <-p.jobs:
+	case <-ctx.Done():
 	}
 }
 

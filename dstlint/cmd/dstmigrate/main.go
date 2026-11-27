@@ -450,12 +450,49 @@ type selectPlan struct {
 	elems []string // per case: the channel's element type ("" for default)
 }
 
+// ctxDone returns the context's source if e is ctx.Done() on a
+// context.Context (a select case on it becomes dst.OnDone), else "".
+func (m *migrator) ctxDone(e ast.Expr) string {
+	c, ok := e.(*ast.CallExpr)
+	if !ok || len(c.Args) != 0 {
+		return ""
+	}
+	s, ok := c.Fun.(*ast.SelectorExpr)
+	if !ok || s.Sel.Name != "Done" {
+		return ""
+	}
+	if t := m.info.TypeOf(s.X); t == nil || !types.Implements(t, contextType()) {
+		return ""
+	}
+	var b bytes.Buffer
+	printer.Fprint(&b, m.fset, s.X)
+	return b.String()
+}
+
+var ctxIface *types.Interface
+
+// contextType is context.Context's method set (Deadline, Done, Err, Value).
+func contextType() *types.Interface {
+	if ctxIface == nil {
+		pkg, err := importContext()
+		if err != nil {
+			panic(err)
+		}
+		ctxIface = pkg.Scope().Lookup("Context").Type().Underlying().(*types.Interface)
+	}
+	return ctxIface
+}
+
 func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
 	p := selectPlan{pos: s.Pos(), world: m.world}
 	for _, cl := range s.Body.List {
 		elem := ""
 		switch comm := cl.(*ast.CommClause).Comm.(type) {
 		case *ast.ExprStmt:
+			if ctx := m.ctxDone(comm.X.(*ast.UnaryExpr).X); ctx != "" {
+				elem = "ctx:" + ctx // case <-ctx.Done(): dst.OnDone
+				break
+			}
 			elem = m.chanElem(comm.X.(*ast.UnaryExpr).X)
 		case *ast.AssignStmt:
 			elem = m.chanElem(comm.Rhs[0].(*ast.UnaryExpr).X)
@@ -519,6 +556,10 @@ func spliceSelects(name string, src []byte, plans []selectPlan) ([]byte, error) 
 				}
 				fmt.Fprintf(&ops, "dst.OnSend%s(%s, %s, func() { %s = %d }),\n", typeArg, text(comm.Chan), text(comm.Value), id, n)
 			case *ast.ExprStmt:
+				if ctx, ok := strings.CutPrefix(plan.elems[k], "ctx:"); ok {
+					fmt.Fprintf(&ops, "dst.OnDone(%s, func() { %s = %d }),\n", ctx, id, n)
+					break
+				}
 				fmt.Fprintf(&ops, "dst.OnRecv(%s, func(_ %s, _ bool) { %s = %d }),\n", text(comm.X.(*ast.UnaryExpr).X), plan.elems[k], id, n)
 			case *ast.AssignStmt:
 				v, ok := fmt.Sprintf("%sv%d", id, n), fmt.Sprintf("%sok%d", id, n)
