@@ -19,6 +19,7 @@
 //   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types;
 //   - go statements to w.Go, evaluating the call's arguments first as go
 //     does;
+//   - runtime.Gosched to w.Yield (a spin loop must let others run);
 //   - math/rand calls to the World's Rand (math/rand/v2's generic N to a
 //     converted Int64N; functions with no equivalent are reported), and
 //     crypto/rand.Read and crypto/rand.Reader to the World's;
@@ -649,6 +650,14 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	case "path/filepath":
 		if !m.realFS && s.Sel.Name == "Walk" || s.Sel.Name == "WalkDir" || s.Sel.Name == "Glob" {
 			m.warn(n, "filepath."+s.Sel.Name+" reads the real filesystem; walk the World's FS with ReadDir")
+		}
+	case "runtime":
+		if s.Sel.Name == "Gosched" {
+			// A spin waiting for another goroutine: in a simulation only
+			// World.Yield lets that goroutine run.
+			n.Fun = sel(m.w(), "Yield")
+			setPos(n, pos)
+			m.changes++
 		}
 	case "crypto/rand":
 		if s.Sel.Name == "Read" {

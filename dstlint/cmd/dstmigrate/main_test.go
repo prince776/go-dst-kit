@@ -15,7 +15,8 @@ import (
 // or time.Now left, a nil channel in a literal compiles, and a nil channel
 // argument becomes the zero dst.Chan
 // without moving the comment after it; math/rand/v2's N and
-// crypto/rand.Reader become the World's, and a rand function with no
+// crypto/rand.Reader become the World's, runtime.Gosched becomes
+// w.Yield, and a rand function with no
 // World equivalent is reported. Fails if any survives, the result doesn't
 // build, the nil argument is kept or moves the comment, or the unmapped
 // rand call goes unreported.
@@ -54,13 +55,16 @@ func TestMigrateSample(t *testing.T) {
 	if !strings.Contains(warnings, "rand.NormFloat64 has no World equivalent") {
 		t.Errorf("rand.NormFloat64 kept without a warning:\n%s", warnings)
 	}
-	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`, `mrand\.N\(`, `crand\.`, `context\.With`} {
+	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`, `mrand\.N\(`, `crand\.`, `context\.With`, `runtime\.Gosched`} {
 		if regexp.MustCompile(bad).Match(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
 	}
 	if !regexp.MustCompile(`notifyAll\(1, dst\.Chan\[struct\{\}\]\{\}\)\s*\}\s*// notifyAll's comment stays above it\.\s*func notifyAll`).Match(got) {
 		t.Errorf("a nil channel argument didn't become the zero dst.Chan, or moved a comment:\n%s", got)
+	}
+	if !regexp.MustCompile(`for !flag\.Load\(\) \{\s+p\.wd\.Yield\(\)`).Match(got) {
+		t.Errorf("runtime.Gosched didn't become the World's Yield:\n%s", got)
 	}
 	if !regexp.MustCompile(`// a comment inside a case\s+out\.Send`).Match(got) {
 		t.Errorf("the comment isn't before its statement any more:\n%s", got)

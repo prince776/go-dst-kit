@@ -67,6 +67,7 @@ It's a mechanical substitution, and it can be done one package at a time
 | `time.Now`, `time.Sleep`, `time.NewTimer`, `time.After` | `w.Now()`, `w.Sleep(d)`, `w.NewTimer(d)`, `w.After(d)` |
 | `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` | `dst.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` (zero values work) |
 | `context.WithTimeout`, `WithCancel` | `dst.WithTimeout(w, ctx, d)`, `dst.WithCancel(w, ctx)` |
+| `runtime.Gosched` | `w.Yield()` |
 | `math/rand` | `w.Rand()` |
 | `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` |
 | `os.OpenFile`, `os.Rename`, ... | `w.FS().OpenFile`, `w.FS().Rename`, ... |

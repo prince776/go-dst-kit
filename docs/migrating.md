@@ -46,6 +46,7 @@ In tests, `dsttest` gives each simulated machine its own World.
 | `sync.NewCond(l)`, `sync.Cond` | `dst.NewCond(l)`, `dst.Cond{L: l}` | same semantics: a Signal with no waiter is lost |
 | `context.WithCancel`, `WithTimeout`, `WithDeadline` | `dst.WithCancel(w, ctx)`, `dst.WithTimeout(w, ctx, d)`, `dst.WithDeadline(w, ctx, t)` | `Background`, `WithValue` are fine as they are |
 | `context.AfterFunc` | `dst.AfterDone(ctx, f)` | |
+| `runtime.Gosched` (a spin waiting for another goroutine) | `w.Yield()` | in simulation it returns once another goroutine has made progress or time has advanced; a spin no one can end is a deadlock |
 | `math/rand` | `w.Rand()` | seeded per machine in simulation |
 | `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
 | `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | paths are relative to the World's root |

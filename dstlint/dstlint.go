@@ -67,6 +67,7 @@ var funcs = map[string]map[string]string{
 		"ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
 	},
 	"sync":        {"NewCond": "dst.NewCond"},
+	"runtime":     {"Gosched": "w.Yield"},
 	"crypto/rand": {"Read": "w.Rand().CryptoRead", "Int": "crypto/rand.Int(dst.CryptoReader(w), max)", "Text": "w.Rand().CryptoRead"},
 	"os": {
 		"Open": "dst.Open(w.FS(), ...)", "Create": "dst.Create(w.FS(), ...)", "OpenFile": "w.FS().OpenFile",

@@ -135,6 +135,11 @@ type Scheduler struct {
 	tasks        []*Task
 	runnable     []*Task
 	cur          *Task
+	// spinners are parked in YieldToOthers until another task takes a
+	// step or a timer fires; spinStep says the step that just ended was
+	// such a yield (which wakes no one).
+	spinners []*Task
+	spinStep bool
 	handoff      chan struct{}
 	hash         uint64
 	steps        uint64
@@ -735,6 +740,38 @@ func (s *Scheduler) Yield() {
 	}
 }
 
+// YieldToOthers is World.Yield: the current task waits until another task
+// has taken a step (one that didn't end in YieldToOthers) or a timer has
+// fired, then becomes runnable again. A loop spinning on it therefore
+// lets the task it waits for run, lets time advance while that task
+// sleeps, and, when nothing else can ever happen, is a deadlock rather
+// than a loop that never ends.
+func (s *Scheduler) YieldToOthers() {
+	t := s.Current()
+	t.state = parked
+	t.blocked = "Yield (spinning: waiting for another goroutine to make progress)"
+	s.spinners = append(s.spinners, t)
+	s.spinStep = true
+	s.noteSite(t)
+	s.handOff()
+	<-t.wake
+	t.blocked = ""
+	if t.killed {
+		panic(killSignal{})
+	}
+}
+
+// wakeSpinners makes every task waiting in YieldToOthers runnable.
+func (s *Scheduler) wakeSpinners() {
+	if len(s.spinners) == 0 {
+		return
+	}
+	for _, t := range s.spinners {
+		s.Ready(t)
+	}
+	s.spinners = s.spinners[:0]
+}
+
 // Ready makes a parked task runnable. It does nothing for a task that isn't
 // parked, is killed, or whose machine is dead.
 func (s *Scheduler) Ready(t *Task) {
@@ -960,6 +997,10 @@ func (s *Scheduler) Run(done func() bool) error {
 			}
 			wd.Stop()
 			s.cur = nil
+			if !s.spinStep {
+				s.wakeSpinners()
+			}
+			s.spinStep = false
 			s.afterStep()
 			continue
 		}
@@ -977,6 +1018,7 @@ func (s *Scheduler) Run(done func() bool) error {
 			fn := e.fn
 			e.fn = nil
 			fn()
+			s.wakeSpinners()
 			s.afterStep()
 			continue
 		}

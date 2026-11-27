@@ -1,6 +1,8 @@
 package migr
 
 import (
+	"runtime"
+	"sync/atomic"
 	"context"
 	crand "crypto/rand"
 	"io"
@@ -115,6 +117,13 @@ func (p *Pool) disable() chan int {
 func (p *Pool) jitter(d time.Duration) time.Duration { return mrand.N(d) }
 
 func (p *Pool) nonce(b []byte) { io.ReadFull(crand.Reader, b) }
+
+// spinUntil waits for flag without a World operation: a Gosched spin.
+func (p *Pool) spinUntil(flag *atomic.Bool) {
+	for !flag.Load() {
+		runtime.Gosched()
+	}
+}
 
 func (p *Pool) gauss() float64 { return mrand.NormFloat64() }
 

@@ -13,7 +13,11 @@ a law in the package that implements it, with a test.
   chosen by the seed. That includes `Lock` and `RLock`, so races between
   separate critical sections are explored. Plain memory and `sync/atomic`
   accesses between World operations are not interleaved (use `-race` for
-  data races).
+  data races). A loop that waits on an atomic must call `w.Yield()`
+  (runtime.Gosched in the real World): it returns once another goroutine
+  has taken a step or time has advanced, so the goroutine waited for runs
+  and its timers fire, and a spin no one can end is reported as a
+  deadlock.
 - Half the seeds choose uniformly among runnable goroutines; the other
   half use PCT (probabilistic concurrency testing): random priorities,
   the highest runnable goroutine runs, and at 0 to 2 random steps the

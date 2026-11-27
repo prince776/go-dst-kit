@@ -120,6 +120,33 @@ func (w *World) GoNamed(name string, fn func()) {
 	w.s.Yield()
 }
 
+// Yield lets other goroutines run, as runtime.Gosched does. Use it where
+// code waits for another goroutine without any World operation in between,
+// such as a loop spinning on an atomic:
+//
+//	for flag.Load() == 0 {
+//		w.Yield()
+//	}
+//
+// In a simulated World only one goroutine runs at a time, so such a loop
+// would otherwise never let the other one run. There Yield returns only
+// after another goroutine has taken a step or a timer has fired: the
+// goroutine waited for runs, time advances while it sleeps, and a spin
+// that nothing can ever end is reported as a deadlock.
+//
+// Verified:
+//   - [yield-waits-for-progress] In a simulated World, Yield returns only
+//     after another goroutine has taken a step or time has advanced; a
+//     spin waiting for a sleeping goroutine ends at its wake-up after a
+//     handful of iterations, and a spin no one can end is a deadlock.
+func (w *World) Yield() {
+	if w.s == nil {
+		runtime.Gosched()
+		return
+	}
+	w.s.YieldToOthers()
+}
+
 // Sleep pauses the goroutine for d, as time.Sleep does.
 func (w *World) Sleep(d time.Duration) {
 	if w.s == nil {
