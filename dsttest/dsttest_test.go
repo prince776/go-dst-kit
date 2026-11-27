@@ -1187,3 +1187,114 @@ func TestGrayExplores(t *testing.T) {
 		}
 	}
 }
+
+// Verifies: [kill-keeps-schedule]
+// Fails if: turning Kill on (with Crash) moves a crash or picks another
+// machine; Kill alone ever crashes with power loss; Machine.Killed, read at
+// boot, doesn't say which the last crash was; no seed mixes kills
+// and power losses; or a killed machine finds less of an unsynced file
+// than it wrote. The negative case: under power-loss crashes the same
+// file shrinks on some seed.
+func TestKillKeepsSchedule(t *testing.T) {
+	type out struct {
+		sched          string
+		kills, crashes int
+		shrank         bool
+		killedBoots    int // machine a's reboots that report Killed()
+		powerBoots     int // and those that don't
+	}
+	run := func(seed uint64, f dsttest.Faults) out {
+		var o out
+		var b strings.Builder
+		dsttest.RunSeed(seed, dsttest.Options{Faults: f, FaultPhase: 10 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+			written := 0 // bytes the machine appended, kept across its boots
+			var ma *dsttest.Machine
+			boots := 0
+			for _, n := range []string{"a", "b", "c"} {
+				mach := h.Machine(n, func(w *dst.World) {
+					if n == "a" {
+						if boots++; boots > 1 {
+							if ma.Killed() {
+								o.killedBoots++
+							} else {
+								o.powerBoots++
+							}
+						}
+						b, _ := dst.ReadFile(w.FS(), "log")
+						if len(b) < written {
+							o.shrank = true
+						}
+						written = len(b)
+					}
+					for {
+						if n == "a" {
+							f, err := w.FS().OpenFile("log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+							if err == nil {
+								if _, err := f.Write([]byte("x")); err == nil {
+									written++
+								}
+								f.Close() // no Sync: only a kill keeps it
+							}
+						}
+						w.Sleep(time.Millisecond)
+					}
+				})
+				if n == "a" {
+					ma = mach
+				}
+			}
+		}, func(format string, args ...any) {
+			line := fmt.Sprintf(format, args...)
+			switch {
+			case strings.Contains(line, "nemesis: kill"):
+				o.kills++
+				line = strings.Replace(line, "nemesis: kill", "nemesis: crash", 1)
+			case strings.Contains(line, "nemesis: crash"):
+				o.crashes++
+			}
+			if strings.Contains(line, "nemesis: crash") || strings.Contains(line, "nemesis: restart") {
+				b.WriteString(line + "\n")
+			}
+		})
+		o.sched = b.String()
+		return o
+	}
+	mixed, compared, powerShrank := 0, 0, 0
+	for seed := uint64(1); seed <= 40; seed++ {
+		crash := run(seed, dsttest.Faults{Crash: true})
+		if crash.crashes == 0 {
+			continue // crashes off for this seed
+		}
+		compared++
+		if crash.shrank {
+			powerShrank++
+		}
+		both := run(seed, dsttest.Faults{Crash: true, Kill: true})
+		if both.sched != crash.sched {
+			t.Fatalf("seed %d: turning Kill on moved crashes:\n%s---\n%s", seed, crash.sched, both.sched)
+		}
+		if both.kills > 0 && both.crashes > 0 {
+			mixed++
+		}
+		kill := run(seed, dsttest.Faults{Kill: true})
+		if kill.sched != crash.sched {
+			t.Fatalf("seed %d: Kill alone crashes at other times than Crash:\n%s---\n%s", seed, crash.sched, kill.sched)
+		}
+		if kill.crashes > 0 {
+			t.Fatalf("seed %d: Kill alone made %d power-loss crashes", seed, kill.crashes)
+		}
+		if kill.powerBoots > 0 || crash.killedBoots > 0 {
+			t.Fatalf("seed %d: Machine.Killed wrong at boot: kill-only %d boots said power loss; crash-only %d said kill", seed, kill.powerBoots, crash.killedBoots)
+		}
+		if kill.shrank {
+			t.Fatalf("seed %d: a killed machine found less of its unsynced file than it wrote", seed)
+		}
+	}
+	if compared < 5 || mixed == 0 {
+		t.Fatalf("compared %d seeds, %d mixing kills and power losses: want at least 5 and 1", compared, mixed)
+	}
+	if powerShrank == 0 {
+		t.Fatalf("negative case: power-loss crashes never shrank the unsynced file in %d seeds", compared)
+	}
+	t.Logf("%d seeds compared, %d mixed, power loss shrank the file in %d", compared, mixed, powerShrank)
+}

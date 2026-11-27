@@ -10,10 +10,18 @@ import (
 	"sync/atomic"
 )
 
-// The registry maps goroutine IDs to tasks, so zero-value primitives
-// (dst.Mutex, dst.WaitGroup) can find their scheduler without being handed
-// a World. Lookups cost about a microsecond, so callers use them only on
-// slow paths (contention, waiting).
+// The registry maps goroutine identities (goid) to tasks, so zero-value
+// primitives (dst.Mutex, dst.WaitGroup) can find their scheduler without
+// being handed a World.
+//
+// A goid is a g pointer, and the runtime reuses a finished goroutine's g
+// for a new one, so a task's entry must be gone before its goroutine can
+// exit: unregister runs in the task's deferred function.
+//
+// Verified:
+//   - [registry-forgets-finished] Once a task's goroutine has exited, no
+//     other goroutine (raw, or a new task) is identified as that task,
+//     even one running on the same g.
 var (
 	registry sync.Map // goid() -> *Task
 	active   atomic.Int64

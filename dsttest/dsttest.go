@@ -77,6 +77,9 @@
 //     With Faults.Loss and no OnLoss, the seed fails.
 //   - [boots-are-no-ones-work] A machine restarted from a workload
 //     goroutine doesn't count as that goroutine's work.
+//   - [kill-keeps-schedule] Turning Kill on changes which crashes keep the
+//     page cache, not when crashes happen or to which machine; Kill alone
+//     only kills; and a killed machine finds everything it wrote.
 //
 // Depends on: dst, internal/simworld
 package dsttest
@@ -145,6 +148,13 @@ type Faults struct {
 	// slower). Slow links and disks are properties of a run, so they stay
 	// in the recovery phase; losses, resets and stalls stop there.
 	Gray bool
+	// Kill kills machines' processes (kill -9, a panic, the OOM killer)
+	// and restarts them: like Crash, but the host stays up, so the disk
+	// keeps everything written, synced or not (a later power loss may
+	// still lose what wasn't synced). With Crash too, each crash is a kill
+	// or a power loss, by a share drawn per seed (some seeds all one or
+	// the other); when crashes happen doesn't change.
+	Kill bool
 	// Loss loses machines for good: one crashes and never restarts, with
 	// its disk (a dead server, replaced by a new one). The test says which
 	// machines may be lost and what happens then with Harness.OnLoss.
@@ -465,6 +475,20 @@ func (m *Machine) Crash() {
 	}
 }
 
+// Kill kills the machine's process now: like Crash, but its host stays
+// up, so its disk keeps everything written (synced or not).
+func (m *Machine) Kill() {
+	if !m.m.Dead() {
+		m.h.Sometimes("machine killed")
+		m.m.Kill()
+	}
+}
+
+// Killed reports whether the machine's last crash was a kill (its disk
+// kept everything written) rather than a power loss. A machine's start
+// function reads it at boot to judge what must have survived.
+func (m *Machine) Killed() bool { return m.m.M.Killed() }
+
 // Pause stops the machine without crashing it: its goroutines don't run,
 // its timers fire late, while its clock and the network carry on.
 func (m *Machine) Pause() {
@@ -636,6 +660,7 @@ func (h *Harness) Heal() { h.sim.Net.Heal() }
 type Swarm struct {
 	CrashEvery     time.Duration // mean time between crashes (0: none)
 	Downtime       time.Duration // mean time a crashed machine stays down
+	KillShare      float64       // share of crashes that are kills (the host stays up)
 	PartitionEvery time.Duration // mean time between partitions (0: none)
 	PartitionFor   time.Duration // mean partition length
 	OneWay         bool          // partitions may be one way
@@ -700,7 +725,7 @@ func (s Swarm) String() string {
 		s.DiskOrdered, s.TornWriteProb, s.IOCrashProb, s.MinLatency, s.MeanLatency, s.ResetProb) + s.sched() +
 		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
 			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
-		fmt.Sprintf(", loss every ~%v", s.LossEvery) +
+		fmt.Sprintf(", loss every ~%v, kills %.2f", s.LossEvery, s.KillShare) +
 		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f)}",
 			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor)
 }
@@ -740,7 +765,7 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	reset := sometimes(r, float64(r.IntN(20))/10000)
 	spike := r.IntN(4) == 0
 	s.DiskOrdered = ordered
-	if f.Crash {
+	if f.Crash || f.Kill {
 		s.CrashEvery, s.Downtime = crashEvery, downtime
 	}
 	if f.Partition {
@@ -788,7 +813,7 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	// The start time, and crash latency, last again.
 	s.Start = drawStart(r, runLen)
 	crashLatency := r.IntN(3) != 0
-	if f.Crash && !f.Points {
+	if (f.Crash || f.Kill) && !f.Points {
 		s.CrashLatency = crashLatency
 	}
 	// Permanent losses, last: a mean of 1 to 6s between them (Harness.OnLoss
@@ -818,6 +843,15 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 		s.HealResetProb = g.HealResetProb
 		s.SlowMachineShare, s.SlowStall, s.SlowStallEvery = g.SlowMachineShare, g.SlowStall, g.SlowStallEvery
 		s.SlowDiskShare, s.SlowDiskFactor = g.SlowDiskShare, g.SlowDiskFactor
+	}
+	// Kills, last of all: with Crash as well, a quarter of the seeds kill
+	// every time, a quarter never, the rest a uniform share.
+	killShare := []float64{1, 0, r.Float64(), r.Float64()}[r.IntN(4)]
+	switch {
+	case f.Kill && f.Crash:
+		s.KillShare = killShare
+	case f.Kill:
+		s.KillShare = 1
 	}
 	return s
 }
@@ -1031,7 +1065,7 @@ func (h *Harness) nemesis(w *dst.World) {
 	}
 	// Classes added later draw from their own streams, so turning them on
 	// leaves the crash and partition schedule of each seed as it was.
-	rp, ro, rl := h.sim.S.Rand("nemesis/pause"), h.sim.S.Rand("nemesis/outage"), h.sim.S.Rand("nemesis/loss")
+	rp, ro, rl, rk := h.sim.S.Rand("nemesis/pause"), h.sim.S.Rand("nemesis/outage"), h.sim.S.Rand("nemesis/loss"), h.sim.S.Rand("nemesis/kill")
 	expFrom := func(rr *rand.Rand, mean time.Duration) time.Duration {
 		return time.Duration(rr.ExpFloat64() * float64(mean))
 	}
@@ -1071,8 +1105,13 @@ func (h *Harness) nemesis(w *dst.World) {
 		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.neverCrash })
 		if len(alive) > 0 {
 			m := alive[r.IntN(len(alive))]
-			h.Logf("nemesis: crash %s", m.Name())
-			m.Crash()
+			if sw.KillShare > 0 && rk.Float64() < sw.KillShare {
+				h.Logf("nemesis: kill %s", m.Name())
+				m.Kill()
+			} else {
+				h.Logf("nemesis: crash %s", m.Name())
+				m.Crash()
+			}
 			schedule(exp(sw.Downtime), func() {
 				h.Logf("nemesis: restart %s", m.Name())
 				m.Restart()

@@ -2,6 +2,7 @@ package simnet_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -184,6 +185,95 @@ func TestCrashIsSilent(t *testing.T) {
 	}
 	if !errors.Is(afterRestart, syscall.ECONNRESET) {
 		t.Fatalf("after the peer restarted: %v, want a reset", afterRestart)
+	}
+}
+
+// Verifies: [kill-closes-sockets]
+// Fails if: a killed process's peer doesn't read what it wrote and then
+// EOF promptly, its next write isn't reset, or a dial isn't refused; or
+// (the negative) a powered-off machine's peer sees anything but silence:
+// EOF, a reset or a refusal instead of its read and dial timing out.
+func TestKillClosesSockets(t *testing.T) {
+	type result struct {
+		got               string
+		readErr, afterErr error
+		readTook          time.Duration
+		dialErr           error
+	}
+	run := func(kill bool) result {
+		sim := simworld.New(simworld.Options{Seed: 3})
+		srv := sim.Machine("srv")
+		wrote := false
+		srv.Start = func(w *dst.World) {
+			ln, err := w.Net().Listen("tcp", "srv:7")
+			if err != nil {
+				panic(err)
+			}
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				w.Go(func() {
+					c.Write([]byte("greeting"))
+					wrote = true
+					io.Copy(io.Discard, c)
+				})
+			}
+		}
+		var r result
+		res := sim.Run(func(w *dst.World) {
+			srv.Boot()
+			w.Sleep(time.Millisecond)
+			c, err := w.Net().Dial("tcp", "srv:7")
+			if err != nil {
+				panic(err)
+			}
+			for !wrote {
+				w.Sleep(10 * time.Microsecond)
+			}
+			if kill {
+				srv.Kill() // the greeting is still in flight
+			} else {
+				srv.Crash()
+			}
+			start := w.Now()
+			c.SetReadDeadline(start.Add(time.Second))
+			var b []byte
+			b, r.readErr = io.ReadAll(c)
+			r.got, r.readTook = string(b), w.Now().Sub(start)
+			c.SetReadDeadline(w.Now().Add(time.Second))
+			c.Write([]byte("anyone there?"))
+			w.Sleep(50 * time.Millisecond) // the reply's round trip
+			_, r.afterErr = c.Read(make([]byte, 1))
+			ctx, cancel := dst.WithTimeout(w, context.Background(), time.Second)
+			defer cancel()
+			_, r.dialErr = w.Net().DialContext(ctx, "tcp", "srv:7")
+		})
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		return r
+	}
+	k := run(true)
+	switch {
+	case k.got != "greeting" || k.readErr != nil:
+		t.Fatalf("kill: read %q, %v; want the greeting, then EOF", k.got, k.readErr)
+	case k.readTook > 100*time.Millisecond:
+		t.Fatalf("kill: EOF took %v, want it at once (a network latency)", k.readTook)
+	case !errors.Is(k.afterErr, syscall.ECONNRESET):
+		t.Fatalf("kill: a write then read after EOF: %v, want a reset", k.afterErr)
+	case !errors.Is(k.dialErr, syscall.ECONNREFUSED):
+		t.Fatalf("kill: dial: %v, want connection refused", k.dialErr)
+	}
+	c := run(false)
+	switch {
+	case !errors.Is(c.readErr, osErrDeadline):
+		t.Fatalf("power loss: read %q, %v; want silence until the deadline", c.got, c.readErr)
+	case !errors.Is(c.afterErr, osErrDeadline):
+		t.Fatalf("power loss: a later read: %v; want silence", c.afterErr)
+	case c.dialErr == nil || errors.Is(c.dialErr, syscall.ECONNREFUSED):
+		t.Fatalf("power loss: dial: %v; want it to time out", c.dialErr)
 	}
 }
 

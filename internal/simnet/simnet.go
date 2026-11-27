@@ -12,6 +12,10 @@
 //   - A crashed machine is silent (power loss sends nothing): its peers'
 //     reads wait, until their deadlines or until the machine restarts and
 //     answers their next packet with a reset.
+//   - A killed process's host stays up, and its kernel closes the
+//     process's sockets: what was written is still delivered, then a FIN
+//     (peers read EOF at once); data sent to it afterwards draws a reset;
+//     dials to its ports are refused until it listens again.
 //   - Data sent to a closed connection is answered with a reset, which
 //     arrives after anything sent before it and discards what the
 //     receiver hasn't read yet (so closing with unread input can destroy
@@ -48,6 +52,9 @@
 //     everything held arrives in order.
 //   - [crash-is-silent] A crashed machine's peers see no EOF; after it
 //     restarts, their next write leads to a reset.
+//   - [kill-closes-sockets] A killed process's peers read what it wrote,
+//     then EOF, at once; their next write is reset; dials to it are
+//     refused. Peers of a powered-off machine meanwhile see silence.
 //   - [reset-discards-unread] Data sent to a closed connection resets it,
 //     and the reset discards what the other end hasn't read.
 //
@@ -197,6 +204,20 @@ func (n *Network) Attach(m *sched.Machine) *Host {
 	h := &Host{n: n, name: m.Name, m: m, listeners: map[int]*listener{}, packets: map[int]*packetConn{}, nextPort: 40000}
 	n.hosts[m.Name] = h
 	m.OnCrash(func() {
+		if m.Killed() {
+			// The process died, its host didn't: the kernel closes the
+			// process's sockets. What it wrote is still sent, then a FIN;
+			// data arriving later is answered with a reset (deliver).
+			for _, p := range n.pipes {
+				if e := p.from; e.h == h && e.inc == m.Incarnation && !e.closed {
+					e.closed = true
+					if e.err == nil {
+						e.out.push(segment{fin: true})
+					}
+					n.s.WakeAll(e)
+				}
+			}
+		}
 		for _, port := range slices.Sorted(maps.Keys(h.listeners)) {
 			h.listeners[port].closeNow()
 		}
@@ -451,8 +472,8 @@ func (d *dial) send() {
 				fn()
 			})
 		}
-		if dst.m.Dead() {
-			return // silence: the dialer waits for its deadline
+		if dst.m.Dead() && !dst.m.Killed() {
+			return // power loss is silence: the dialer waits for its deadline
 		}
 		l := dst.listeners[d.to.port]
 		if l == nil {
@@ -568,8 +589,8 @@ func (p *pipe) deliver() {
 			return // stalled; Heal pumps again
 		}
 		to := p.to
-		if to.h.m.Dead() {
-			p.segs = nil // silence
+		if to.h.m.Dead() && !to.h.m.Killed() {
+			p.segs = nil // power loss is silence
 			return
 		}
 		seg := p.segs[0]
