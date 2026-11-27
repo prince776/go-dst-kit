@@ -35,6 +35,15 @@ type udpAddr struct{ addr }
 
 func (a udpAddr) Network() string { return "udp" }
 
+// udp is a as the net package's code sees it: a *net.UDPAddr for a host
+// named by its IP, else a itself.
+func (a udpAddr) udp() net.Addr {
+	if ip := hostIP(a.host); ip != nil {
+		return &net.UDPAddr{IP: ip, Port: a.port}
+	}
+	return a
+}
+
 type datagram struct {
 	from udpAddr
 	data []byte
@@ -99,7 +108,7 @@ func (pc *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		case len(pc.buf) > 0:
 			d := pc.buf[0]
 			pc.buf = pc.buf[1:]
-			return copy(p, d.data), d.from, nil
+			return copy(p, d.data), d.from.udp(), nil
 		}
 		if pc.wait(pc.rdl, "read from udp "+pc.a.String()) {
 			return 0, nil, pc.opErr("read", os.ErrDeadlineExceeded)
@@ -229,7 +238,7 @@ func (pc *packetConn) close() {
 	pc.n.s.WakeAll(pc)
 }
 
-func (pc *packetConn) LocalAddr() net.Addr { return pc.a }
+func (pc *packetConn) LocalAddr() net.Addr { return pc.a.udp() }
 
 func (pc *packetConn) SetDeadline(t time.Time) error {
 	pc.rdl, pc.wdl = t, t
@@ -291,7 +300,7 @@ func (c *udpConn) Read(p []byte) (int, error) {
 }
 
 func (c *udpConn) Write(p []byte) (int, error) { return c.WriteTo(p, c.peer) }
-func (c *udpConn) RemoteAddr() net.Addr        { return c.peer }
+func (c *udpConn) RemoteAddr() net.Addr        { return c.peer.udp() }
 
 var (
 	_ net.PacketConn = (*packetConn)(nil)

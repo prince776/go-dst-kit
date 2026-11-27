@@ -172,7 +172,9 @@ connected socket that sends to and receives from one peer):
 - Differences from a real kernel: a datagram to an unbound port draws no
   ICMP error (a connected socket's next read doesn't fail with
   ECONNREFUSED), and addresses are `host:port` names, not `*net.UDPAddr`:
-  compare them with `String()`.
+  compare them with `String()`. A machine named by an IP literal
+  (`h.Machine("10.0.0.1", ...)`) has `*net.TCPAddr` and `*net.UDPAddr`
+  addresses instead, for code that stores IPs or type-asserts addresses.
 
 Not modelled yet: bandwidth limits.
 

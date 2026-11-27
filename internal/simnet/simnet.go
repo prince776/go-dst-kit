@@ -33,7 +33,11 @@
 //     the connection answers its next packet with a reset), else it
 //     carries on with what was held.
 //
-// Addresses are "machine:port"; "localhost" is the dialing machine.
+// Addresses are "machine:port"; "localhost" is the dialing machine. A
+// machine named by an IP literal in canonical form ("10.0.0.1") has the
+// net package's address types: *net.TCPAddr for listeners and
+// connections, *net.UDPAddr for sockets and datagrams' sources, so code
+// that type-asserts them works; other names are host:port names.
 //
 // Verified:
 //   - [behaves-like-net] Without faults, connections behave like the net
@@ -57,12 +61,19 @@
 //     refused. Peers of a powered-off machine meanwhile see silence.
 //   - [reset-discards-unread] Data sent to a closed connection resets it,
 //     and the reset discards what the other end hasn't read.
+//   - [ip-hosts] A machine named by an IP literal in canonical form has
+//     *net.TCPAddr addresses (listener, both ends of a connection) and
+//     *net.UDPAddr ones (a socket's local address, a datagram's source, a
+//     connected socket's peer), with that IP and the port; dialing or
+//     sending to that IP:port reaches it. Other names keep host:port
+//     names.
 //
 // UDP (udp.go) is datagrams: whole or not at all, each after its own
 // latency, lost or duplicated at Options' rates; partitions, crashed
 // hosts and unbound ports drop them. Unlike a real kernel, a datagram to
 // an unbound port draws no ICMP error, and addresses are host:port names,
-// not *net.UDPAddr. Its laws are verified through simworld.
+// not *net.UDPAddr, unless the host is named by an IP. Its laws are
+// verified through simworld.
 //
 // Depends on: internal/sched
 package simnet
@@ -332,6 +343,29 @@ type addr struct {
 func (a addr) Network() string { return "tcp" }
 func (a addr) String() string  { return net.JoinHostPort(a.host, strconv.Itoa(a.port)) }
 
+// hostIP is the IP a host is named by, if its name is an IP literal in
+// canonical form (what net.IP.String prints): then its addresses are the
+// net package's own types.
+func hostIP(host string) net.IP {
+	ip := net.ParseIP(host)
+	if ip == nil || ip.String() != host {
+		return nil
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4
+	}
+	return ip
+}
+
+// tcp is a as the net package's code sees it: a *net.TCPAddr for a host
+// named by its IP, else a itself.
+func (a addr) tcp() net.Addr {
+	if ip := hostIP(a.host); ip != nil {
+		return &net.TCPAddr{IP: ip, Port: a.port}
+	}
+	return a
+}
+
 func (h *Host) resolve(address string) (addr, error) {
 	host, ps, err := net.SplitHostPort(address)
 	if err != nil {
@@ -394,7 +428,7 @@ func (h *Host) Listen(network, address string) (net.Listener, error) {
 	return l, nil
 }
 
-func (l *listener) Addr() net.Addr { return l.a }
+func (l *listener) Addr() net.Addr { return l.a.tcp() }
 
 func (l *listener) Accept() (net.Conn, error) {
 	s := l.h.n.s
@@ -758,8 +792,8 @@ func (e *endpoint) Close() error {
 	return nil
 }
 
-func (e *endpoint) LocalAddr() net.Addr  { return e.local }
-func (e *endpoint) RemoteAddr() net.Addr { return e.rem }
+func (e *endpoint) LocalAddr() net.Addr  { return e.local.tcp() }
+func (e *endpoint) RemoteAddr() net.Addr { return e.rem.tcp() }
 
 func (e *endpoint) SetDeadline(t time.Time) error {
 	e.SetReadDeadline(t)
