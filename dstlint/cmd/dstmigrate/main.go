@@ -133,6 +133,7 @@ func main() {
 }
 
 type migrator struct {
+	warned    map[string]bool
 	testWorld string
 	inTest    bool
 	pkg       *types.Package
@@ -146,13 +147,61 @@ type migrator struct {
 	selN      int
 }
 
+// isChan reports whether e is a channel this migration converts: one of
+// the package's own, not one another package hands out (ctx.Done(), a
+// library's field), which stays a raw channel.
 func (m *migrator) isChan(e ast.Expr) bool {
 	t := m.info.TypeOf(e)
 	if t == nil {
 		return false
 	}
-	_, ok := t.Underlying().(*types.Chan)
-	return ok
+	if _, ok := t.Underlying().(*types.Chan); !ok {
+		return false
+	}
+	if m.foreign(e) {
+		if !m.inTest && m.ctxDone(e) == "" {
+			m.warn(e, "a channel from another package stays raw; waiting on it can't be simulated")
+		}
+		return false
+	}
+	return true
+}
+
+// foreign reports whether e is a channel from another package: a call to
+// a function or method declared there, or a field of a type declared there.
+func (m *migrator) foreign(e ast.Expr) bool {
+	var obj types.Object
+	switch x := ast.Unparen(e).(type) {
+	case *ast.CallExpr:
+		switch f := ast.Unparen(x.Fun).(type) {
+		case *ast.Ident:
+			obj = m.info.Uses[f]
+		case *ast.SelectorExpr:
+			obj = m.info.Uses[f.Sel]
+		}
+	case *ast.SelectorExpr:
+		obj = m.info.Uses[x.Sel]
+		// A timer's or ticker's C: the migration makes it a dst.Timer's.
+		if v, ok := obj.(*types.Var); ok && v.IsField() && v.Name() == "C" && v.Pkg() != nil && v.Pkg().Path() == "time" {
+			return false
+		}
+	}
+	if m.ctxDone(e) != "" {
+		return true // a context's Done: select cases use dst.OnDone; elsewhere it stays raw
+	}
+	return obj != nil && obj.Pkg() != nil && obj.Pkg() != m.pkg
+}
+
+func (m *migrator) warn(n ast.Node, msg string) {
+	p := m.fset.Position(n.Pos())
+	key := p.String() + msg
+	if m.warned == nil {
+		m.warned = map[string]bool{}
+	}
+	if !m.warned[key] {
+		m.warned[key] = true
+		fmt.Fprintf(os.Stderr, "%s: %s\n", p, msg)
+	}
 }
 
 func (m *migrator) chanElem(e ast.Expr) string {
@@ -268,7 +317,7 @@ func (m *migrator) decl(d ast.Node) {
 			m.plans = append(m.plans, m.planSelect(n))
 			m.changes++
 		case *ast.SendStmt:
-			if !inComm(c) {
+			if !inComm(c) && m.isChan(n.Chan) {
 				m.replace(c, &ast.ExprStmt{X: call(sel(n.Chan, "Send"), n.Value)})
 				m.changes++
 			}
@@ -284,7 +333,7 @@ func (m *migrator) decl(d ast.Node) {
 				}
 			}
 			if len(n.Rhs) == 1 {
-				if u, ok := n.Rhs[0].(*ast.UnaryExpr); ok && u.Op == token.ARROW {
+				if u, ok := n.Rhs[0].(*ast.UnaryExpr); ok && u.Op == token.ARROW && m.isChan(u.X) {
 					if inComm(c) {
 						break
 					}
@@ -298,7 +347,7 @@ func (m *migrator) decl(d ast.Node) {
 				}
 			}
 		case *ast.ExprStmt:
-			if u, ok := n.X.(*ast.UnaryExpr); ok && u.Op == token.ARROW {
+			if u, ok := n.X.(*ast.UnaryExpr); ok && u.Op == token.ARROW && m.isChan(u.X) {
 				if !inComm(c) {
 					n.X = call(sel(u.X, "Recv"))
 					setPos(n, n.Pos())
@@ -306,7 +355,7 @@ func (m *migrator) decl(d ast.Node) {
 				}
 			}
 		case *ast.UnaryExpr:
-			if n.Op == token.ARROW {
+			if n.Op == token.ARROW && m.isChan(n.X) {
 				switch c.Parent().(type) {
 				case *ast.ExprStmt, *ast.AssignStmt: // rewritten above
 				default:
