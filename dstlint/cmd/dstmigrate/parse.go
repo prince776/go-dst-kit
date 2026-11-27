@@ -3,10 +3,8 @@ package main
 import (
 	"go/ast"
 	"go/parser"
-	"go/types"
 
 	"go/token"
-	"golang.org/x/tools/go/packages"
 	"reflect"
 )
 
@@ -62,13 +60,4 @@ func mustStmt(src string) ast.Stmt {
 	st := f.Decls[0].(*ast.FuncDecl).Body.List[0]
 	zeroPos(st)
 	return st
-}
-
-// importContext type-checks the standard context package.
-func importContext() (*types.Package, error) {
-	pkgs, err := packages.Load(&packages.Config{Mode: packages.NeedTypes}, "context")
-	if err != nil {
-		return nil, err
-	}
-	return pkgs[0].Types, nil
 }

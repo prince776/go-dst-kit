@@ -461,7 +461,7 @@ func (m *migrator) ctxDone(e ast.Expr) string {
 	if !ok || s.Sel.Name != "Done" {
 		return ""
 	}
-	if t := m.info.TypeOf(s.X); t == nil || !types.Implements(t, contextType()) {
+	if t := m.info.TypeOf(s.X); t == nil || !isContext(t) {
 		return ""
 	}
 	var b bytes.Buffer
@@ -469,18 +469,23 @@ func (m *migrator) ctxDone(e ast.Expr) string {
 	return b.String()
 }
 
-var ctxIface *types.Interface
-
-// contextType is context.Context's method set (Deadline, Done, Err, Value).
-func contextType() *types.Interface {
-	if ctxIface == nil {
-		pkg, err := importContext()
-		if err != nil {
-			panic(err)
+// isContext reports whether t has a context's Done and Err: Done() <-chan
+// struct{} and Err() error.
+func isContext(t types.Type) bool {
+	has := func(name string) *types.Signature {
+		obj, _, _ := types.LookupFieldOrMethod(t, true, nil, name)
+		fn, ok := obj.(*types.Func)
+		if !ok {
+			return nil
 		}
-		ctxIface = pkg.Scope().Lookup("Context").Type().Underlying().(*types.Interface)
+		return fn.Type().(*types.Signature)
 	}
-	return ctxIface
+	done, errm := has("Done"), has("Err")
+	if done == nil || errm == nil || done.Params().Len() != 0 || done.Results().Len() != 1 {
+		return false
+	}
+	ch, ok := done.Results().At(0).Type().(*types.Chan)
+	return ok && ch.Dir() == types.RecvOnly && types.Identical(ch.Elem(), types.NewStruct(nil, nil))
 }
 
 func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
