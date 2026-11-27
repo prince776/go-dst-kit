@@ -70,6 +70,11 @@ func (m *Mutex) TryLock() bool { return m.mu.TryLock() }
 
 // Unlock is (*sync.Mutex).Unlock.
 func (m *Mutex) Unlock() {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return // a killed goroutine's deferred unlock: its process is gone
+		}
+	}
 	m.mu.Unlock()
 	if m.waiters.Load() > 0 {
 		if s := simSchedSlow(&m.s); s != nil {
@@ -107,6 +112,11 @@ func (m *RWMutex) Lock() {
 
 // Unlock is (*sync.RWMutex).Unlock.
 func (m *RWMutex) Unlock() {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return // a killed goroutine's deferred unlock: its process is gone
+		}
+	}
 	m.mu.Unlock()
 	m.wake()
 }
@@ -129,6 +139,11 @@ func (m *RWMutex) RLock() {
 
 // RUnlock is (*sync.RWMutex).RUnlock.
 func (m *RWMutex) RUnlock() {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return // a killed goroutine's deferred unlock: its process is gone
+		}
+	}
 	m.mu.RUnlock()
 	m.wake()
 }

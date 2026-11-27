@@ -29,6 +29,9 @@
 //   - [misuse-reported] A World operation from a goroutine the World
 //     didn't start, or from an invariant, fails the run with its stack.
 //   - [nothing-leaks] After Shutdown, no task goroutine is left running.
+//   - [kill-unwind-is-silent] A killed task's deferred functions can't
+//     crash the process: a dst mutex they unlock, held or not, is left
+//     as it is (Go's defer Unlock, Unlock, wait, Lock, killed in the wait).
 //
 // This package is single-threaded by construction: every exported method is
 // called either by the task holding the baton or by the scheduler itself
@@ -140,14 +143,14 @@ type Scheduler struct {
 	// such a yield (which wakes no one).
 	spinners []*Task
 	spinStep bool
-	handoff      chan struct{}
-	hash         uint64
-	steps        uint64
-	checks       []uint64
-	failMu       sync.Mutex // a goroutine outside the World may report misuse
-	failure      error
-	machines     []*Machine
-	calls        uint64 // scheduling calls, for sampling the identity check
+	handoff  chan struct{}
+	hash     uint64
+	steps    uint64
+	checks   []uint64
+	failMu   sync.Mutex // a goroutine outside the World may report misuse
+	failure  error
+	machines []*Machine
+	calls    uint64 // scheduling calls, for sampling the identity check
 	// PCT state.
 	pctRng   *rand.Rand
 	drops    []uint64 // steps at which the running task's priority drops
@@ -709,6 +712,10 @@ func (s *Scheduler) misuse(holder *Task) {
 
 // Stepping reports whether a task holds the baton now (mid-step).
 func (s *Scheduler) Stepping() bool { return s.cur != nil }
+
+// Unwinding reports whether the task holding the baton is a killed one
+// running its deferred functions.
+func (s *Scheduler) Unwinding() bool { return s.cur != nil && s.cur.killed }
 
 // InTask reports whether a task holds the baton (false inside timer
 // callbacks).
