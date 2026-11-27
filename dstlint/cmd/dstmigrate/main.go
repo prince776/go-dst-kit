@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/printer"
 	"go/token"
 	"go/types"
@@ -72,6 +73,7 @@ func main() {
 		m := &migrator{fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
+			m.plans = nil
 			if !m.file(f) {
 				continue
 			}
@@ -81,7 +83,14 @@ func main() {
 				printer.Fprint(&raw, pkg.Fset, f)
 				fatal(fmt.Errorf("%s: %w\n%s", name, err, raw.String()))
 			}
-			out, err := imports.Process(name, buf.Bytes(), nil)
+			spliced, err := spliceSelects(name, buf.Bytes(), m.plans)
+			if err != nil {
+				fatal(fmt.Errorf("%s: %w", name, err))
+			}
+			if formatted, err := format.Source(spliced); err == nil {
+				spliced = formatted
+			}
+			out, err := imports.Process(name, spliced, nil)
 			if err != nil {
 				out = buf.Bytes() // left for the compiler to explain
 			}
@@ -106,7 +115,8 @@ type migrator struct {
 	worlds   map[string]string
 	changes  int
 	needRecv bool
-	world    string // the World expression in the current function
+	world    string       // the World expression in the current function
+	plans    []selectPlan // the file's selects, in source order, for the text pass
 	selN     int
 }
 
@@ -174,11 +184,11 @@ func (m *migrator) decl(d ast.Node) {
 	astutil.Apply(d, nil, func(c *astutil.Cursor) bool {
 		switch n := c.Node().(type) {
 		case *ast.SelectStmt:
-			c.Replace(m.selectStmt(n))
+			m.plans = append(m.plans, m.planSelect(n))
 			m.changes++
 		case *ast.SendStmt:
 			if !inComm(c) {
-				c.Replace(&ast.ExprStmt{X: call(sel(n.Chan, "Send"), n.Value)})
+				m.replace(c, &ast.ExprStmt{X: call(sel(n.Chan, "Send"), n.Value)})
 				m.changes++
 			}
 		case *ast.AssignStmt:
@@ -192,6 +202,7 @@ func (m *migrator) decl(d ast.Node) {
 						lhs = append(lhs, ast.NewIdent("_"))
 					}
 					n.Lhs, n.Rhs = lhs, []ast.Expr{call(sel(u.X, "Recv"))}
+					setPos(n, n.Pos())
 					m.changes++
 				}
 			}
@@ -199,6 +210,7 @@ func (m *migrator) decl(d ast.Node) {
 			if u, ok := n.X.(*ast.UnaryExpr); ok && u.Op == token.ARROW {
 				if !inComm(c) {
 					n.X = call(sel(u.X, "Recv"))
+					setPos(n, n.Pos())
 					m.changes++
 				}
 			}
@@ -207,7 +219,7 @@ func (m *migrator) decl(d ast.Node) {
 				switch c.Parent().(type) {
 				case *ast.ExprStmt, *ast.AssignStmt: // rewritten above
 				default:
-					c.Replace(call(ast.NewIdent("dstRecv"), n.X))
+					m.replace(c, call(ast.NewIdent("dstRecv"), n.X))
 					m.needRecv = true
 					m.changes++
 				}
@@ -215,6 +227,7 @@ func (m *migrator) decl(d ast.Node) {
 		case *ast.RangeStmt:
 			if m.isChan(n.X) {
 				n.X = call(sel(n.X, "All"))
+				setPos(n, n.Pos())
 				m.changes++
 			}
 		case *ast.CallExpr:
@@ -226,10 +239,11 @@ func (m *migrator) decl(d ast.Node) {
 					ch = n.Y
 				}
 				n.X, n.Y = ch, m.zeroChan(ch)
+				setPos(n, n.Pos())
 				m.changes++
 			}
 		case *ast.GoStmt:
-			c.Replace(m.goStmt(n))
+			m.replace(c, m.goStmt(n))
 			m.changes++
 		}
 		return true
@@ -239,7 +253,7 @@ func (m *migrator) decl(d ast.Node) {
 	astutil.Apply(d, nil, func(c *astutil.Cursor) bool {
 		switch n := c.Node().(type) {
 		case *ast.ChanType:
-			c.Replace(&ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: n.Value})
+			m.replace(c, &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: n.Value})
 			m.changes++
 		case *ast.SelectorExpr:
 			if id, ok := n.X.(*ast.Ident); ok {
@@ -266,6 +280,13 @@ func inComm(c *astutil.Cursor) bool {
 	return ok && c.Name() == "Comm"
 }
 
+// replace puts n in place of c's node, at its position (so the printer
+// keeps comments around it where they were).
+func (m *migrator) replace(c *astutil.Cursor, n ast.Node) {
+	setPos(n, c.Node().Pos())
+	c.Replace(n)
+}
+
 func (m *migrator) zeroChan(ch ast.Expr) ast.Expr {
 	// Parenthesized: a composite literal in an if or for condition must be.
 	return &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.chanElem(ch))}}}
@@ -282,17 +303,17 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 				if len(n.Args) > 1 {
 					size = n.Args[1]
 				}
-				c.Replace(call(&ast.IndexExpr{X: sel(ast.NewIdent("dst"), "MakeChan"), Index: ct.Value}, m.w(), size))
+				m.replace(c, call(&ast.IndexExpr{X: sel(ast.NewIdent("dst"), "MakeChan"), Index: ct.Value}, m.w(), size))
 				m.changes++
 			}
 		case "close":
 			if len(n.Args) == 1 && m.isChan(n.Args[0]) {
-				c.Replace(call(sel(n.Args[0], "Close")))
+				m.replace(c, call(sel(n.Args[0], "Close")))
 				m.changes++
 			}
 		case "len", "cap":
 			if len(n.Args) == 1 && m.isChan(n.Args[0]) {
-				c.Replace(call(sel(n.Args[0], map[string]string{"len": "Len", "cap": "Cap"}[id.Name])))
+				m.replace(c, call(sel(n.Args[0], map[string]string{"len": "Len", "cap": "Cap"}[id.Name])))
 				m.changes++
 			}
 		}
@@ -315,6 +336,7 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 		switch s.Sel.Name {
 		case "Now", "Since", "Until", "Sleep", "After", "AfterFunc", "NewTimer", "NewTicker":
 			n.Fun = sel(m.w(), s.Sel.Name)
+			setPos(n, n.Pos())
 			m.changes++
 		}
 	case "math/rand", "math/rand/v2":
@@ -325,11 +347,13 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 				name = s.Sel.Name
 			}
 			n.Fun = sel(call(sel(m.w(), "Rand")), name)
+			setPos(n, n.Pos())
 			m.changes++
 		}
 	case "crypto/rand":
 		if s.Sel.Name == "Read" {
 			n.Fun = sel(call(sel(m.w(), "Rand")), "CryptoRead")
+			setPos(n, n.Pos())
 			m.changes++
 		}
 	}
@@ -368,95 +392,95 @@ func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 	return &ast.BlockStmt{List: append(pre, stmt)}
 }
 
-// selectStmt rewrites a select into dst.Select plus a switch on the case
-// that fired.
-func (m *migrator) selectStmt(s *ast.SelectStmt) ast.Stmt {
-	m.selN++
-	which := fmt.Sprintf("sel%d", m.selN)
-	var decls, cases []ast.Stmt
-	bindings := map[*ast.CaseClause]int{} // generated statements at the top of each case
-	var ops []ast.Expr
-	decls = append(decls, mustStmt(fmt.Sprintf("var %s int", which)))
-	for i, cl := range s.Body.List {
-		cc := cl.(*ast.CommClause)
-		k := i + 1
-		mark := mustStmt(fmt.Sprintf("%s = %d", which, k))
-		var pre []ast.Stmt // bindings at the top of the case body
-		switch comm := cc.Comm.(type) {
-		case nil: // default
-			ops = append(ops, call(sel(ast.NewIdent("dst"), "Default"), funcLit(nil, mark)))
-		case *ast.SendStmt:
-			ops = append(ops, call(sel(ast.NewIdent("dst"), "OnSend"), m.moved(comm.Chan), m.moved(comm.Value), funcLit(nil, mark)))
-		case *ast.ExprStmt: // case <-ch:
-			ch := comm.X.(*ast.UnaryExpr).X
-			ops = append(ops, call(sel(ast.NewIdent("dst"), "OnRecv"), m.moved(ch), m.recvFunc(ch, mark, nil, nil)))
-		case *ast.AssignStmt: // case v := <-ch, v, ok := <-ch, v = <-ch
-			ch := comm.Rhs[0].(*ast.UnaryExpr).X
-			elem := m.chanElem(ch)
-			vName, okName := fmt.Sprintf("%sv%d", which, k), fmt.Sprintf("%sok%d", which, k)
-			decls = append(decls, mustStmt(fmt.Sprintf("var %s %s", vName, elem)))
-			got := []string{vName}
-			if len(comm.Lhs) == 2 {
-				decls = append(decls, mustStmt(fmt.Sprintf("var %s bool", okName)))
-				got = append(got, okName)
-			}
-			ops = append(ops, call(sel(ast.NewIdent("dst"), "OnRecv"), m.moved(ch), m.recvFunc(ch, mark, &vName, map[bool]*string{true: &okName, false: nil}[len(comm.Lhs) == 2])))
-			rhs := []ast.Expr{ast.NewIdent(vName)}
-			if len(comm.Lhs) == 2 {
-				rhs = append(rhs, ast.NewIdent(okName))
-			}
-			pre = append(pre, &ast.AssignStmt{Lhs: comm.Lhs, Tok: comm.Tok, Rhs: rhs})
-		}
-		clause := &ast.CaseClause{List: []ast.Expr{&ast.BasicLit{Kind: token.INT, Value: fmt.Sprint(k)}}, Body: append(pre, cc.Body...)}
-		bindings[clause] = len(pre)
-		cases = append(cases, clause)
-	}
-	selectCall := &ast.ExprStmt{X: call(sel(ast.NewIdent("dst"), "Select"), append([]ast.Expr{m.w()}, ops...)...)}
-	sw := &ast.SwitchStmt{Tag: ast.NewIdent(which), Body: &ast.BlockStmt{List: cases}}
-	// The generated header takes the select's position, before every
-	// original case body, so comments in the bodies stay where they were.
-	for _, d := range decls {
-		setPos(d, s.Select)
-	}
-	setPos(selectCall, s.Select)
-	for _, c := range cases {
-		cc := c.(*ast.CaseClause)
-		cc.Case, cc.Colon = s.Select, s.Select
-		for _, st := range cc.Body[:bindings[cc]] {
-			setPos(st, s.Select)
-		}
-	}
-	return &ast.BlockStmt{List: append(append(decls, selectCall), sw)}
+// selectPlan is what the text pass needs to rewrite one select that it
+// can't get from the syntax alone: the World and the cases' element
+// types (from the original type information).
+type selectPlan struct {
+	world string
+	elems []string // per case: the received element type ("" for send and default)
 }
 
-// moved copies an expression moved out of place, without its positions
-// (the printer places comments by position).
-func (m *migrator) moved(e ast.Expr) ast.Expr {
-	var b bytes.Buffer
-	if err := printer.Fprint(&b, m.fset, e); err != nil {
-		panic(err)
+func (m *migrator) planSelect(s *ast.SelectStmt) selectPlan {
+	p := selectPlan{world: m.world}
+	for _, cl := range s.Body.List {
+		elem := ""
+		switch comm := cl.(*ast.CommClause).Comm.(type) {
+		case *ast.ExprStmt:
+			elem = m.chanElem(comm.X.(*ast.UnaryExpr).X)
+		case *ast.AssignStmt:
+			elem = m.chanElem(comm.Rhs[0].(*ast.UnaryExpr).X)
+		}
+		p.elems = append(p.elems, elem)
 	}
-	return expr(b.String())
+	return p
 }
 
-func (m *migrator) recvFunc(ch ast.Expr, mark ast.Stmt, v, ok *string) ast.Expr {
-	vp, okp := "_", "_"
-	body := []ast.Stmt{mark}
-	if v != nil {
-		vp = "v"
-		body = append(body, mustStmt(*v+" = v"))
+// spliceSelects rewrites src's selects (in source order, plans[i] for the
+// i-th) as text: a generated header, then a switch whose cases are the
+// original case bodies copied verbatim, comments and all. Innermost (last)
+// first, re-parsing after each.
+func spliceSelects(name string, src []byte, plans []selectPlan) ([]byte, error) {
+	for i := len(plans) - 1; i >= 0; i-- {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, name, src, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		var sels []*ast.SelectStmt
+		ast.Inspect(f, func(n ast.Node) bool {
+			if s, ok := n.(*ast.SelectStmt); ok {
+				sels = append(sels, s)
+			}
+			return true
+		})
+		if len(sels) != len(plans) {
+			return nil, fmt.Errorf("%d selects in the rewritten file, %d planned", len(sels), len(plans))
+		}
+		off := func(p token.Pos) int { return fset.Position(p).Offset }
+		text := func(n ast.Node) string { return string(src[off(n.Pos()):off(n.End())]) }
+		s, plan := sels[i], plans[i]
+		id := fmt.Sprintf("sel%d", i+1)
+		var head, ops, body strings.Builder
+		fmt.Fprintf(&head, "{\nvar %s int\n", id)
+		clauses := s.Body.List
+		for k, cl := range clauses {
+			cc := cl.(*ast.CommClause)
+			n := k + 1
+			end := off(s.Body.Rbrace)
+			if k+1 < len(clauses) {
+				end = off(clauses[k+1].Pos())
+			}
+			caseBody := string(src[off(cc.Colon)+1 : end])
+			fmt.Fprintf(&body, "case %d:", n)
+			switch comm := cc.Comm.(type) {
+			case nil:
+				fmt.Fprintf(&ops, "dst.Default(func() { %s = %d }),\n", id, n)
+			case *ast.SendStmt:
+				fmt.Fprintf(&ops, "dst.OnSend(%s, %s, func() { %s = %d }),\n", text(comm.Chan), text(comm.Value), id, n)
+			case *ast.ExprStmt:
+				fmt.Fprintf(&ops, "dst.OnRecv(%s, func(_ %s, _ bool) { %s = %d }),\n", text(comm.X.(*ast.UnaryExpr).X), plan.elems[k], id, n)
+			case *ast.AssignStmt:
+				v, ok := fmt.Sprintf("%sv%d", id, n), fmt.Sprintf("%sok%d", id, n)
+				fmt.Fprintf(&head, "var %s %s\n", v, plan.elems[k])
+				var lhs []string
+				for _, l := range comm.Lhs {
+					lhs = append(lhs, text(l))
+				}
+				if len(comm.Lhs) == 2 {
+					fmt.Fprintf(&head, "var %s bool\n", ok)
+					fmt.Fprintf(&ops, "dst.OnRecv(%s, func(v %s, ok bool) { %s = %d; %s, %s = v, ok }),\n", text(comm.Rhs[0].(*ast.UnaryExpr).X), plan.elems[k], id, n, v, ok)
+					fmt.Fprintf(&body, "\n%s %s %s, %s", strings.Join(lhs, ", "), comm.Tok, v, ok)
+				} else {
+					fmt.Fprintf(&ops, "dst.OnRecv(%s, func(v %s, _ bool) { %s = %d; %s = v }),\n", text(comm.Rhs[0].(*ast.UnaryExpr).X), plan.elems[k], id, n, v)
+					fmt.Fprintf(&body, "\n%s %s %s", lhs[0], comm.Tok, v)
+				}
+			}
+			body.WriteString(caseBody)
+		}
+		repl := head.String() + "dst.Select(" + plan.world + ",\n" + ops.String() + ")\nswitch " + id + " {\n" + body.String() + "}\n}"
+		src = append(append(append([]byte{}, src[:off(s.Pos())]...), repl...), src[off(s.End()):]...)
 	}
-	if ok != nil {
-		okp = "ok"
-		body = append(body, mustStmt(*ok+" = ok"))
-	}
-	return &ast.FuncLit{
-		Type: &ast.FuncType{Params: &ast.FieldList{List: []*ast.Field{
-			{Names: []*ast.Ident{ast.NewIdent(vp)}, Type: expr(m.chanElem(ch))},
-			{Names: []*ast.Ident{ast.NewIdent(okp)}, Type: ast.NewIdent("bool")},
-		}}},
-		Body: &ast.BlockStmt{List: body},
-	}
+	return src, nil
 }
 
 func funcLit(params *ast.FieldList, stmts ...ast.Stmt) ast.Expr {
