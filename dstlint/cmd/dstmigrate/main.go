@@ -180,6 +180,7 @@ type migrator struct {
 	world     string       // the World expression in the current function
 	plans     []selectPlan // the file's selects, in source order, for the text pass
 	selN      int
+	mutated   map[types.Object]bool // the file's variables that change (mutatedIn)
 }
 
 // isChan reports whether e is a channel this migration converts: one of
@@ -284,6 +285,7 @@ func (m *migrator) w() ast.Expr { return expr(m.world) }
 // file rewrites f; it reports whether anything changed.
 func (m *migrator) file(f *ast.File) bool {
 	before := m.changes
+	m.mutated = m.mutatedIn(f)
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
 		m.world = "__w"
@@ -888,25 +890,52 @@ func (m *migrator) isOSFile(t types.Type) bool {
 }
 
 // goStmt: go f(a, b) evaluates f, a and b now; w.Go(func() { f(a, b) })
-// would evaluate them later, so they are bound first.
+// would evaluate them later, so whatever could change in between is
+// bound first: every operand but constants, function literals,
+// functions, and local variables the file never changes (see mutated).
+// A method's receiver is bound as Go evaluates it: a pointer or an
+// interface is copied; otherwise (a value receiver, which go copies now,
+// or a method on an addressable value) the method value itself is bound.
 func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 	if fl, ok := g.Call.Fun.(*ast.FuncLit); ok && len(g.Call.Args) == 0 {
 		return &ast.ExprStmt{X: call(sel(m.w(), "Go"), fl)}
 	}
 	var pre []ast.Stmt
-	bind := func(e ast.Expr) ast.Expr {
-		switch e.(type) {
-		case *ast.Ident, *ast.BasicLit:
-			return e
-		}
+	force := func(e ast.Expr) ast.Expr {
 		m.selN++
 		name := ast.NewIdent(fmt.Sprintf("goArg%d", m.selN))
 		pre = append(pre, &ast.AssignStmt{Lhs: []ast.Expr{name}, Tok: token.DEFINE, Rhs: []ast.Expr{e}})
 		return ast.NewIdent(name.Name)
 	}
+	bind := func(e ast.Expr) ast.Expr {
+		if m.stable(e) {
+			return e
+		}
+		return force(e)
+	}
 	fn := g.Call.Fun
-	if s, ok := fn.(*ast.SelectorExpr); ok {
-		fn = &ast.SelectorExpr{X: bind(s.X), Sel: s.Sel} // the method value's receiver, now
+	switch f := fn.(type) {
+	case *ast.FuncLit:
+	case *ast.SelectorExpr:
+		if id, ok := f.X.(*ast.Ident); ok {
+			if _, isPkg := m.info.Uses[id].(*types.PkgName); isPkg {
+				break // pkg.F
+			}
+		}
+		selection := m.info.Selections[f]
+		recvT := m.info.TypeOf(f.X)
+		switch {
+		case selection != nil && selection.Kind() == types.MethodVal && recvT != nil && (isPointer(recvT) || types.IsInterface(recvT)) && !(isPointer(recvT) && !ptrRecv(selection)):
+			fn = &ast.SelectorExpr{X: bind(f.X), Sel: f.Sel} // copy the pointer or interface now
+		case m.stable(f.X):
+			if selection != nil && selection.Kind() == types.MethodVal && isPointer(recvT) && !ptrRecv(selection) {
+				fn = force(f) // *p is copied now
+			}
+		default:
+			fn = force(f) // the method value or the func field, now
+		}
+	default:
+		fn = bind(fn)
 	}
 	args := make([]ast.Expr, len(g.Call.Args))
 	for i, a := range g.Call.Args {
@@ -918,6 +947,126 @@ func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 		return stmt
 	}
 	return &ast.BlockStmt{List: append(pre, stmt)}
+}
+
+func isPointer(t types.Type) bool { _, ok := t.Underlying().(*types.Pointer); return ok }
+
+// ptrRecv reports whether a method selection's method has a pointer
+// receiver.
+func ptrRecv(s *types.Selection) bool {
+	sig, ok := s.Obj().Type().(*types.Signature)
+	return ok && sig.Recv() != nil && isPointer(sig.Recv().Type())
+}
+
+// stable reports whether e has the same value when a goroutine started
+// now runs as it has now: a constant, a function literal, a function or
+// type, nil, or a local variable the file never changes.
+func (m *migrator) stable(e ast.Expr) bool {
+	if tv, ok := m.info.Types[e]; ok && tv.Value != nil {
+		return true
+	}
+	switch e := e.(type) {
+	case *ast.BasicLit, *ast.FuncLit:
+		return true
+	case *ast.ParenExpr:
+		return m.stable(e.X)
+	case *ast.Ident:
+		switch obj := m.info.Uses[e].(type) {
+		case *types.Var:
+			return obj.Parent() != nil && obj.Parent() != m.pkg.Scope() && !m.mutated[obj]
+		case *types.Nil, *types.Const, *types.Func, *types.TypeName, *types.Builtin:
+			return true
+		}
+	}
+	return false
+}
+
+// mutatedIn returns the variables f may change after they are declared:
+// assigned (including by := alongside a new name), incremented, ranged
+// into, address-taken, or given to a pointer method (an implicit &),
+// directly or through a field or element.
+func (m *migrator) mutatedIn(f *ast.File) map[types.Object]bool {
+	mut := map[types.Object]bool{}
+	// mark records e's variable as changed. A change through a pointer,
+	// or to a slice's or map's element, leaves the variable itself (the
+	// pointer, the slice header, the map) as it was: the walk stops there.
+	mark := func(e ast.Expr) {
+		indirect := func(x ast.Expr) bool {
+			t := m.info.TypeOf(x)
+			if t == nil {
+				return false
+			}
+			switch t.Underlying().(type) {
+			case *types.Pointer, *types.Slice, *types.Map:
+				return true
+			}
+			return false
+		}
+		for {
+			switch x := e.(type) {
+			case *ast.Ident:
+				if obj := m.info.ObjectOf(x); obj != nil {
+					mut[obj] = true
+				}
+				return
+			case *ast.SelectorExpr:
+				if indirect(x.X) {
+					return
+				}
+				e = x.X
+			case *ast.IndexExpr:
+				if indirect(x.X) {
+					return
+				}
+				e = x.X
+			case *ast.StarExpr:
+				return // *p = v changes what p points to, not p
+			case *ast.ParenExpr:
+				e = x.X
+			case *ast.SliceExpr:
+				if indirect(x.X) {
+					return
+				}
+				e = x.X
+			default:
+				return
+			}
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, l := range n.Lhs {
+				if id, ok := l.(*ast.Ident); ok && n.Tok == token.DEFINE && m.info.Defs[id] != nil {
+					continue // declared here
+				}
+				mark(l)
+			}
+		case *ast.IncDecStmt:
+			mark(n.X)
+		case *ast.RangeStmt:
+			if n.Tok == token.ASSIGN {
+				if n.Key != nil {
+					mark(n.Key)
+				}
+				if n.Value != nil {
+					mark(n.Value)
+				}
+			}
+		case *ast.UnaryExpr:
+			if n.Op == token.AND {
+				mark(n.X)
+			}
+		case *ast.SelectorExpr:
+			if s := m.info.Selections[n]; s != nil && s.Kind() == types.MethodVal && ptrRecv(s) {
+				if t := m.info.TypeOf(n.X); t != nil && !isPointer(t) {
+					mark(n.X)
+				}
+			}
+		}
+		return true
+	})
+	return mut
 }
 
 // selectPlan is what the text pass needs to rewrite one select that it

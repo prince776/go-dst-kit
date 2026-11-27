@@ -1,0 +1,73 @@
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sort"
+
+	"github.com/prince776/go-dst-kit/realworld"
+)
+
+var __w = realworld.New(realworld.Options{})
+
+type val struct{ x int }
+
+func (v val) show(out chan<- string)   { out <- fmt.Sprint("value receiver: ", v.x) }
+func (v *val) showP(out chan<- string) { out <- fmt.Sprint("pointer receiver: ", v.x) }
+
+type holder struct{ fn func(chan<- string) }
+
+func say(s string) func(chan<- string) { return func(out chan<- string) { out <- s } }
+
+func show(what string, n int, out chan<- string) { out <- fmt.Sprint(what, ": ", n) }
+
+// Each go statement's operands change right after it; the goroutines run
+// only once main blocks (one P), so they see the new values unless their
+// operands were evaluated at the go statement, as Go does.
+func main() {
+	runtime.GOMAXPROCS(1)
+	out := make(chan string, 16)
+
+	n := 1
+	go show("variable", n, out)
+	n++
+
+	v := val{x: 1}
+	go v.show(out)
+	v.x = 2
+
+	p := &val{x: 1}
+	go p.show(out) // value method through a pointer: *p is copied now
+	p.x = 2
+
+	q := &val{x: 1}
+	other := &val{x: 2}
+	go q.showP(out)
+	q = other
+	_ = q
+
+	f := say("func variable: 1")
+	go f(out)
+	f = say("func variable: 2")
+	_ = f
+
+	h := holder{fn: say("func field: 1")}
+	go h.fn(out)
+	h.fn = say("func field: 2")
+
+	k := 1 // never changed: needs no binding
+	go show("stable", k, out)
+
+	r := &val{x: 1} // changed only through the pointer: r needs no binding
+	go r.showP(out)
+	r.x = 1
+
+	var got []string
+	for range 8 {
+		got = append(got, <-out)
+	}
+	sort.Strings(got)
+	for _, s := range got {
+		fmt.Println(s)
+	}
+}

@@ -75,6 +75,53 @@ func TestMigrateSample(t *testing.T) {
 	t.Logf("\n%s", got)
 }
 
+// A go statement's operands are evaluated at the go statement: the
+// migrated program prints what the original does when every operand
+// changes right after its go statement (a variable, a value receiver,
+// a value method through a pointer, a pointer, a func variable, a func
+// field), and an operand that never changes isn't bound.
+// Fails if any goroutine sees a value from after its go statement, or a
+// stable operand gets a binding.
+func TestMigrateGoArgsEvaluatedNow(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
+	dir := t.TempDir()
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(here), "testdata", "goargs", "p.go.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := func(name string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		}
+		return string(out)
+	}
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/goargs\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => "+kit+"\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "p.go"), src, 0o644)
+	want := must("go", "run", ".")
+	bin := filepath.Join(dir, "dstmigrate")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = filepath.Dir(here)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	must(bin, ".")
+	migrated, _ := os.ReadFile(filepath.Join(dir, "p.go"))
+	if regexp.MustCompile(`(?m)^\s*go [a-z]`).Match(migrated) {
+		t.Fatalf("a go statement survived:\n%s", migrated)
+	}
+	if got := must("go", "run", "."); got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+	if regexp.MustCompile(`goArg\d+ := (k|r)\b`).Match(migrated) {
+		t.Errorf("a variable that never changes (k, or r, changed only through itself as a pointer) was bound:\n%s", migrated)
+	}
+}
+
 // File I/O through package os (and io/ioutil) migrates to the World's FS:
 // the result compiles and vets, no os filesystem call or *os.File is
 // left, WriteString becomes io.WriteString, and a call with no World
