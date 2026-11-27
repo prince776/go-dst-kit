@@ -10,7 +10,9 @@ import (
 
 // UDP: datagrams between hosts. Each datagram is delivered whole or not at
 // all, after its own latency (so datagrams reorder). With network faults
-// on, datagrams are lost and duplicated at the rates in Options. A
+// on, datagrams are lost and duplicated at the rates in Options; with
+// Options.Links, a slow link delays them, a lossy link loses them, and a
+// link that blocks UDP drops them all until the network is calm. A
 // partition, a crashed host, or a port nobody listens on drops them (UDP
 // never holds traffic); a paused host's datagrams wait in its receive
 // buffer, which holds udpBuffer of them and drops the rest.
@@ -32,6 +34,15 @@ func isUDP(network string) bool {
 type udpAddr struct{ addr }
 
 func (a udpAddr) Network() string { return "udp" }
+
+// udp is a as the net package's code sees it: a *net.UDPAddr for a host
+// named by its IP, else a itself.
+func (a udpAddr) udp() net.Addr {
+	if ip := hostIP(a.host); ip != nil {
+		return &net.UDPAddr{IP: ip, Port: a.port}
+	}
+	return a
+}
 
 type datagram struct {
 	from udpAddr
@@ -97,7 +108,7 @@ func (pc *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		case len(pc.buf) > 0:
 			d := pc.buf[0]
 			pc.buf = pc.buf[1:]
-			return copy(p, d.data), d.from, nil
+			return copy(p, d.data), d.from.udp(), nil
 		}
 		if pc.wait(pc.rdl, "read from udp "+pc.a.String()) {
 			return 0, nil, pc.opErr("read", os.ErrDeadlineExceeded)
@@ -149,6 +160,15 @@ func (pc *packetConn) WriteTo(p []byte, to net.Addr) (int, error) {
 	if n.hosts[dst.host] == nil {
 		return 0, pc.opErr("write", &net.DNSError{Err: "no such host", Name: dst.host, IsNotFound: true})
 	}
+	var l *link
+	if n.opts.Links.on() {
+		l = n.link(pc.h.name, dst.host)
+		if l.udpBlocked && !n.calm {
+			n.s.Logf("network: link %s -> %s blocks UDP; dropped a datagram", pc.h.name, dst.host)
+			n.note("link blocked a datagram")
+			return len(p), nil
+		}
+	}
 	copies := 1
 	if n.opts.UDPDupProb > 0 && n.rng.Float64() < n.opts.UDPDupProb {
 		copies = 2
@@ -158,9 +178,25 @@ func (pc *packetConn) WriteTo(p []byte, to net.Addr) (int, error) {
 			n.s.Logf("network: lost a datagram %s -> %s", pc.a, dst)
 			continue
 		}
+		d := n.latency()
+		if l != nil {
+			d += l.extra
+			// The link's loss draws come from their own stream, after the
+			// network's, so they move no other draw.
+			if l.loss > 0 && !n.calm {
+				if n.udpRng == nil {
+					n.udpRng = n.s.Rand("network/udp-links")
+				}
+				if n.udpRng.Float64() < l.loss {
+					n.s.Logf("network: lossy link %s -> %s lost a datagram", pc.h.name, dst.host)
+					n.note("link lost a datagram")
+					continue
+				}
+			}
+		}
 		data := append([]byte(nil), p...) // the receiver gets its own copy
 		from := pc.a
-		n.s.At(n.s.Now()+n.latency(), func() { n.deliverUDP(from, dst, data) })
+		n.s.At(n.s.Now()+d, func() { n.deliverUDP(from, dst, data) })
 	}
 	return len(p), nil
 }
@@ -202,7 +238,7 @@ func (pc *packetConn) close() {
 	pc.n.s.WakeAll(pc)
 }
 
-func (pc *packetConn) LocalAddr() net.Addr { return pc.a }
+func (pc *packetConn) LocalAddr() net.Addr { return pc.a.udp() }
 
 func (pc *packetConn) SetDeadline(t time.Time) error {
 	pc.rdl, pc.wdl = t, t
@@ -264,7 +300,7 @@ func (c *udpConn) Read(p []byte) (int, error) {
 }
 
 func (c *udpConn) Write(p []byte) (int, error) { return c.WriteTo(p, c.peer) }
-func (c *udpConn) RemoteAddr() net.Addr        { return c.peer }
+func (c *udpConn) RemoteAddr() net.Addr        { return c.peer.udp() }
 
 var (
 	_ net.PacketConn = (*packetConn)(nil)

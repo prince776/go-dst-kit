@@ -2,6 +2,7 @@ package simworld_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -16,11 +17,27 @@ import (
 // test's main machine alongside, to inject faults.
 func udpRun(t *testing.T, opts simnet.Options, send func(w *dst.World, pc net.PacketConn, to net.Addr), ctl func(w *dst.World, sim *simworld.Sim, b *simworld.Machine)) []uint32 {
 	t.Helper()
+	var got []uint32
+	for _, a := range udpRunAt(t, opts, send, ctl) {
+		got = append(got, a.seq)
+	}
+	return got
+}
+
+// arrival is a datagram b received and when, since the run started.
+type arrival struct {
+	seq uint32
+	at  time.Duration
+}
+
+func udpRunAt(t *testing.T, opts simnet.Options, send func(w *dst.World, pc net.PacketConn, to net.Addr), ctl func(w *dst.World, sim *simworld.Sim, b *simworld.Machine)) []arrival {
+	t.Helper()
 	sim := simworld.New(simworld.Options{Seed: 3, Net: opts})
 	a := sim.AddMachine("a", simworld.MachineOptions{})
 	b := sim.AddMachine("b", simworld.MachineOptions{})
-	var got []uint32
+	var got []arrival
 	b.Start = func(w *dst.World) {
+		start := w.Now()
 		pc, err := w.Net().ListenPacket("udp", "b:7")
 		if err != nil {
 			t.Errorf("listen: %v", err)
@@ -33,7 +50,7 @@ func udpRun(t *testing.T, opts simnet.Options, send func(w *dst.World, pc net.Pa
 				return
 			}
 			if n == 4 {
-				got = append(got, binary.BigEndian.Uint32(buf))
+				got = append(got, arrival{binary.BigEndian.Uint32(buf), w.Since(start)})
 			}
 		}
 	}
@@ -208,5 +225,143 @@ func TestUDPCrash(t *testing.T) {
 	}
 	if len(got[0]) == 0 || len(got[1]) == 0 {
 		t.Errorf("received %d before the crash and %d after the restart; want some of each", len(got[0]), len(got[1]))
+	}
+}
+
+// Verifies: [udp-links]
+// Fails if: a lossy link loses none of its datagrams, or not about its
+// share, or its loss draws move the network's other draws (what arrives
+// isn't the lossless run minus the lost ones, in the same order); a slow
+// link doesn't delay datagrams by its added latency; after the network is
+// calm a lossy link still loses, or a slow link stops being slow; or (the
+// negative) Links with zero shares changes a run.
+func TestUDPLinks(t *testing.T) {
+	const n = 1000
+	base := simnet.Options{UDPLossProb: 0.1, UDPDupProb: 0.05}
+	plain := udpRun(t, base, sendN(n, time.Millisecond), nil)
+
+	// Lossy: about 30% more lost, and the rest exactly as before.
+	lossy := base
+	lossy.Links = simnet.LinkOptions{LossyShare: 1, LossProb: 0.3}
+	got := udpRun(t, lossy, sendN(n, time.Millisecond), nil)
+	if r := float64(len(got)) / float64(len(plain)); r < 0.6 || r > 0.8 {
+		t.Errorf("a link losing 30%% delivered %d of the lossless run's %d datagrams", len(got), len(plain))
+	}
+	i := 0
+	for _, v := range got {
+		for i < len(plain) && plain[i] != v {
+			i++
+		}
+		if i == len(plain) {
+			t.Fatalf("the lossy run isn't the lossless one minus losses: %v not in order", v)
+		}
+		i++
+	}
+
+	// Zero shares: the run is what it was.
+	zero := base
+	zero.Links = simnet.LinkOptions{SlowMean: time.Second, LossProb: 0.5}
+	if z := udpRun(t, zero, sendN(n, time.Millisecond), nil); fmt.Sprint(z) != fmt.Sprint(plain) {
+		t.Errorf("Links with zero shares changed the run")
+	}
+
+	// Slow: every datagram at least half the mean late; fast without.
+	lateness := func(opts simnet.Options) (lo, hi time.Duration) {
+		lo = time.Hour
+		for _, a := range udpRunAt(t, opts, sendN(100, 10*time.Millisecond), nil) {
+			late := a.at - time.Duration(a.seq)*10*time.Millisecond
+			lo, hi = min(lo, late), max(hi, late)
+		}
+		return lo, hi
+	}
+	if lo, _ := lateness(simnet.Options{Links: simnet.LinkOptions{SlowShare: 1, SlowMean: 200 * time.Millisecond}}); lo < 100*time.Millisecond {
+		t.Errorf("a slow link (+100ms to 300ms) delivered a datagram after %v", lo)
+	}
+	if _, hi := lateness(simnet.Options{}); hi > 50*time.Millisecond {
+		t.Errorf("a normal link took %v", hi)
+	}
+
+	// Calm: losses stop, slowness stays.
+	calm := func(opts simnet.Options) []arrival {
+		return udpRunAt(t, opts, func(w *dst.World, pc net.PacketConn, to net.Addr) {
+			w.Sleep(time.Second) // the network is calm by now
+			sendN(300, 10*time.Millisecond)(w, pc, to)
+		}, func(w *dst.World, sim *simworld.Sim, b *simworld.Machine) {
+			w.Sleep(500 * time.Millisecond)
+			sim.Net.StopFaults()
+		})
+	}
+	if got := calm(simnet.Options{Links: simnet.LinkOptions{LossyShare: 1, LossProb: 0.3}}); len(got) != 300 {
+		t.Errorf("a lossy link delivered %d of 300 datagrams after the network was calm", len(got))
+	}
+	for _, a := range calm(simnet.Options{Links: simnet.LinkOptions{SlowShare: 1, SlowMean: 200 * time.Millisecond}}) {
+		if late := a.at - time.Second - time.Duration(a.seq)*10*time.Millisecond; late < 100*time.Millisecond {
+			t.Fatalf("a slow link stopped being slow when the network was calm (%v)", late)
+		}
+	}
+}
+
+// Verifies: [udp-blocked]
+// Fails if: a link that blocks UDP delivers a datagram while the network
+// is faulty, TCP on it stops flowing, datagrams stay blocked once it is
+// calm, or (the negative) a link with no share blocks.
+func TestUDPBlocked(t *testing.T) {
+	run := func(share float64) (udpFaulty, udpCalm int, tcp string) {
+		sim := simworld.New(simworld.Options{Seed: 5, Net: simnet.Options{Links: simnet.LinkOptions{UDPBlockShare: share}}})
+		a := sim.AddMachine("a", simworld.MachineOptions{})
+		b := sim.AddMachine("b", simworld.MachineOptions{})
+		calm := false
+		b.Start = func(w *dst.World) {
+			pc, _ := w.Net().ListenPacket("udp", "b:7")
+			ln, _ := w.Net().Listen("tcp", "b:8")
+			w.Go(func() {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				buf := make([]byte, 16)
+				n, _ := c.Read(buf)
+				tcp = string(buf[:n])
+			})
+			buf := make([]byte, 8)
+			for {
+				if _, _, err := pc.ReadFrom(buf); err != nil {
+					return
+				}
+				if calm {
+					udpCalm++
+				} else {
+					udpFaulty++
+				}
+			}
+		}
+		a.Start = func(w *dst.World) {
+			pc, _ := w.Net().ListenPacket("udp", "a:0")
+			c, err := w.Net().Dial("tcp", "b:8")
+			if err == nil {
+				c.Write([]byte("flows"))
+			}
+			sendN(100, 10*time.Millisecond)(w, pc, hostAddr("b:7"))
+			w.Sleep(time.Second)
+			sendN(100, 10*time.Millisecond)(w, pc, hostAddr("b:7"))
+		}
+		res := sim.Run(func(w *dst.World) {
+			b.Boot()
+			a.Boot()
+			w.Sleep(1500 * time.Millisecond)
+			sim.Net.StopFaults()
+			calm = true
+			w.Sleep(3 * time.Second)
+		})
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		return
+	}
+	if f, c, tcp := run(1); f != 0 || c != 100 || tcp != "flows" {
+		t.Errorf("UDP blocked: %d datagrams arrived while faulty (want 0), %d of 100 once calm; TCP got %q", f, c, tcp)
+	}
+	if f, c, tcp := run(0); f != 100 || c != 100 || tcp != "flows" {
+		t.Errorf("no share: %d and %d of 100 datagrams arrived; TCP got %q", f, c, tcp)
 	}
 }

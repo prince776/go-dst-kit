@@ -56,6 +56,12 @@ state the run uses must be created inside it.
   exercising what it's for.
 - `h.Fail(err)` or `h.Failf` from anywhere fails the seed (for checks the
   workload makes as it goes).
+- What the faults did, for checks that depend on it ("X was up and
+  reachable throughout", "this seed's links stayed fast"):
+  `m.Downtime()` and `m.Pauses()` (intervals of true time, `To` zero while
+  open), `m.Slow()`, `h.Cut(from, to)` (when a partition blocked that
+  direction) and `h.Link(from, to)` (the link's added latency, loss and
+  UDP block for this run). They record what happened, whoever caused it.
 
 ## Phases
 

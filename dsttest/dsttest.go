@@ -71,6 +71,14 @@
 //     links losing segments, connections reset at a heal, slow machines
 //     stalling, and slow disks all occur; none of the stalls, losses or
 //     resets happen after the fault phase.
+//   - [timeline-is-faithful] A machine's Downtime and Pauses, and a pair's
+//     Cut, are exactly the crashes and kills to their restarts, the pauses
+//     to their resumes (or the crash that ended them), and the blocks to
+//     their heal, at the true times they happened; no machine runs inside
+//     one of its Down or Pause intervals.
+//   - [gray-udp] With Gray faults, across seeds, lossy links lose datagrams
+//     and some links drop all UDP while TCP flows; neither happens after
+//     the fault phase, nor without Gray.
 //   - [losses-are-final] A lost machine never boots again, even when a
 //     restart was already scheduled; the runner loses only machines the
 //     test's OnLoss accepts at that moment, and reports each loss once.
@@ -542,6 +550,18 @@ func (m *Machine) Lose() {
 // Lost reports whether the machine was lost for good.
 func (m *Machine) Lost() bool { return m.lost }
 
+// Downtime is when the machine was down: each crash, kill, power loss in
+// an I/O call or loss, to its restart (To zero if it hasn't restarted).
+func (m *Machine) Downtime() []Interval { return m.h.intervals(m.m.M.Downtime()) }
+
+// Pauses is when the machine was paused (by the runner, the test, or a
+// slow machine's stalls), each to its resume or the crash that ended it.
+func (m *Machine) Pauses() []Interval { return m.h.intervals(m.m.M.Pauses()) }
+
+// Slow reports whether the machine is slow (Faults.Gray): it stalls for
+// short spells now and then, the whole fault phase.
+func (m *Machine) Slow() bool { return m.slow }
+
 // OnLoss enables permanent losses (Faults.Loss) for this test. At each loss
 // the runner picks, among machines canLose accepts at that moment (lost
 // ones aside, crashed ones included: a server that died and never came
@@ -703,6 +723,43 @@ func (h *Harness) Partition(a, b []string) {
 // Heal ends every partition.
 func (h *Harness) Heal() { h.sim.Net.Heal() }
 
+// Interval is a stretch of a run in true time, as h.World().Now() reads
+// it. To is zero while it lasts.
+type Interval struct{ From, To time.Time }
+
+// Cut is when traffic from one machine to another (by name; "test" is the
+// test machine) was blocked by a partition, each to the heal that ended
+// it. A one-way partition shows in one direction only.
+func (h *Harness) Cut(from, to string) []Interval { return h.intervals(h.sim.Net.Cuts(from, to)) }
+
+// LinkInfo is how a link (one direction between two machines) behaves in
+// this run, drawn once per seed (Faults.Gray).
+type LinkInfo struct {
+	Extra      time.Duration // added latency: a slow link (stays slow in recovery)
+	Loss       float64       // chance a segment is lost (retransmitted) or a datagram lost, in the fault phase
+	UDPBlocked bool          // drops every datagram, TCP still flows, in the fault phase
+}
+
+// Link reports how the link from one machine to another behaves.
+func (h *Harness) Link(from, to string) LinkInfo {
+	extra, loss := h.sim.Net.Link(from, to)
+	return LinkInfo{Extra: extra, Loss: loss, UDPBlocked: h.sim.Net.UDPBlocked(from, to)}
+}
+
+// intervals converts the scheduler's spans (true durations) to times on
+// the test machine's clock, which is true time.
+func (h *Harness) intervals(ss []sched.Span) []Interval {
+	base := h.World().Now().Add(-h.sim.S.Now()) // true time zero
+	out := make([]Interval, len(ss))
+	for i, sp := range ss {
+		out[i].From = base.Add(sp.From)
+		if !sp.Open {
+			out[i].To = base.Add(sp.To)
+		}
+	}
+	return out
+}
+
 // ---- swarm ----
 
 // Swarm is one seed's fault mix.
@@ -748,6 +805,7 @@ type Swarm struct {
 	SlowStallEvery   time.Duration // and mean time between its stalls
 	SlowDiskShare    float64       // share of machines whose disk is slow
 	SlowDiskFactor   float64       // a slow disk's fsync latency, as a multiple of the others' (at least 1ms)
+	UDPBlockShare    float64       // share of links that drop every datagram while TCP flows (a firewall)
 
 	// Disk errors (Faults.DiskErrors).
 	FullEvery    time.Duration // mean time between disks filling up (0: never); a full disk stays full until the faults stop
@@ -771,7 +829,7 @@ func (s Swarm) disk() simfs.Options {
 
 func (s Swarm) net() simnet.Options {
 	return simnet.Options{MinLatency: s.MinLatency, MeanLatency: s.MeanLatency, ResetProb: s.ResetProb, UDPLossProb: s.UDPLossProb, UDPDupProb: s.UDPDupProb,
-		Links:         simnet.LinkOptions{SlowShare: s.SlowLinkShare, SlowMean: s.SlowLinkMean, LossyShare: s.LossyLinkShare, LossProb: s.LinkLossProb},
+		Links:         simnet.LinkOptions{SlowShare: s.SlowLinkShare, SlowMean: s.SlowLinkMean, LossyShare: s.LossyLinkShare, LossProb: s.LinkLossProb, UDPBlockShare: s.UDPBlockShare},
 		HealResetProb: s.HealResetProb}
 }
 
@@ -782,8 +840,8 @@ func (s Swarm) String() string {
 		fmt.Sprintf(", pause every ~%v (for ~%v), udp{loss %.3f, dup %.3f}, outage every ~%v (for ~%v), start %s, crash latency %v",
 			s.PauseEvery, s.PauseFor, s.UDPLossProb, s.UDPDupProb, s.OutageEvery, s.OutageFor, s.Start.Format(time.RFC3339Nano), s.CrashLatency) +
 		fmt.Sprintf(", loss every ~%v, kills %.2f", s.LossEvery, s.KillShare) +
-		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f)}",
-			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor) +
+		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f), udp blocked %.2f}",
+			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor, s.UDPBlockShare) +
 		fmt.Sprintf(", disk errors{full every ~%v, fsync %.3f, write %.4f, read %.4f}", s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb)
 }
 
@@ -919,6 +977,15 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	readErr := sometimes(r, 0.005*r.Float64())
 	if f.DiskErrors {
 		s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb = fullEvery, syncErr, writeErr, readErr
+	}
+	// UDP blackholes (Gray), last again: in a quarter of the seeds up to
+	// 30% of links drop datagrams while TCP flows; lifted at recovery.
+	udpBlock := 0.0
+	if r.IntN(4) == 0 {
+		udpBlock = 0.3 * r.Float64()
+	}
+	if f.Gray {
+		s.UDPBlockShare = udpBlock
 	}
 	return s
 }

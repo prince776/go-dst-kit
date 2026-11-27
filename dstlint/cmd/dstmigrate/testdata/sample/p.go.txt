@@ -2,7 +2,10 @@ package migr
 
 import (
 	"context"
+	crand "crypto/rand"
+	"io"
 	"math/rand"
+	mrand "math/rand/v2"
 	"sync"
 	"time"
 )
@@ -106,6 +109,37 @@ func (p *Pool) disable() chan int {
 	p.jobs = nil
 	return nil
 }
+
+// jitter uses math/rand/v2's generic N; nonce reads crypto/rand.Reader;
+// gauss has no World equivalent (the tool warns).
+func (p *Pool) jitter(d time.Duration) time.Duration { return mrand.N(d) }
+
+func (p *Pool) nonce(b []byte) { io.ReadFull(crand.Reader, b) }
+
+func (p *Pool) gauss() float64 { return mrand.NormFloat64() }
+
+// waiter has channel fields set to nil in literals, keyed and positional,
+// and a slice of channels with a nil element.
+type waiter struct {
+	ready chan struct{}
+	n     int
+}
+
+var (
+	idle    = waiter{nil, 0}
+	idle2   = &waiter{ready: nil}
+	waiters = []chan struct{}{nil}
+)
+
+// park passes nil for channel parameters, plain and variadic: each becomes
+// the zero dst.Chan.
+func (p *Pool) park() {
+	p.offer(nil, nil)
+	notifyAll(1, nil)
+}
+
+// notifyAll's comment stays above it.
+func notifyAll(n int, chs ...chan struct{}) {}
 
 // wait returns from every case: the migrated function must still end in a
 // terminating statement, and job is unqualified in its own package.

@@ -482,3 +482,116 @@ func TestHealMayReset(t *testing.T) {
 		t.Fatalf("HealResetProb 0: crossing %v, same side %v (want both fine)", c, s)
 	}
 }
+
+// Verifies: [ip-hosts]
+// Fails if: a machine named by an IP has a listener, connection or socket
+// address that isn't the net package's type with its IP and port, or
+// dialing or sending to that IP doesn't reach it; or (the negative) a
+// machine named otherwise gets *net.TCPAddr or *net.UDPAddr addresses.
+func TestIPHosts(t *testing.T) {
+	check := func(srvName, cliName string, wantIP bool) {
+		t.Helper()
+		sim := simworld.New(simworld.Options{Seed: 1})
+		srv := sim.AddMachine(srvName, simworld.MachineOptions{})
+		cli := sim.AddMachine(cliName, simworld.MachineOptions{})
+		var errs []string
+		fail := func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) }
+		isIP := func(what string, a net.Addr, port int) {
+			var ip net.IP
+			var p int
+			switch v := a.(type) {
+			case *net.TCPAddr:
+				ip, p = v.IP, v.Port
+			case *net.UDPAddr:
+				ip, p = v.IP, v.Port
+			default:
+				if wantIP {
+					fail("%s: %T %v, want a net package address", what, a, a)
+				}
+				return
+			}
+			if !wantIP {
+				fail("%s: %T for a host not named by an IP", what, a)
+				return
+			}
+			host, _, _ := net.SplitHostPort(a.String())
+			if ip.String() != host || (port != 0 && p != port) {
+				fail("%s: %v (IP %v, port %d), want port %d", what, a, ip, p, port)
+			}
+		}
+		var gotTCP, gotUDP bool
+		srv.Start = func(w *dst.World) {
+			ln, err := w.Net().Listen("tcp", net.JoinHostPort(srvName, "7"))
+			if err != nil {
+				fail("listen: %v", err)
+				return
+			}
+			if _, ok := ln.Addr().(*net.TCPAddr); ok != wantIP {
+				fail("listener address %T", ln.Addr())
+			}
+			isIP("listener", ln.Addr(), 7)
+			pc, err := w.Net().ListenPacket("udp", net.JoinHostPort(srvName, "8"))
+			if err != nil {
+				fail("listen udp: %v", err)
+				return
+			}
+			isIP("udp socket", pc.LocalAddr(), 8)
+			w.Go(func() {
+				buf := make([]byte, 8)
+				_, from, err := pc.ReadFrom(buf)
+				if err == nil {
+					gotUDP = true
+					isIP("datagram source", from, 9)
+				}
+			})
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			gotTCP = true
+			isIP("accepted local", c.LocalAddr(), 7)
+			isIP("accepted remote", c.RemoteAddr(), 0)
+		}
+		cli.Start = func(w *dst.World) {
+			c, err := w.Net().Dial("tcp", net.JoinHostPort(srvName, "7"))
+			if err != nil {
+				fail("dial: %v", err)
+				return
+			}
+			isIP("dialed remote", c.RemoteAddr(), 7)
+			isIP("dialed local", c.LocalAddr(), 0)
+			pc, _ := w.Net().ListenPacket("udp", net.JoinHostPort(cliName, "9"))
+			var to net.Addr = &net.UDPAddr{IP: net.ParseIP(srvName), Port: 8}
+			if !wantIP {
+				to = udpTo(net.JoinHostPort(srvName, "8"))
+			}
+			pc.WriteTo([]byte("hi"), to)
+			cu, err := w.Net().Dial("udp", net.JoinHostPort(srvName, "8"))
+			if err == nil {
+				isIP("connected udp peer", cu.RemoteAddr(), 8)
+			}
+		}
+		res := sim.Run(func(w *dst.World) {
+			srv.Boot()
+			cli.Boot()
+			w.Sleep(time.Second)
+		})
+		if res.Err != nil {
+			t.Fatal(res.Err)
+		}
+		if !gotTCP || !gotUDP {
+			errs = append(errs, fmt.Sprintf("reached by TCP %v, by UDP %v", gotTCP, gotUDP))
+		}
+		if len(errs) > 0 {
+			t.Errorf("%s and %s: %v", srvName, cliName, errs)
+		}
+	}
+	check("10.0.0.1", "10.0.0.2", true)
+	check("fd00::1", "fd00::2", true)
+	check("srv", "cli", false)
+}
+
+type udpTo string
+
+func (a udpTo) Network() string { return "udp" }
+func (a udpTo) String() string  { return string(a) }

@@ -7,7 +7,8 @@
 //   - sends to c.Send(v), receives to c.Recv() (or dstRecv(c) where only
 //     the value is used), range over a channel to range c.All(), close,
 //     len and cap of channels to their methods, and a channel compared
-//     with or set to nil to the zero dst.Chan;
+//     with, set to, passed as or put in a literal as nil to the zero
+//     dst.Chan;
 //   - select statements to dst.Select, keeping their control flow: each
 //     case's callback records that it fired (and what it received), and a
 //     switch after the select runs the original case bodies, so break,
@@ -18,7 +19,9 @@
 //   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types;
 //   - go statements to w.Go, evaluating the call's arguments first as go
 //     does;
-//   - math/rand calls to the World's Rand;
+//   - math/rand calls to the World's Rand (math/rand/v2's generic N to a
+//     converted Int64N; functions with no equivalent are reported), and
+//     crypto/rand.Read and crypto/rand.Reader to the World's;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
 //     RemoveAll, Rename, Stat (and Lstat), ReadDir to w.FS()'s methods;
 //     os.Open, Create, ReadFile, WriteFile (and ioutil's) to dst's
@@ -385,7 +388,10 @@ func (m *migrator) decl(d ast.Node) {
 				m.changes++
 			}
 		case *ast.CallExpr:
+			m.nilChanArgs(n)
 			m.callExpr(c, n)
+		case *ast.CompositeLit:
+			m.nilChanElems(n)
 		case *ast.BinaryExpr:
 			if (n.Op == token.EQL || n.Op == token.NEQ) && (isNil(n.Y) && m.isChan(n.X) || isNil(n.X) && m.isChan(n.Y)) {
 				ch := n.X
@@ -418,6 +424,15 @@ func (m *migrator) decl(d ast.Node) {
 				}
 			}
 		case *ast.SelectorExpr:
+			// crypto/rand.Reader, under any import name: the World's
+			// dst.CryptoReader.
+			if v, ok := m.info.Uses[n.Sel].(*types.Var); ok && v.Name() == "Reader" && v.Pkg() != nil && v.Pkg().Path() == "crypto/rand" {
+				r := call(sel(ast.NewIdent("dst"), "CryptoReader"), m.w())
+				setPos(r, n.Pos())
+				m.replace(c, r)
+				m.changes++
+				break
+			}
 			if id, ok := n.X.(*ast.Ident); ok {
 				switch id.Name + "." + n.Sel.Name {
 				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond":
@@ -452,6 +467,91 @@ func (m *migrator) replace(c *astutil.Cursor, n ast.Node) {
 func (m *migrator) zeroChan(ch ast.Expr) ast.Expr {
 	// Parenthesized: a composite literal in an if or for condition must be.
 	return &ast.ParenExpr{X: &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(m.chanElem(ch))}}}
+}
+
+// nilChanArgs rewrites f(nil) where the parameter is a channel (plain or
+// variadic) to the zero dst.Chan.
+func (m *migrator) nilChanArgs(n *ast.CallExpr) {
+	sig, ok := m.info.TypeOf(n.Fun).(*types.Signature)
+	if !ok || m.info.Types[n.Fun].IsType() {
+		return // a conversion or a builtin
+	}
+	params := sig.Params()
+	for i, a := range n.Args {
+		if !isNil(a) || params.Len() == 0 {
+			continue
+		}
+		var pt types.Type
+		switch {
+		case sig.Variadic() && i >= params.Len()-1:
+			if n.Ellipsis.IsValid() {
+				continue
+			}
+			pt = params.At(params.Len() - 1).Type().(*types.Slice).Elem()
+		case i < params.Len():
+			pt = params.At(i).Type()
+		default:
+			continue
+		}
+		if ch, ok := pt.Underlying().(*types.Chan); ok {
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			setPos(z, a.Pos()) // where nil was, so comments stay put
+			n.Args[i] = z
+			m.changes++
+		}
+	}
+}
+
+// nilChanElems rewrites nil where a composite literal's field or element
+// is a channel (T{ch: nil}, T{nil}, []chan T{nil}) to the zero dst.Chan.
+func (m *migrator) nilChanElems(n *ast.CompositeLit) {
+	t := m.info.TypeOf(n)
+	if t == nil {
+		return
+	}
+	at := func(i int, key ast.Expr) types.Type {
+		switch u := t.Underlying().(type) {
+		case *types.Struct:
+			if id, ok := key.(*ast.Ident); ok {
+				for f := range u.Fields() {
+					if f.Name() == id.Name {
+						return f.Type()
+					}
+				}
+				return nil
+			}
+			if key == nil && i < u.NumFields() {
+				return u.Field(i).Type()
+			}
+		case *types.Slice:
+			return u.Elem()
+		case *types.Array:
+			return u.Elem()
+		case *types.Map:
+			return u.Elem()
+		}
+		return nil
+	}
+	for i, e := range n.Elts {
+		var key ast.Expr
+		val := &n.Elts[i]
+		if kv, ok := e.(*ast.KeyValueExpr); ok {
+			key, val = kv.Key, &kv.Value
+		}
+		if !isNil(*val) {
+			continue
+		}
+		ft := at(i, key)
+		if ft == nil {
+			continue
+		}
+		if ch, ok := ft.Underlying().(*types.Chan); ok {
+			z := &ast.CompositeLit{Type: &ast.IndexExpr{X: sel(ast.NewIdent("dst"), "Chan"), Index: expr(types.TypeString(ch.Elem(), m.qualifier))}}
+			setPos(z, (*val).Pos())
+			*val = z
+			m.changes++
+		}
+	}
 }
 
 func isNil(e ast.Expr) bool { id, ok := e.(*ast.Ident); return ok && id.Name == "nil" }
@@ -515,6 +615,19 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			n.Fun = sel(call(sel(m.w(), "Rand")), name)
 			setPos(n, pos)
 			m.changes++
+		case "N":
+			// rand.N(d) (math/rand/v2, generic): T(w.Rand().Int64N(int64(d))).
+			if len(n.Args) == 1 {
+				t := types.TypeString(m.info.TypeOf(n), m.qualifier)
+				r := call(expr(t), call(sel(call(sel(m.w(), "Rand")), "Int64N"), call(ast.NewIdent("int64"), n.Args[0])))
+				setPos(r, pos)
+				m.replace(c, r)
+				m.changes++
+			}
+		default:
+			if _, isFunc := m.info.Uses[s.Sel].(*types.Func); isFunc && s.Sel.Name != "New" && !strings.HasPrefix(s.Sel.Name, "New") {
+				m.warn(n, "rand."+s.Sel.Name+" has no World equivalent; it still draws from the global generator")
+			}
 		}
 	case "context":
 		switch s.Sel.Name {

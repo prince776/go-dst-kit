@@ -53,7 +53,11 @@ func harness(bugs heartbeat.Bugs) func(h *dsttest.Harness) {
 		// paused monitor reads stale heartbeats when it resumes).
 		downSince := map[string]time.Time{}
 		sw := h.Swarm()
-		bound := heartbeat.Timeout + sw.MinLatency + 10*sw.MeanLatency + 10*time.Millisecond
+		// The worst delay includes the link's added latency when it is slow
+		// (Gray), which h.Link reports.
+		bound := func(worker string) time.Duration {
+			return heartbeat.Timeout + sw.MinLatency + 10*sw.MeanLatency + h.Link(worker, "monitor").Extra + 10*time.Millisecond
+		}
 		h.Always("a worker down long enough is suspected", func() error {
 			t := now()
 			if monM.Dead() || monM.Paused() {
@@ -77,7 +81,7 @@ func harness(bugs heartbeat.Bugs) func(h *dsttest.Harness) {
 				if monRunning.After(from) {
 					from = monRunning
 				}
-				if t.Sub(from) > bound {
+				if t.Sub(from) > bound(name) {
 					if !mon.Suspected(name) {
 						return fmt.Errorf("%s has been down for %v, the monitor running for %v, and it isn't suspected", name, t.Sub(downSince[name]), t.Sub(monRunning))
 					}

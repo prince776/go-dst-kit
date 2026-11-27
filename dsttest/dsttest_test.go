@@ -1188,6 +1188,116 @@ func TestGrayExplores(t *testing.T) {
 	}
 }
 
+// Verifies: [gray-udp]
+// Fails if: across Gray seeds no lossy link loses a datagram or no link
+// blocks UDP, a loss or block happens after the fault phase, TCP across a
+// link that blocks UDP stops working, or (the negative) one happens
+// without Gray.
+func TestGrayUDP(t *testing.T) {
+	events := []string{"link lost a datagram", "link blocked a datagram"}
+	sweep := func(f dsttest.Faults) (dsttest.Report, int) {
+		var mu sync.Mutex
+		tcpFailed := 0
+		rep := dsttest.Sweep(dsttest.Options{Seeds: 60, Faults: f, FaultPhase: 3 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+			names := []string{"a", "b", "c", "d"}
+			for _, n := range names {
+				h.Machine(n, func(w *dst.World) {
+					pc, err := w.Net().ListenPacket("udp", n+":1")
+					if err != nil {
+						h.Fail(err)
+						return
+					}
+					ln, _ := w.Net().Listen("tcp", n+":2")
+					w.Go(func() {
+						for {
+							c, err := ln.Accept()
+							if err != nil {
+								return
+							}
+							w.Go(func() { io.Copy(c, c) })
+						}
+					})
+					w.Go(func() {
+						buf := make([]byte, 16)
+						for {
+							if _, _, err := pc.ReadFrom(buf); err != nil {
+								return
+							}
+						}
+					})
+					for i := 0; ; i++ {
+						for _, peer := range names {
+							if peer == n {
+								continue
+							}
+							pc.WriteTo([]byte("ping"), udpName(peer+":1"))
+							if i%20 == 0 && h.Link(n, peer).UDPBlocked {
+								// TCP still flows where UDP is blocked.
+								if c, err := w.Net().Dial("tcp", peer+":2"); err == nil {
+									c.SetDeadline(w.Now().Add(2 * time.Second))
+									c.Write([]byte("tcp?"))
+									if _, err := io.ReadFull(c, make([]byte, 4)); err != nil && h.Phase() == dsttest.Faulty {
+										mu.Lock()
+										tcpFailed++
+										mu.Unlock()
+									}
+									c.Close()
+								}
+							}
+						}
+						w.Sleep(5 * time.Millisecond)
+					}
+				})
+			}
+			atRecovery := map[string]int{}
+			h.Go(func(w *dst.World) {
+				for h.Phase() != dsttest.Faulty {
+					w.Sleep(time.Millisecond)
+				}
+				for h.Phase() == dsttest.Faulty {
+					w.Sleep(time.Millisecond)
+				}
+				for _, e := range events {
+					atRecovery[e] = h.Count(e)
+				}
+			})
+			h.Final("no UDP loss or block after the fault phase", func(*dst.World) error {
+				for _, e := range events {
+					if h.Count(e) != atRecovery[e] {
+						return fmt.Errorf("%q happened %d times after the fault phase", e, h.Count(e)-atRecovery[e])
+					}
+				}
+				return nil
+			})
+		})
+		return rep, tcpFailed
+	}
+	rep, tcpFailed := sweep(dsttest.Faults{Gray: true})
+	if !rep.OK() {
+		t.Fatalf("%v", rep.Failed[0].Err)
+	}
+	for _, e := range append(events, "a link blocks UDP") {
+		if rep.Coverage[e] == 0 {
+			t.Errorf("%q never happened in %d Gray seeds", e, rep.Runs)
+		}
+	}
+	if tcpFailed > 0 {
+		t.Errorf("TCP failed %d times across links that block UDP", tcpFailed)
+	}
+	rep, _ = sweep(dsttest.Faults{Network: true})
+	for _, e := range events {
+		if rep.Coverage[e] != 0 {
+			t.Errorf("%q happened %d times without Gray", e, rep.Coverage[e])
+		}
+	}
+}
+
+// udpName is a net.Addr naming a simulated host and port.
+type udpName string
+
+func (a udpName) Network() string { return "udp" }
+func (a udpName) String() string  { return string(a) }
+
 // Verifies: [kill-keeps-schedule]
 // Fails if: turning Kill on (with Crash) moves a crash or picks another
 // machine; Kill alone ever crashes with power loss; Machine.Killed, read at

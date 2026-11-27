@@ -158,6 +158,12 @@ connected socket that sends to and receives from one peer):
 - Each datagram arrives whole or not at all, after its own latency, so
   datagrams reorder. With network faults on, a seed loses up to 20% of
   them and duplicates up to 5%.
+- With gray failure on (`Faults.Gray`), datagrams take their link's
+  behaviour: a slow link delays them, a lossy link loses them (UDP has no
+  retransmission, so a loss is a loss), and in a quarter of the seeds up
+  to 30% of links **block UDP** while TCP on them still flows (a firewall
+  or security group). Losses and blocks stop in the recovery phase; slow
+  links stay slow.
 - A partition, a crashed host, or a port nobody listens on **drops**
   datagrams: UDP never holds them. A paused host's socket keeps up to 256
   for when it resumes, and drops the rest.
@@ -166,7 +172,9 @@ connected socket that sends to and receives from one peer):
 - Differences from a real kernel: a datagram to an unbound port draws no
   ICMP error (a connected socket's next read doesn't fail with
   ECONNREFUSED), and addresses are `host:port` names, not `*net.UDPAddr`:
-  compare them with `String()`.
+  compare them with `String()`. A machine named by an IP literal
+  (`h.Machine("10.0.0.1", ...)`) has `*net.TCPAddr` and `*net.UDPAddr`
+  addresses instead, for code that stores IPs or type-asserts addresses.
 
 Not modelled yet: bandwidth limits.
 
