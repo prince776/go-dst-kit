@@ -186,6 +186,13 @@ type Options struct {
 	ExploreFresh  float64
 	ExploreBudget int
 	ExploreBatch  int
+	// ExploreBy is what guided runs steer by, a comma-separated set of
+	// "markers" (Sometimes), "order" (pairs of markers in the order runs
+	// first reached them) and "pairs" (interleaving pairs: see
+	// Result.FirstPairs). Default all three (-dst.explore.by).
+	ExploreBy string
+	// recordPairs makes runs record interleaving pairs (set by Explore).
+	recordPairs bool
 	// Corpus is the directory of saved failing paths, replayed by Run
 	// before it sweeps (default testdata/dst, one directory per test).
 	Corpus string
@@ -259,6 +266,12 @@ func (o *Options) defaults() {
 	}
 	if o.ExploreBatch == 0 {
 		o.ExploreBatch = 32
+	}
+	if *flagExploreBy != "" {
+		o.ExploreBy = *flagExploreBy
+	}
+	if o.ExploreBy == "" {
+		o.ExploreBy = "markers,order,pairs"
 	}
 	if o.Parallel == 0 {
 		o.Parallel = runtime.GOMAXPROCS(0)
@@ -739,6 +752,10 @@ type Result struct {
 	// FirstMarks is the step at which each Sometimes marker was first
 	// reached: where an explorer forks to go further from there.
 	FirstMarks map[string]uint64
+	// FirstPairs is the step at which each interleaving pair first ran
+	// (recorded only when exploring by pairs): a pair is the code site
+	// where one goroutine handed off and the site where the next resumed.
+	FirstPairs map[uint64]uint64
 }
 
 // RunSeed runs one seed and returns its result. logf, if set, receives the
@@ -779,6 +796,7 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 		PCTHorizon:     swarm.PCTHorizon,
 		Start:          swarm.Start,
 		Forks:          path.schedForks(),
+		Pairs:          opts.recordPairs,
 		AfterStep: func() error {
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
@@ -826,7 +844,7 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
 		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features,
-		Path: path, Forked: h.sim.S.ForksApplied(), ForkSteps: h.sim.S.ForkSteps(), FirstMarks: h.sim.S.FirstMarks()}
+		Path: path, Forked: h.sim.S.ForksApplied(), ForkSteps: h.sim.S.ForkSteps(), FirstMarks: h.sim.S.FirstMarks(), FirstPairs: h.sim.S.FirstPairs()}
 }
 
 // unfinished reports workload goroutines (and goroutines they started)

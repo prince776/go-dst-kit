@@ -91,6 +91,9 @@ type Options struct {
 	// apply in order: a fork whose anchor never comes leaves the rest
 	// unapplied.
 	Forks []Fork
+	// Pairs records interleaving pairs (see FirstPairs). It costs a stack
+	// walk at each scheduling point, so it is off unless exploring.
+	Pairs bool
 }
 
 // Fork is a point where a run continues with fresh randomness: just after
@@ -124,6 +127,8 @@ type Scheduler struct {
 	forkNow      bool              // the next fork's marker anchor has come
 	marks        map[string]int    // Mark counts
 	firstAt      map[string]uint64 // the step of each marker's first Mark
+	pairs        map[uint64]uint64 // interleaving pair -> the step it first ran
+	lastSite     uint64            // the site the last task handed off at
 	now          time.Duration
 	events       eventHeap
 	seq          uint64
@@ -263,6 +268,7 @@ type Task struct {
 	blocked string
 	goid    int64
 	prio    float64 // PCT priority (higher runs first)
+	site    uint64  // where it last handed off, or started (Options.Pairs)
 }
 
 // Sched returns the task's scheduler.
@@ -287,6 +293,7 @@ func New(opts Options) *Scheduler {
 		curSeed: opts.Seed,
 		marks:   map[string]int{},
 		firstAt: map[string]uint64{},
+		pairs:   map[uint64]uint64{},
 	}
 	s.rng = s.Rand("sched")
 	if opts.PCTDepth > 0 {
@@ -419,6 +426,16 @@ func (s *Scheduler) Mark(name string) {
 // FirstMarks is the step at which each marker was first reached.
 func (s *Scheduler) FirstMarks() map[string]uint64 { return s.firstAt }
 
+// FirstPairs is the step at which each interleaving pair first ran, when
+// Options.Pairs is set. A pair is two code sites: where one task handed
+// the baton back (parked or yielded), and where the task that ran next
+// resumes (its own last handoff, or its start). Sites are the first frame
+// outside go-dst-kit, as function and line, so a pair names the same
+// handoff in every process and run. A pair the run hasn't seen before is
+// an ordering of the program's goroutines it hasn't tried: what the
+// explorer steers by.
+func (s *Scheduler) FirstPairs() map[uint64]uint64 { return s.pairs }
+
 // ForkSteps is the step each applied fork was applied at.
 func (s *Scheduler) ForkSteps() []uint64 { return s.forkAt }
 
@@ -527,6 +544,9 @@ func (t *Task) main(fn func()) {
 			}
 		}
 		t.state = finished
+		if t.s.opts.Pairs {
+			t.s.lastSite = siteFinished
+		}
 		t.s.handOff()
 	}()
 	if t.killed {
@@ -638,6 +658,7 @@ func (s *Scheduler) Park(why string) {
 	t := s.Current()
 	t.state = parked
 	t.blocked = why
+	s.noteSite(t)
 	s.handOff()
 	<-t.wake
 	t.blocked = ""
@@ -652,6 +673,7 @@ func (s *Scheduler) Yield() {
 	t := s.Current()
 	t.state = runnable
 	s.runnable = append(s.runnable, t)
+	s.noteSite(t)
 	s.handOff()
 	<-t.wake
 	if t.killed {
@@ -832,6 +854,14 @@ func (s *Scheduler) Run(done func() bool) error {
 		if t := s.pick(); t != nil {
 			s.Trace(uint64(t.ID))
 			s.steps++
+			if s.opts.Pairs {
+				if t.site == 0 {
+					t.site = startSite(t.Name)
+				}
+				if p := pairKey(s.lastSite, t.site); s.pairs[p] == 0 {
+					s.pairs[p] = s.steps
+				}
+			}
 			if s.steps%s.opts.CheckpointEvery == 0 {
 				s.checks = append(s.checks, s.hash)
 			}

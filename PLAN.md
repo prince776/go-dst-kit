@@ -579,6 +579,24 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   interleaving pairs, markers and failure signatures (code coverage
   later: Go's counters are process-global), and hashicorp/raft as a
   target with deep, rare states.
+  *Part 2 (Prince agreed: pairs, markers, failure signatures; code
+  coverage later), built 2026-11-27, not yet measured.* `ExploreBy`
+  (`-dst.explore.by`) picks the signals: markers; order (two markers
+  first reached one after the other); pairs (interleaving pairs: the
+  code site where one goroutine handed off and the site where the next
+  resumed, the first frame outside go-dst-kit as function:line, hashed,
+  so a pair names the same handoff in every process). All three are one
+  kind of feature in the explorer (1/reached weight, budget, carriers);
+  markers fork at marker anchors, order and pairs at the step they first
+  ran. Pairs cost a stack walk per scheduling point (cached per PC), so
+  only exploration records them. Failure signatures are not a steering
+  signal (a run can't be forked after it fails): `dsttest.Signature`
+  normalizes a failure (numbers, and quoted values after the check's
+  name), and dstbench reports distinct kinds beside distinct roots.
+  Tests: by pairs, a rare state with no marker (it only waits at another
+  line) is found 4 times in 600 runs against 1 by sweep and by markers;
+  with both branches on one line, 0 (broken by hand). Next: measure on
+  raft's benchmark, sweep vs markers vs all.
 - **F. Shrinking.** Minimize fault events, then fork points, then phase
   lengths (shortlex); measured by trace length on B's failures.
 

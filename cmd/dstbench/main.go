@@ -24,10 +24,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
 	"os"
+
+	"github.com/prince776/go-dst-kit/dsttest"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -76,6 +79,7 @@ type cell struct {
 	Reached          float64 // share of seeds that reached the precondition (-1: no marker)
 	FirstError       string
 	Roots            int     // distinct root seeds among the failures (runs forked from one root aren't independent)
+	Signatures       int     // distinct failure signatures (dsttest.Signature): probably distinct bugs
 	Wall             float64 // the cell's wall-clock seconds
 	HeldOut          bool
 	ExpectedFailures bool             // false for the baseline
@@ -202,10 +206,12 @@ func measure(dir string, cfg config, bugName, test, reached string, seeds int, f
 	c := cell{Bug: bugName, Test: test, Seeds: len(recs), Wall: wall, Reached: -1}
 	reachedN := 0
 	cpu := 0.0
+	sigs := map[string]bool{}
 	for i, r := range recs {
 		cpu += float64(r.WallNS) / 1e9
 		if r.Failed {
 			c.Failures++
+			sigs[dsttest.Signature(errors.New(r.Error))] = true
 			if c.FirstFailure == 0 {
 				c.FirstFailure, c.CPUToFirst, c.FirstError = i+1, cpu, r.Error
 			}
@@ -235,6 +241,7 @@ func measure(dir string, cfg config, bugName, test, reached string, seeds int, f
 		}
 		ri.failed = ri.failed || r.Failed
 	}
+	c.Signatures = len(sigs)
 	for _, root := range order {
 		r := roots[root]
 		if r.failed {
@@ -282,7 +289,7 @@ func wilson(k, n int) (float64, float64) {
 
 func report(cells []cell, seeds int) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "bug\tsweep\tfailed\trate per run (95%)\tfailing roots\tfirst failure\tCPU to first\treached\t")
+	fmt.Fprintln(w, "bug\tsweep\tfailed\trate per run (95%)\tfailing roots\tkinds\tfirst failure\tCPU to first\treached\t")
 	found, total, bad := 0, 0, 0
 	for _, c := range cells {
 		name := orBaseline(c.Bug)
@@ -297,8 +304,8 @@ func report(cells []cell, seeds int) {
 		if c.Reached >= 0 {
 			reached = fmt.Sprintf("%.0f%%", 100*c.Reached)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d/%d\t%.1f%% [%.1f, %.1f]\t%d\t%s\t%s\t%s\t\n", name, c.Test, c.Failures, c.Seeds,
-			100*c.Rate, 100*c.Low, 100*c.High, c.Roots, ff, cpu, reached)
+		fmt.Fprintf(w, "%s\t%s\t%d/%d\t%.1f%% [%.1f, %.1f]\t%d\t%d\t%s\t%s\t%s\t\n", name, c.Test, c.Failures, c.Seeds,
+			100*c.Rate, 100*c.Low, 100*c.High, c.Roots, c.Signatures, ff, cpu, reached)
 		if !c.ExpectedFailures && c.Failures > 0 {
 			bad++
 		}
