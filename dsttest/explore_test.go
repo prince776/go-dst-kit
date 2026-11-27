@@ -94,11 +94,11 @@ func TestExploreFindsWhatASweepMisses(t *testing.T) {
 // With no marker to steer by, interleaving pairs still find the rare
 // state (it waits at a line other runs don't) and the bug after it several
 // times more often than a sweep, and than exploring by markers (which,
-// with none, is a sweep). Fails if they don't, or if a failing path
-// doesn't replay.
+// with none, is a sweep): expected about 10 failing runs against 1. Fails
+// if they don't, or if a failing path doesn't replay.
 func TestExploreByPairsNeedsNoMarkers(t *testing.T) {
 	o := exploreOpts
-	o.Seeds, o.Explore, o.KeepGoing = 600, 600, true
+	o.Seeds, o.Explore, o.KeepGoing = 1000, 1000, true
 	sw := dsttest.Sweep(o, twoRareUnmarked)
 	o.ExploreBy = "markers"
 	byMarkers := dsttest.Explore(o, twoRareUnmarked)
@@ -123,17 +123,28 @@ func TestExploreByPairsNeedsNoMarkers(t *testing.T) {
 // two markers is forked from its budget's worth of times. Fails if they
 // differ, or the fork count is off.
 func TestExploreDeterministic(t *testing.T) {
-	all := func(par int) []string {
+	all := func(par int) ([]string, int) {
 		o := exploreOpts
 		o.Explore, o.Parallel, o.KeepGoing = 200, par, true
 		var out []string
+		stepForks := 0
 		for _, r := range dsttest.Explore(o, twoRareUnmarked).Results {
 			out = append(out, r.Path.String())
+			for _, f := range r.Path.Forks {
+				if f.Marker == "" && f.Step > 0 {
+					stepForks++
+				}
+			}
 		}
-		return out
+		return out, stepForks
 	}
-	if !slices.Equal(all(1), all(8)) {
+	a1, stepForks := all(1)
+	if a8, _ := all(8); !slices.Equal(a1, a8) {
 		t.Fatalf("explorations by every signal differ with 1 and 8 at once")
+	}
+	// Not vacuous: with no markers, it forked at steps (pairs).
+	if stepForks < 50 {
+		t.Errorf("exploring by every signal forked at a step %d times in 200 runs, want most of the non-fresh ones", stepForks)
 	}
 	run := func(par int) []string {
 		o := exploreOpts

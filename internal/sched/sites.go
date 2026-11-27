@@ -32,19 +32,32 @@ func (s *Scheduler) noteSite(t *Task) {
 var siteCache sync.Map
 
 // libraryPrefixes are go-dst-kit's packages whose frames aren't sites: the
-// World and what implements it. Its test packages (dsttest_test, ...) and
-// the examples are programs under test, so their frames are.
+// World and what implements it, each named exactly, so that go-dst-kit's
+// test packages (internal/sched_test, dsttest_test, ...), the contract
+// suite's programs (internal/worldtest) and the examples count as
+// programs under test.
 var libraryPrefixes = []string{
 	"runtime.",
 	"github.com/prince776/go-dst-kit/dst.",
-	"github.com/prince776/go-dst-kit/internal/",
+	"github.com/prince776/go-dst-kit/internal/sched.",
+	"github.com/prince776/go-dst-kit/internal/simworld.",
+	"github.com/prince776/go-dst-kit/internal/simfs.",
+	"github.com/prince776/go-dst-kit/internal/simnet.",
+	"github.com/prince776/go-dst-kit/internal/points.",
+	"github.com/prince776/go-dst-kit/internal/worldhook.",
 	"github.com/prince776/go-dst-kit/realworld.",
 	"github.com/prince776/go-dst-kit/check.",
 	"github.com/prince776/go-dst-kit/dsthttp.",
 	"github.com/prince776/go-dst-kit/dstgrpc.",
 }
 
+// isLibrary reports whether fn's frames are skipped: go-dst-kit's own, and
+// the receive helper dstmigrate writes into a migrated package (dstRecv),
+// so a receive's site is the line that called it, not the helper's.
 func isLibrary(fn string) bool {
+	if strings.HasSuffix(fn, ".dstRecv") || strings.Contains(fn, ".dstRecv[") {
+		return true
+	}
 	for _, p := range libraryPrefixes {
 		if strings.HasPrefix(fn, p) {
 			return true

@@ -434,6 +434,14 @@ func (s *Scheduler) FirstMarks() map[string]uint64 { return s.firstAt }
 // handoff in every process and run. A pair the run hasn't seen before is
 // an ordering of the program's goroutines it hasn't tried: what the
 // explorer steers by.
+//
+// Verified:
+//   - [pairs-name-program-lines] Every pair is two of the program's own
+//     scheduling points (or a start, a finished task, or the run's first
+//     step), never a go-dst-kit frame; recording pairs doesn't change the
+//     run, and nothing is recorded when Pairs is off.
+//   - [pairs-same-in-every-process] A seed records the same pairs, at the
+//     same steps, in a new process.
 func (s *Scheduler) FirstPairs() map[uint64]uint64 { return s.pairs }
 
 // ForkSteps is the step each applied fork was applied at.
