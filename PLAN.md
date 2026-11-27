@@ -564,6 +564,21 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   Go's fuzzer driving the choices (fuzz bytes as a choice tape, falling
   back to the generator), by CPU time to first failure; held-out bugs
   at the end.
+  *Result of part 1 (marker-only guidance), 2026-11-27: no gain.* On
+  both benchmarks (300 runs per cell) exploration never found a bug
+  earlier than a sweep; easy bugs got more failing runs but about a third
+  of the distinct failing roots; hard cells got worse
+  (token-spent-after-answer 8 -> 3 roots, first failure run #125 vs #58;
+  reuse-file-without-metadata 1 -> 0; rotation-blind-write under every
+  fault 6 -> 1). Why: these tests' markers are common (preconditions
+  reached in 85-99% of runs), so rarity steers nowhere, and each fork
+  costs a fresh root while these bugs depend on configuration. Forks from
+  the right marker in the right root did fail (12 of 13). I should have
+  objected to marker-only guidance up front: B's numbers already showed
+  the markers weren't rare. Proposed next (to Prince): steer by
+  interleaving pairs, markers and failure signatures (code coverage
+  later: Go's counters are process-global), and hashicorp/raft as a
+  target with deep, rare states.
 - **F. Shrinking.** Minimize fault events, then fork points, then phase
   lengths (shortlex); measured by trace length on B's failures.
 
