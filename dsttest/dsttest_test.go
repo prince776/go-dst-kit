@@ -1473,3 +1473,58 @@ func TestMachineGoroutines(t *testing.T) {
 		t.Fatalf("Goroutines over the run:\n got  %v\n want %v", snaps, want)
 	}
 }
+
+// worldsNode is a graph for TestWorldsNot: each place a World can hide.
+type worldsNode struct {
+	w       *dst.World
+	next    *worldsNode // a cycle back to the root
+	iface   any
+	arr     [2]*dst.World
+	slice   []worldsHolder
+	byKey   map[*dst.World]int
+	byValue map[string]worldsHolder
+	mine    *dst.Timer // the World's own type, with a nil World: not walked
+}
+
+type worldsHolder struct{ W *dst.World }
+
+// Verifies: [worlds-not-finds-strays]
+// Fails if: WorldsNot misses a World that isn't w behind a pointer, an
+// interface, an unexported field, in an array, a slice, a map key or a
+// map value; reports one that is w or one inside the World's own types;
+// or doesn't end on a cycle.
+func TestWorldsNot(t *testing.T) {
+	r := dsttest.RunSeed(1, dsttest.Options{}, func(h *dsttest.Harness) {
+		h.Machine("m", func(w *dst.World) {
+			other := new(dst.World) // any other World; never used
+			build := func(stray *dst.World) *worldsNode {
+				n := &worldsNode{
+					w:       w,
+					iface:   &worldsHolder{W: stray},
+					arr:     [2]*dst.World{w, stray},
+					slice:   []worldsHolder{{W: w}, {W: stray}},
+					byKey:   map[*dst.World]int{stray: 1},
+					byValue: map[string]worldsHolder{"a": {W: stray}},
+					mine:    &dst.Timer{},
+				}
+				n.next = n
+				return n
+			}
+			got := dsttest.WorldsNot(build(other), w)
+			want := []string{"v.iface.W", "v.arr[1]", "v.slice[1].W", "v.byKey[key *]", "v.byValue[a].W"}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				h.Failf("strays: got %v, want %v", got, want)
+			}
+			if got := dsttest.WorldsNot(build(w), w); len(got) != 0 {
+				h.Failf("with every World w: got %v, want none", got)
+			}
+			// Nil Worlds are strays too (they fall back to the real one).
+			if got := dsttest.WorldsNot(&worldsNode{}, w); fmt.Sprint(got) != "[v.w v.arr[0] v.arr[1]]" {
+				h.Failf("nil World fields: got %v, want [v.w v.arr[0] v.arr[1]]", got)
+			}
+		})
+	}, nil)
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+}

@@ -101,6 +101,11 @@
 //     its current incarnation's goroutines that haven't returned: a
 //     returned one isn't listed, a parked one is, a crashed incarnation's
 //     aren't after a restart, and another machine's never are.
+//   - [worlds-not-finds-strays] WorldsNot reports every *dst.World in
+//     v's graph that isn't w, with its path, wherever it sits: behind a
+//     pointer, an interface, an unexported field, in an array, a slice,
+//     a map's key or value; it reports none that is w, none inside
+//     the World's own types (package dst's), and it ends on cycles.
 //   - [panic-fail-stop] With OnPanic, a panic it accepts kills only its
 //     machine's process (its other goroutines stop; its disk keeps the
 //     page cache) and the machine restarts; a panic it rejects, any panic
