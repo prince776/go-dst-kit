@@ -25,7 +25,7 @@
 //     converted Int64N; functions with no equivalent are reported), and
 //     crypto/rand.Read and crypto/rand.Reader to the World's;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
-//     RemoveAll, Rename, Stat (and Lstat), ReadDir to w.FS()'s methods;
+//     RemoveAll, Rename, Stat, ReadDir to w.FS()'s methods;
 //     os.Open, Create, ReadFile, WriteFile, Link (and ioutil's) to dst's
 //     helpers; *os.File to dst.File, f.WriteString to io.WriteString.
 //     Names pass through unchanged, and a World's FS is rooted, so they
@@ -51,6 +51,11 @@
 // needs a person.
 //
 // Usage: dstmigrate [-world MAP] [-n] packages...
+//
+// Verified:
+//   - [lstat-keeps-links] os.Lstat is kept and reported, not rewritten to
+//     the World's Stat: the real World's Stat follows symbolic links, so
+//     the rewrite would change what migrated code sees in production.
 package main
 
 import (
@@ -816,9 +821,11 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 }
 
 // fsMethods are the package os functions the World's FS has, with the
-// same signature (Lstat is Stat: a World's FS has no symbolic links).
+// same signature. Lstat isn't one: the real World's Stat follows
+// symbolic links, so code that detects or skips them would change
+// meaning in production (it is reported instead).
 var fsMethods = map[string]string{"OpenFile": "OpenFile", "Mkdir": "Mkdir", "MkdirAll": "MkdirAll",
-	"Remove": "Remove", "RemoveAll": "RemoveAll", "Rename": "Rename", "Stat": "Stat", "Lstat": "Stat", "ReadDir": "ReadDir"}
+	"Remove": "Remove", "RemoveAll": "RemoveAll", "Rename": "Rename", "Stat": "Stat", "ReadDir": "ReadDir"}
 
 // fsHelpers are the os (and io/ioutil) functions package dst has as
 // helpers taking the FS first.
@@ -828,7 +835,7 @@ var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile"
 // equivalent: left as they are, with a warning.
 var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "Chtimes": true, "Truncate": true,
 	"Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
-	"Getwd": true, "DirFS": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true, "TempFile": true, "TempDir": true}
+	"Getwd": true, "Lstat": true, "DirFS": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true, "TempFile": true, "TempDir": true}
 
 // fileCall rewrites a filesystem call of package os (or io/ioutil) to
 // the World's FS: os.Rename(a, b) to w.FS().Rename(a, b), os.Open(name)
@@ -848,7 +855,11 @@ func (m *migrator) fileCall(n *ast.CallExpr, s *ast.SelectorExpr, pkg string) {
 		m.warn(n, "ioutil.ReadDir returns FileInfos; use the World's FS ReadDir (DirEntries) by hand")
 		return
 	case fsMissing[name]:
-		if name != "TempDir" { // a path, not I/O
+		switch name {
+		case "TempDir": // a path, not I/O
+		case "Lstat":
+			m.warn(n, "os.Lstat has no World equivalent; it still uses the real filesystem (w.FS().Stat would do where no symbolic link can be: the real World's Stat follows them)")
+		default:
 			m.warn(n, pkg+"."+name+" has no World equivalent; it still uses the real filesystem")
 		}
 		return

@@ -1,0 +1,32 @@
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+
+	"github.com/prince776/go-dst-kit/realworld"
+)
+
+var __w = realworld.New(realworld.Options{})
+
+// A dangling symbolic link: os.Lstat describes the link itself, where
+// Stat follows it (and fails). Code that skips or detects symlinks
+// relies on the difference.
+func main() {
+	os.Remove("link")
+	if err := os.Symlink("missing-target", "link"); err != nil {
+		fmt.Println("symlink:", err)
+		return
+	}
+	defer os.Remove("link")
+	fi, err := os.Lstat("link")
+	if err != nil {
+		fmt.Println("lstat failed")
+		return
+	}
+	fmt.Println("lstat: symlink", fi.Mode()&fs.ModeSymlink != 0)
+	if _, err := os.Stat("link"); err != nil {
+		fmt.Println("stat: dangling")
+	}
+}

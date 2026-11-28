@@ -89,7 +89,7 @@ var funcs = map[string]map[string]string{
 		"ReadFile": "dst.ReadFile(w.FS(), ...)", "WriteFile": "dst.WriteFile(w.FS(), ...)",
 		"Remove": "w.FS().Remove", "RemoveAll": "w.FS().RemoveAll", "Rename": "w.FS().Rename",
 		"Mkdir": "w.FS().Mkdir", "MkdirAll": "w.FS().MkdirAll", "ReadDir": "w.FS().ReadDir",
-		"Stat": "w.FS().Stat", "Lstat": "w.FS().Stat", "Truncate": "File.Truncate", "Link": "dst.Link(w.FS(), ...)",
+		"Stat": "w.FS().Stat", "Lstat": "w.FS().Stat where no symbolic link can be (the real World's Stat follows them)", "Truncate": "File.Truncate", "Link": "dst.Link(w.FS(), ...)",
 	},
 	"net": {
 		"Dial": "w.Net().Dial", "DialTimeout": "w.Net().DialContext", "Listen": "w.Net().Listen",

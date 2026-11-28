@@ -122,6 +122,53 @@ func TestMigrateGoArgsEvaluatedNow(t *testing.T) {
 	}
 }
 
+// Verifies: [lstat-keeps-links]
+// os.Lstat stays os.Lstat (reported): the real World's Stat follows
+// symbolic links, so a migrated Lstat that became w.FS().Stat would
+// describe a link's target in production, not the link. The program, on
+// a dangling link, prints the same before and after migration.
+// Fails if Lstat is rewritten to the World's Stat (the migrated program
+// then fails its Lstat), or isn't reported.
+func TestMigrateLstatKeepsLinks(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
+	dir := t.TempDir()
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(here), "testdata", "lstat", "p.go.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(name string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+		}
+		return string(out)
+	}
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/lstat\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => "+kit+"\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "p.go"), src, 0o644)
+	want := run("go", "run", ".")
+	if want != "lstat: symlink true\nstat: dangling\n" {
+		t.Fatalf("the original program printed %q: the case doesn't test a dangling link", want)
+	}
+	bin := filepath.Join(dir, "dstmigrate")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = filepath.Dir(here)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	warnings := run(bin, ".")
+	migrated, _ := os.ReadFile(filepath.Join(dir, "p.go"))
+	if !strings.Contains(warnings, "os.Lstat has no World equivalent") {
+		t.Errorf("os.Lstat wasn't reported:\n%s", warnings)
+	}
+	if got := run("go", "run", "."); got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+}
+
 // File I/O through package os (and io/ioutil) migrates to the World's FS:
 // the result compiles and vets, no os filesystem call or *os.File is
 // left, WriteString becomes io.WriteString, and a call with no World
@@ -132,7 +179,7 @@ func TestMigrateGoArgsEvaluatedNow(t *testing.T) {
 // comment after it.
 func TestMigrateFiles(t *testing.T) {
 	got, stderr := migrateSample(t, "files", "Store=$.w")
-	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|Lstat|MkdirAll|Mkdir|ReadDir|Link)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
+	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|MkdirAll|Mkdir|ReadDir|Link)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
 		if regexp.MustCompile(bad).MatchString(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
@@ -142,6 +189,9 @@ func TestMigrateFiles(t *testing.T) {
 		if !regexp.MustCompile(want).MatchString(got) {
 			t.Errorf("want %q in:\n%s", want, got)
 		}
+	}
+	if !strings.Contains(stderr, "os.Lstat has no World equivalent") || !strings.Contains(got, "os.Lstat(tmp)") {
+		t.Errorf("os.Lstat wasn't kept and reported; stderr:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "os.Chmod has no World equivalent") {
 		t.Errorf("os.Chmod wasn't reported; stderr:\n%s", stderr)
