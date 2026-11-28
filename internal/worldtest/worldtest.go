@@ -11,6 +11,8 @@ import (
 	"io"
 	mrand "math/rand"
 	mrandv2 "math/rand/v2"
+	"net"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -71,6 +73,8 @@ var Checks = []Check{
 	{"rand/crypto-text", cryptoText},
 	{"time/tick", tickChan},
 	{"sync/once-func-value-values", onceFuncs},
+	{"io/pipe", ioPipe},
+	{"net/pipe", netPipe},
 }
 
 const tick = 5 * time.Millisecond
@@ -758,6 +762,107 @@ func onceFuncs(w *dst.World) {
 		if got, want := panics(bad), panics(std); got != want || want == "" {
 			failf("a panicking OnceFunc: %q, sync's %q", got, want)
 		}
+	}
+}
+
+// ioPipe: a Pipe carries a write to reads in pieces (a write waits for
+// all of it to be read), and closes end it with io's errors: EOF or the
+// writer's error for a reader, ErrClosedPipe or the reader's error for a
+// writer.
+func ioPipe(w *dst.World) {
+	r, wr := dst.Pipe(w)
+	w.Go(func() {
+		wr.Write([]byte("hello world"))
+		wr.CloseWithError(io.ErrUnexpectedEOF)
+	})
+	var got []byte
+	buf := make([]byte, 4)
+	for {
+		n, err := r.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			if err != io.ErrUnexpectedEOF {
+				failf("Read after the writer's close: %v, want its error", err)
+			}
+			break
+		}
+	}
+	if string(got) != "hello world" {
+		failf("read %q", got)
+	}
+	r2, wr2 := dst.Pipe(w)
+	wr2.Close()
+	if _, err := r2.Read(buf); err != io.EOF {
+		failf("Read after Close: %v, want EOF", err)
+	}
+	r3, wr3 := dst.Pipe(w)
+	r3.CloseWithError(errCause)
+	if _, err := wr3.Write([]byte("x")); err != errCause {
+		failf("Write after the reader's close: %v, want its error", err)
+	}
+	r4, wr4 := dst.Pipe(w)
+	r4.Close()
+	if _, err := wr4.Write([]byte("x")); err != io.ErrClosedPipe {
+		failf("Write after the reader's Close: %v, want ErrClosedPipe", err)
+	}
+	// A write blocked on no reader ends when the reader closes.
+	r5, wr5 := dst.Pipe(w)
+	res := dst.MakeChan[error](w, 1)
+	w.Go(func() {
+		_, err := wr5.Write([]byte("never read"))
+		res.Send(err)
+	})
+	w.Sleep(tick)
+	r5.Close()
+	if err, _ := res.Recv(); err != io.ErrClosedPipe {
+		failf("a blocked Write after the reader's Close: %v", err)
+	}
+}
+
+// netPipe: NetPipe's ends carry data both ways, EOF after the other
+// end closes, ErrClosedPipe on a closed end, and deadlines that follow
+// the World's clock, wrapped in a net.OpError timing out as os's
+// ErrDeadlineExceeded, then lifted by a zero deadline.
+func netPipe(w *dst.World) {
+	a, b := dst.NetPipe(w)
+	w.Go(func() {
+		a.Write([]byte("ping"))
+		buf := make([]byte, 4)
+		io.ReadFull(a, buf)
+		a.Close()
+	})
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(b, buf); err != nil || string(buf) != "ping" {
+		failf("read %q %v", buf, err)
+	}
+	b.Write([]byte("pong"))
+	if _, err := b.Read(buf); err != io.EOF {
+		failf("Read after the other end closed: %v, want EOF", err)
+	}
+	b.Close()
+	if _, err := b.Write(buf); err != io.ErrClosedPipe {
+		failf("Write on a closed end: %v, want ErrClosedPipe", err)
+	}
+	c, d := dst.NetPipe(w)
+	defer d.Close()
+	start := w.Now()
+	c.SetReadDeadline(w.Now().Add(3 * tick))
+	_, err := c.Read(buf)
+	var ne net.Error
+	if !errors.Is(err, os.ErrDeadlineExceeded) || !errors.As(err, &ne) || !ne.Timeout() || w.Since(start) < 3*tick {
+		failf("a read deadline: %v after %v", err, w.Since(start))
+	}
+	c.SetReadDeadline(time.Time{}) // lifted: a read waits for data again
+	w.Go(func() { d.Write([]byte("late")) })
+	if n, err := c.Read(buf); err != nil || string(buf[:n]) != "late" {
+		failf("a read after the deadline was lifted: %q %v", buf[:n], err)
+	}
+	c.SetWriteDeadline(w.Now().Add(-time.Second))
+	if _, err := c.Write(buf); !errors.Is(err, os.ErrDeadlineExceeded) {
+		failf("a write past its deadline: %v", err)
+	}
+	if c.LocalAddr().Network() != "pipe" || c.RemoteAddr().String() != "pipe" {
+		failf("addresses %v %v", c.LocalAddr(), c.RemoteAddr())
 	}
 }
 

@@ -28,6 +28,10 @@
 //	crypto/rand.Read        w.Rand().CryptoRead (Reader: dst.CryptoReader(w), Text: dst.CryptoText(w))
 //	os, net                 w.FS(), w.Net()
 //	os.Link                 dst.Link(w.FS(), old, new)
+//	os.Chmod, Truncate, ... dst.Chmod(w.FS(), name, mode), ... (os's own in production)
+//	filepath.WalkDir, Glob  dst.WalkDir(w.FS(), root, fn), dst.Glob(w.FS(), pattern)
+//	io.Pipe / net.Pipe      dst.Pipe(w) / dst.NetPipe(w)
+//	net.DialTimeout         dst.DialTimeout(w, network, address, d)
 //
 // Inside a simulated World, code must not block any other way: a raw
 // channel, sync.Mutex held across a wait, time.Sleep or real I/O escapes
@@ -58,7 +62,7 @@
 // Children: World, Current, Chan, Select, Mutex, RWMutex, WaitGroup, Once, OnceFunc,
 // OnceValue, OnceValues, Cond, Pool, Timer, Ticker, WithCancel, WithCancelCause,
 // WithTimeout, WithTimeoutCause, WithDeadline, WithDeadlineCause, AfterDone, Rand, N,
-// MathRand, CryptoReader, CryptoText, Inject, Do, Call, Buggify
+// MathRand, CryptoReader, CryptoText, Pipe, NetPipe, DialTimeout, Inject, Do, Call, Buggify
 // Depends on: internal/sched (the simulator's engine)
 package dst
 

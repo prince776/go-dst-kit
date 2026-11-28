@@ -274,7 +274,9 @@ func simCtxOf(ctx context.Context) *simCtx {
 
 func afterDoneStd(ctx context.Context, f func()) (stop func() bool) {
 	if ctx.Done() == nil {
-		return func() bool { return false }
+		// Never done: context.AfterFunc never runs f, so it's fine in a
+		// simulation too, and its stop is std's (true, then false).
+		return context.AfterFunc(ctx, f)
 	}
 	if sched.CurrentTask() != nil {
 		panic(fmt.Sprintf("dst: a simulated World can't watch a %T; derive contexts with dst.WithCancel, WithTimeout or WithDeadline", ctx))

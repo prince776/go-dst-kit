@@ -2,10 +2,14 @@ package realworld_test
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/internal/simworld"
@@ -87,6 +91,145 @@ func TestFSIsOS(t *testing.T) {
 	for i := range es {
 		if es[i].Name() != oes[i].Name() {
 			t.Errorf("ReadDir(..)[%d] = %q, os: %q", i, es[i].Name(), oes[i].Name())
+		}
+	}
+}
+
+// The rest of os's and filepath's filesystem API on the production World
+// is theirs: WalkDir, Walk and Glob don't follow a symbolic link to a
+// directory (a walk over the FS's Stat, which follows it, would), DirFS
+// is os.DirFS, MkdirTemp and CreateTemp default to os.TempDir, and
+// Chmod, Chtimes, Truncate and the File methods act on the file os
+// names, with os's errors.
+// Verifies: [fs-is-os]
+// Fails if: one of them is the generic algorithm instead of os's (a
+// walk entering the linked directory), or differs from os's in result or
+// error.
+func TestFSRestIsOS(t *testing.T) {
+	top := t.TempDir()
+	fsys := realworld.New(realworld.Options{}).FS()
+	for _, d := range []string{"tree/a", "elsewhere"} {
+		if err := os.MkdirAll(filepath.Join(top, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"tree/a/x.txt", "elsewhere/hidden.txt"} {
+		if err := os.WriteFile(filepath.Join(top, f), []byte(f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(top, "elsewhere"), filepath.Join(top, "tree", "link")); err != nil {
+		t.Skipf("no symbolic links here: %v", err)
+	}
+	tree := filepath.Join(top, "tree")
+	collect := func(walk func(func(string))) []string {
+		var got []string
+		walk(func(p string) { got = append(got, p) })
+		return got
+	}
+	got := collect(func(add func(string)) {
+		dst.WalkDir(fsys, tree, func(p string, _ fs.DirEntry, _ error) error { add(p); return nil })
+	})
+	want := collect(func(add func(string)) {
+		filepath.WalkDir(tree, func(p string, _ fs.DirEntry, _ error) error { add(p); return nil })
+	})
+	if !slices.Equal(got, want) || slices.Contains(got, filepath.Join(tree, "link", "hidden.txt")) {
+		t.Errorf("WalkDir visited %q, filepath.WalkDir %q", got, want)
+	}
+	link := filepath.Join(tree, "link")
+	got = collect(func(add func(string)) {
+		dst.WalkDir(fsys, link, func(p string, _ fs.DirEntry, _ error) error { add(p); return nil })
+	})
+	if !slices.Equal(got, []string{link}) { // filepath.WalkDir lstats the root
+		t.Errorf("WalkDir from a link to a directory visited %q, filepath.WalkDir only the link", got)
+	}
+	got = collect(func(add func(string)) {
+		dst.Walk(fsys, tree, func(p string, _ fs.FileInfo, _ error) error { add(p); return nil })
+	})
+	want = collect(func(add func(string)) {
+		filepath.Walk(tree, func(p string, _ fs.FileInfo, _ error) error { add(p); return nil })
+	})
+	if !slices.Equal(got, want) || slices.Contains(got, filepath.Join(tree, "link", "hidden.txt")) {
+		t.Errorf("Walk visited %q, filepath.Walk %q", got, want)
+	}
+	pattern := filepath.Join(tree, "*", "*.txt")
+	gm, gerr := dst.Glob(fsys, pattern)
+	om, oerr := filepath.Glob(pattern)
+	if !slices.Equal(gm, om) || gerr != oerr {
+		t.Errorf("Glob: %q %v, filepath.Glob: %q %v", gm, gerr, om, oerr)
+	}
+	dangling := filepath.Join(top, "dangling")
+	if err := os.Symlink(filepath.Join(top, "nowhere"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if gm, _ := dst.Glob(fsys, dangling); !slices.Equal(gm, []string{dangling}) { // filepath lstats a literal pattern
+		t.Errorf("Glob of a dangling link: %q, filepath.Glob finds it", gm)
+	}
+	if got, want := fmt.Sprintf("%T", dst.DirFS(fsys, tree)), fmt.Sprintf("%T", os.DirFS(tree)); got != want {
+		t.Errorf("DirFS is a %s, os.DirFS a %s", got, want)
+	}
+	d, err := dst.MkdirTemp(fsys, "", "dstkit-*")
+	if err != nil || filepath.Dir(d) != filepath.Clean(os.TempDir()) {
+		t.Errorf("MkdirTemp(\"\") made %q (%v), want it in %q", d, err, os.TempDir())
+	}
+	os.RemoveAll(d)
+	tf, err := dst.CreateTemp(fsys, top, "f*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tf.(*os.File); !ok {
+		t.Errorf("CreateTemp gave a %T, want the *os.File", tf)
+	}
+	tf.Close()
+	name := filepath.Join(top, "tree", "a", "x.txt")
+	if err := dst.Chmod(fsys, name, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(name); fi.Mode().Perm() != 0o600 {
+		t.Errorf("after Chmod, os sees %v", fi.Mode())
+	}
+	if err := dst.Truncate(fsys, name, 2); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(name); string(b) != "tr" {
+		t.Errorf("after Truncate, os reads %q", b)
+	}
+	mt := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := dst.Chtimes(fsys, name, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(name); !fi.ModTime().Equal(mt) {
+		t.Errorf("after Chtimes, os sees %v", fi.ModTime())
+	}
+	missing := filepath.Join(top, "missing")
+	for _, c := range []struct {
+		op       string
+		dst, std error
+	}{
+		{"Chmod", dst.Chmod(fsys, missing, 0o600), os.Chmod(missing, 0o600)},
+		{"Chtimes", dst.Chtimes(fsys, missing, mt, mt), os.Chtimes(missing, mt, mt)},
+		{"Truncate", dst.Truncate(fsys, missing, 0), os.Truncate(missing, 0)},
+	} {
+		if errText(c.dst) != errText(c.std) {
+			t.Errorf("%s of a missing name: %q, os: %q", c.op, errText(c.dst), errText(c.std))
+		}
+	}
+	dir, err := dst.Open(fsys, tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, _ := dst.Readdirnames(dir, -1)
+	dir.Close()
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"a", "link"}) {
+		t.Errorf("Readdirnames: %q", names)
+	}
+	dir, _ = dst.Open(fsys, tree)
+	infos, _ := dst.Readdir(dir, -1)
+	dir.Close()
+	for _, fi := range infos {
+		if fi.Name() == "link" && fi.Mode()&fs.ModeSymlink == 0 {
+			t.Errorf("Readdir followed the link (mode %v): it is os.File's, which lstats", fi.Mode())
 		}
 	}
 }

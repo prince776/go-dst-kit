@@ -18,6 +18,9 @@
 //     both Worlds (status, headers, bodies, keep-alive, methods).
 //   - [client-honours-context] A request ends with the context's error when
 //     the context ends. That holds even if the server never answers.
+//   - [default-client-is-std] DefaultClient is http.DefaultClient in the
+//     real World and one client per simulated World; ListenAndServe serves
+//     on the World's network (http.ListenAndServe in the real World).
 //   - [handler-panic-fails-run] A panic in a handler fails the simulated
 //     run (unlike net/http, which logs it), except http.ErrAbortHandler.
 //
@@ -33,8 +36,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
+	"weak"
 
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/internal/worldhook"
@@ -146,8 +152,51 @@ func Transport(w *dst.World) http.RoundTripper {
 	return transport{w}
 }
 
-// Client returns an http.Client using Transport(w).
+// Client returns a new http.Client using Transport(w).
 func Client(w *dst.World) *http.Client { return &http.Client{Transport: Transport(w)} }
+
+// DefaultClient is http.DefaultClient for w: http.DefaultClient itself in
+// the real World (settings a program makes on it apply, as they would
+// there); in a simulated World one client per World, so settings made on
+// it last for that World, as on http.DefaultClient.
+func DefaultClient(w *dst.World) *http.Client {
+	if !w.Simulated() {
+		return http.DefaultClient
+	}
+	key := weak.Make(w)
+	if c, ok := defaultClients.Load(key); ok {
+		return c.(*http.Client)
+	}
+	c, loaded := defaultClients.LoadOrStore(key, Client(w))
+	if !loaded {
+		runtime.AddCleanup(w, func(k weak.Pointer[dst.World]) { defaultClients.Delete(k) }, key)
+	}
+	return c.(*http.Client)
+}
+
+// defaultClients holds DefaultClient's simulated clients, by World (held
+// weakly: a finished simulation's Worlds go, and their clients with them).
+var defaultClients sync.Map
+
+// ListenAndServe is http.ListenAndServe for w: it listens on addr ("tcp")
+// on the World's network and serves h there (http.ListenAndServe itself
+// in the real World).
+func ListenAndServe(w *dst.World, addr string, h http.Handler) error {
+	if !w.Simulated() {
+		return http.ListenAndServe(addr, h)
+	}
+	if h == nil {
+		h = http.DefaultServeMux
+	}
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := w.Net().Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return Serve(w, ln, h)
+}
 
 type transport struct{ w *dst.World }
 

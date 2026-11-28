@@ -163,3 +163,46 @@ func TestHandlerPanicFailsRun(t *testing.T) {
 		t.Fatalf("got %v", res.Err)
 	}
 }
+
+// Verifies: [default-client-is-std]
+// DefaultClient is http.DefaultClient itself in the real World, and in a
+// simulation one client per World (a setting made on it lasts, as on
+// http.DefaultClient); ListenAndServe serves on the World's network, and
+// http.Get-style calls through DefaultClient reach it.
+// Fails if: the real World hands out another client, a simulated World a
+// new one each call (or one shared with another World), or
+// ListenAndServe doesn't serve.
+func TestDefaultClientAndListenAndServe(t *testing.T) {
+	if dsthttp.DefaultClient(realworld.New(realworld.Options{})) != http.DefaultClient {
+		t.Fatal("the real World's DefaultClient isn't http.DefaultClient")
+	}
+	sim := simworld.New(simworld.Options{Seed: 1})
+	srv := sim.Machine("srv")
+	other := sim.Machine("other")
+	var body string
+	res := sim.Run(func(w *dst.World) {
+		srv.World.Go(func() { dsthttp.ListenAndServe(srv.World, ":80", mux(srv.World)) })
+		c := dsthttp.DefaultClient(w)
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		if dsthttp.DefaultClient(w) != c || dsthttp.DefaultClient(w).CheckRedirect == nil {
+			panic("a simulated World's DefaultClient isn't one client")
+		}
+		if dsthttp.DefaultClient(other.World) == c {
+			panic("two Worlds share a DefaultClient")
+		}
+		for {
+			resp, err := dsthttp.DefaultClient(w).Get("http://srv:80/hello/sim")
+			if err != nil {
+				w.Sleep(time.Millisecond) // the server may not listen yet
+				continue
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			body = string(b)
+			return
+		}
+	})
+	if res.Err != nil || body != "hello sim" {
+		t.Fatalf("%v, body %q", res.Err, body)
+	}
+}

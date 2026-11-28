@@ -49,7 +49,8 @@
 //     only rewriting the data does. Directory Syncs don't fail.
 //   - A Write or Read may fail with EIO, doing nothing.
 //
-// Not modelled: a failed fsync's pages being evicted (so reads return the
+// Modes and times (Chmod, Chtimes) are durable at once. Not modelled: a
+// lost chmod, a failed fsync's pages being evicted (so reads return the
 // old data), bit rot, misdirected writes.
 //
 // Verified:
@@ -157,6 +158,7 @@ type FS struct {
 	// full: Fill capped the disk at capacity bytes (until StopFaults).
 	full     bool
 	capacity int64
+	temps    int // names MkdirTemp and CreateTemp have tried
 }
 
 type inode struct {
@@ -584,6 +586,147 @@ func (f *FS) Link(oldname, newname string) error {
 	f.issue(&op{kind: opCreate, dir: d, name: base, ino: ino})
 	f.powerLoss()
 	return nil
+}
+
+// Chmod is os.Chmod (dst.Chmoder): the permission bits and the setuid,
+// setgid and sticky bits. Modes and times aren't crash-modelled: a change
+// is durable at once.
+func (f *FS) Chmod(name string, mode fs.FileMode) error {
+	f.enter()
+	p, err := clean(name)
+	if err != nil {
+		return pathErr("chmod", name, err)
+	}
+	ino, err := f.lookup(p)
+	if err != nil {
+		return pathErr("chmod", name, err)
+	}
+	chmod(ino, mode)
+	return nil
+}
+
+// chmodBits are the mode bits Chmod changes, as os's syscallMode keeps.
+const chmodBits = fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
+
+func chmod(ino *inode, mode fs.FileMode) { ino.mode = ino.mode&^chmodBits | mode&chmodBits }
+
+// Chtimes is os.Chtimes (dst.Chtimeser): a zero time leaves the
+// modification time as it was; access times aren't kept.
+func (f *FS) Chtimes(name string, atime, mtime time.Time) error {
+	f.enter()
+	p, err := clean(name)
+	if err != nil {
+		return pathErr("chtimes", name, err)
+	}
+	ino, err := f.lookup(p)
+	if err != nil {
+		return pathErr("chtimes", name, err)
+	}
+	if !mtime.IsZero() {
+		ino.modTime = mtime
+	}
+	return nil
+}
+
+// Truncate is os.Truncate (dst.Truncater): a truncate of the file's data,
+// durable like one made through an open file.
+func (f *FS) Truncate(name string, size int64) error {
+	f.enter()
+	p, err := clean(name)
+	if err != nil {
+		return pathErr("truncate", name, err)
+	}
+	ino, err := f.lookup(p)
+	if err != nil {
+		return pathErr("truncate", name, err)
+	}
+	if ino.dir {
+		return pathErr("truncate", name, syscall.EISDIR)
+	}
+	if size < 0 {
+		return pathErr("truncate", name, syscall.EINVAL)
+	}
+	if room := f.room(); room >= 0 && size-int64(len(ino.live)) > room {
+		f.noSpace()
+		return pathErr("truncate", name, syscall.ENOSPC)
+	}
+	ino.live = truncate(ino.live, size)
+	ino.modTime = f.now()
+	f.issue(&op{kind: opTruncate, ino: ino, size: size})
+	f.powerLoss()
+	return nil
+}
+
+// tempPrefix is os's prefixAndSuffix and joinPath: the parts of a
+// temporary name around its unique part, under dir ("" is "tmp", made if
+// missing).
+func (f *FS) tempPrefix(op, dir, pattern string) (prefix, suffix string, err error) {
+	if strings.ContainsRune(pattern, '/') {
+		return "", "", pathErr(op, pattern, errors.New("pattern contains path separator"))
+	}
+	if dir == "" {
+		dir = "tmp"
+		if err := f.MkdirAll(dir, 0o777); err != nil {
+			return "", "", err
+		}
+	}
+	prefix = pattern
+	if i := strings.LastIndexByte(pattern, '*'); i >= 0 {
+		prefix, suffix = pattern[:i], pattern[i+1:]
+	}
+	if strings.HasSuffix(dir, "/") {
+		return dir + prefix, suffix, nil
+	}
+	return dir + "/" + prefix, suffix, nil
+}
+
+// nextTemp is the next unique part of a temporary name: a counter, so the
+// same seed makes the same names.
+func (f *FS) nextTemp() string {
+	f.temps++
+	return fmt.Sprint(f.temps)
+}
+
+// MkdirTemp is os.MkdirTemp (dst.TempMaker).
+func (f *FS) MkdirTemp(dir, pattern string) (string, error) {
+	prefix, suffix, err := f.tempPrefix("mkdirtemp", dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	for try := 0; ; try++ {
+		name := prefix + f.nextTemp() + suffix
+		err := f.Mkdir(name, 0o700)
+		if err == nil {
+			return name, nil
+		}
+		if errors.Is(err, fs.ErrExist) && try < 10000 {
+			continue
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			if _, serr := f.Stat(dir); errors.Is(serr, fs.ErrNotExist) {
+				return "", serr
+			}
+		}
+		return "", err
+	}
+}
+
+// CreateTemp is os.CreateTemp (dst.TempMaker).
+func (f *FS) CreateTemp(dir, pattern string) (dst.File, error) {
+	prefix, suffix, err := f.tempPrefix("createtemp", dir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	for try := 0; ; try++ {
+		file, err := f.OpenFile(prefix+f.nextTemp()+suffix, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			if try < 10000 {
+				continue
+			}
+			return nil, pathErr("createtemp", prefix+"*"+suffix, fs.ErrExist)
+		}
+		return file, err
+	}
 }
 
 // Stat is os.Stat.
@@ -1120,6 +1263,16 @@ func (h *file) Truncate(size int64) error {
 	h.ino.modTime = h.fs.now()
 	h.fs.issue(&op{kind: opTruncate, ino: h.ino, size: size})
 	h.fs.powerLoss()
+	return nil
+}
+
+// Chmod is (*os.File).Chmod.
+func (h *file) Chmod(mode fs.FileMode) error {
+	h.fs.enter()
+	if err := h.check("chmod"); err != nil {
+		return err
+	}
+	chmod(h.ino, mode)
 	return nil
 }
 

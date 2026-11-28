@@ -1,6 +1,7 @@
 package dst_test
 
 import (
+	"context"
 	crand "crypto/rand"
 	"slices"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/internal/simworld"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 // In the real World CryptoReader is crypto/rand.Reader itself, so code
@@ -88,4 +90,36 @@ func TestOnceFuncMadeOutsideASimulation(t *testing.T) {
 	if r.Err != nil {
 		t.Fatal(r.Err)
 	}
+}
+
+// AfterDone's stop is context.AfterFunc's: true the first time it stops
+// f, false after, on a context that is never done as on one that is,
+// and f runs once the context is cancelled if not stopped.
+// Fails if stop answers differently from std's (it returned false for a
+// never-done context), or f runs when stopped or not when cancelled.
+func TestAfterDoneStopIsStd(t *testing.T) {
+	w := realworld.New(realworld.Options{})
+	for _, ctx := range []context.Context{context.Background(), context.WithValue(context.Background(), struct{}{}, 1)} {
+		std := context.AfterFunc(ctx, func() {})
+		got := dst.AfterDone(ctx, func() {})
+		for i := range 2 {
+			if s, g := std(), got(); s != g {
+				t.Errorf("stop #%d on a never-done %T: %v, std's %v", i+1, ctx, g, s)
+			}
+		}
+	}
+	ctx, cancel := dst.WithCancel(w, context.Background())
+	ran := make(chan struct{})
+	stop := dst.AfterDone(ctx, func() { close(ran) })
+	cancel()
+	<-ran
+	if stop() {
+		t.Error("stop after f ran returned true")
+	}
+	ctx2, cancel2 := dst.WithCancel(w, context.Background())
+	stop2 := dst.AfterDone(ctx2, func() { t.Error("f ran after stop") })
+	if !stop2() || stop2() {
+		t.Error("stop before cancel: want true, then false")
+	}
+	cancel2()
 }

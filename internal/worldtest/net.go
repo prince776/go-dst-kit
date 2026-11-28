@@ -16,6 +16,7 @@ var NetChecks = []Check{
 	{"net/echo", netEcho},
 	{"net/stream-in-order", netStream},
 	{"net/refused", netRefused},
+	{"net/dial-timeout", netDialTimeout},
 	{"net/read-deadline", netDeadline},
 	{"net/close", netClose},
 	{"udp/echo", udpEcho},
@@ -243,5 +244,29 @@ func udpClose(w *dst.World) {
 	must(pc.Close())
 	if err, _ := done.Recv(); !errors.Is(err, net.ErrClosed) {
 		failf("read after close: %v, want net.ErrClosed", err)
+	}
+}
+
+// netDialTimeout: DialTimeout connects as Dial does, and fails as it does
+// on a closed listener.
+func netDialTimeout(w *dst.World) {
+	ln := listen(w)
+	w.Go(func() {
+		if c, err := ln.Accept(); err == nil {
+			c.Write([]byte("hi"))
+			c.Close()
+		}
+	})
+	c, err := dst.DialTimeout(w, "tcp", ln.Addr().String(), time.Minute)
+	must(err)
+	b, _ := io.ReadAll(c)
+	c.Close()
+	if string(b) != "hi" {
+		failf("read %q over DialTimeout's connection", b)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	if _, err := dst.DialTimeout(w, "tcp", addr, time.Minute); err == nil {
+		failf("DialTimeout to a closed listener succeeded")
 	}
 }

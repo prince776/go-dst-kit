@@ -5,7 +5,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
+	"path/filepath"
 	"slices"
+	"strings"
+	"testing/fstest"
+	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
 )
@@ -28,6 +33,10 @@ var FSChecks = []Check{
 	{"fs/name-as-opened", fsName},
 	{"fs/lock", fsLock},
 	{"fs/link", fsLink},
+	{"fs/chmod-chtimes", fsChmodChtimes},
+	{"fs/truncate-by-name", fsTruncateName},
+	{"fs/temp", fsTemp},
+	{"fs/walk-glob-dirfs", fsWalkGlob},
 }
 
 func must(err error) {
@@ -350,5 +359,190 @@ func fsLink(w *dst.World) {
 	}
 	if _, err := fsys.Stat("a"); !errors.Is(err, fs.ErrNotExist) {
 		failf("a still exists after Remove: %v", err)
+	}
+}
+
+// fsChmodChtimes: Chmod sets a file's permission bits (by name and on an
+// open file), Chtimes its modification time (a zero time keeps it), and
+// both fail as os's do on a missing name or a closed file.
+func fsChmodChtimes(w *dst.World) {
+	fsys := w.FS()
+	must(dst.WriteFile(fsys, "f", []byte("x"), 0o644))
+	must(dst.Chmod(fsys, "f", 0o600))
+	if fi, err := fsys.Stat("f"); err != nil || fi.Mode().Perm() != 0o600 {
+		failf("mode after Chmod 0600: %v %v", fi.Mode(), err)
+	}
+	if err := dst.Chmod(fsys, "missing", 0o600); !errors.Is(err, fs.ErrNotExist) {
+		failf("Chmod of a missing file: %v", err)
+	}
+	f, err := dst.Open(fsys, "f")
+	must(err)
+	must(dst.FileChmod(f, 0o640))
+	if fi, _ := fsys.Stat("f"); fi.Mode().Perm() != 0o640 {
+		failf("mode after File.Chmod 0640: %v", fi.Mode())
+	}
+	f.Close()
+	if err := dst.FileChmod(f, 0o600); !errors.Is(err, fs.ErrClosed) {
+		failf("Chmod of a closed file: %v", err)
+	}
+	mt := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	must(dst.Chtimes(fsys, "f", mt, mt))
+	if fi, _ := fsys.Stat("f"); !fi.ModTime().Equal(mt) {
+		failf("ModTime after Chtimes: %v, want %v", fi.ModTime(), mt)
+	}
+	must(dst.Chtimes(fsys, "f", time.Time{}, time.Time{}))
+	if fi, _ := fsys.Stat("f"); !fi.ModTime().Equal(mt) {
+		failf("a zero Chtimes moved ModTime to %v", fi.ModTime())
+	}
+	if err := dst.Chtimes(fsys, "missing", mt, mt); !errors.Is(err, fs.ErrNotExist) {
+		failf("Chtimes of a missing file: %v", err)
+	}
+}
+
+// fsTruncateName: Truncate by name shortens and zero-extends a file, and
+// fails on a directory and a missing name.
+func fsTruncateName(w *dst.World) {
+	fsys := w.FS()
+	must(dst.WriteFile(fsys, "f", []byte("hello world"), 0o644))
+	must(dst.Truncate(fsys, "f", 5))
+	if got := read(fsys, "f"); got != "hello" {
+		failf("after Truncate 5: %q", got)
+	}
+	must(dst.Truncate(fsys, "f", 7))
+	if got := read(fsys, "f"); got != "hello\x00\x00" {
+		failf("after Truncate 7: %q", got)
+	}
+	must(fsys.Mkdir("d", 0o755))
+	if err := dst.Truncate(fsys, "d", 0); err == nil {
+		failf("Truncate of a directory succeeded")
+	}
+	if err := dst.Truncate(fsys, "missing", 0); !errors.Is(err, fs.ErrNotExist) {
+		failf("Truncate of a missing file: %v", err)
+	}
+}
+
+// fsTemp: MkdirTemp and CreateTemp make distinct new names around the
+// pattern's last "*", in dir (a default one for ""), the file opened
+// for reading and writing; a pattern with a separator, or a missing
+// dir, fails.
+func fsTemp(w *dst.World) {
+	fsys := w.FS()
+	d1, err := dst.MkdirTemp(fsys, "", "x-*-y")
+	must(err)
+	d2, err := dst.MkdirTemp(fsys, "", "x-*-y")
+	must(err)
+	b := path.Base(filepath.ToSlash(d1))
+	if d1 == d2 || !strings.HasPrefix(b, "x-") || !strings.HasSuffix(b, "-y") || len(b) <= len("x--y") {
+		failf("MkdirTemp names %q and %q for x-*-y", d1, d2)
+	}
+	if fi, err := fsys.Stat(d1); err != nil || !fi.IsDir() {
+		failf("MkdirTemp's %q: %v %v", d1, fi, err)
+	}
+	f, err := dst.CreateTemp(fsys, d1, "f")
+	must(err)
+	if !strings.HasPrefix(f.Name(), filepath.Join(d1, "f")) {
+		failf("CreateTemp in %q named %q", d1, f.Name())
+	}
+	_, err = f.Write([]byte("data"))
+	must(err)
+	f.Close()
+	if got := read(fsys, f.Name()); got != "data" {
+		failf("the temporary file holds %q", got)
+	}
+	if _, err := dst.CreateTemp(fsys, d1, "a/b*"); err == nil {
+		failf("CreateTemp with a separator in the pattern succeeded")
+	}
+	if _, err := dst.MkdirTemp(fsys, "missing", "x"); !errors.Is(err, fs.ErrNotExist) {
+		failf("MkdirTemp in a missing dir: %v", err)
+	}
+}
+
+// fsWalkGlob: WalkDir and Walk visit a tree in lexical order (SkipDir
+// prunes), Glob matches as filepath's does, Readdirnames and Readdir list
+// a directory, and DirFS is a valid fs.FS of a subtree (testing/fstest).
+func fsWalkGlob(w *dst.World) {
+	fsys := w.FS()
+	must(fsys.MkdirAll("t/a/b", 0o755))
+	for _, n := range []string{"t/a/b/c.txt", "t/a/d.txt", "t/e.txt", "t/a/b/z.md"} {
+		must(dst.WriteFile(fsys, n, []byte(n), 0o644))
+	}
+	var walked, walked2 []string
+	must(dst.WalkDir(fsys, "t", func(p string, d fs.DirEntry, err error) error {
+		must(err)
+		walked = append(walked, filepath.ToSlash(p))
+		if d.Name() == "b" {
+			return filepath.SkipDir
+		}
+		return nil
+	}))
+	if want := []string{"t", "t/a", "t/a/b", "t/a/d.txt", "t/e.txt"}; !slices.Equal(walked, want) {
+		failf("WalkDir visited %q, want %q", walked, want)
+	}
+	must(dst.Walk(fsys, "t", func(p string, info fs.FileInfo, err error) error {
+		must(err)
+		walked2 = append(walked2, filepath.ToSlash(p))
+		return nil
+	}))
+	if want := []string{"t", "t/a", "t/a/b", "t/a/b/c.txt", "t/a/b/z.md", "t/a/d.txt", "t/e.txt"}; !slices.Equal(walked2, want) {
+		failf("Walk visited %q, want %q", walked2, want)
+	}
+	var missing error
+	dst.WalkDir(fsys, "nope", func(_ string, _ fs.DirEntry, err error) error { missing = err; return nil })
+	if !errors.Is(missing, fs.ErrNotExist) {
+		failf("WalkDir of a missing root reported %v", missing)
+	}
+	for pattern, want := range map[string][]string{
+		"t/a/*.txt": {"t/a/d.txt"},
+		"t/*/*":     {"t/a/b", "t/a/d.txt"},
+		"t/a/b/*.?": nil,
+		"t/a/b/*":   {"t/a/b/c.txt", "t/a/b/z.md"},
+		"t/e.txt":   {"t/e.txt"},
+		"t/none":    nil,
+	} {
+		got, err := dst.Glob(fsys, pattern)
+		for i := range got {
+			got[i] = filepath.ToSlash(got[i])
+		}
+		if err != nil || !slices.Equal(got, want) {
+			failf("Glob(%q) = %q %v, want %q", pattern, got, err, want)
+		}
+	}
+	if _, err := dst.Glob(fsys, "t/["); err != filepath.ErrBadPattern {
+		failf("Glob of a bad pattern: %v", err)
+	}
+	d, err := dst.Open(fsys, "t/a")
+	must(err)
+	names, err := dst.Readdirnames(d, -1)
+	must(err)
+	d.Close()
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"b", "d.txt"}) {
+		failf("Readdirnames: %q", names)
+	}
+	d, err = dst.Open(fsys, "t/a")
+	must(err)
+	infos, err := dst.Readdir(d, -1)
+	must(err)
+	d.Close()
+	var inames []string
+	for _, fi := range infos {
+		inames = append(inames, fi.Name())
+		if fi.Name() == "d.txt" && fi.Size() != int64(len("t/a/d.txt")) {
+			failf("Readdir's d.txt has size %d", fi.Size())
+		}
+	}
+	slices.Sort(inames)
+	if !slices.Equal(inames, []string{"b", "d.txt"}) {
+		failf("Readdir: %q", inames)
+	}
+	sub := dst.DirFS(fsys, "t/a")
+	if err := fstest.TestFS(sub, "d.txt", "b/c.txt", "b/z.md"); err != nil {
+		failf("DirFS: %v", err)
+	}
+	if _, err := sub.Open("../e.txt"); !errors.Is(err, fs.ErrInvalid) {
+		failf("DirFS opened a name outside its tree: %v", err)
+	}
+	if b, err := fs.ReadFile(sub, "b/c.txt"); err != nil || string(b) != "t/a/b/c.txt" {
+		failf("DirFS ReadFile: %q %v", b, err)
 	}
 }

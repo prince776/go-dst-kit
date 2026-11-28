@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strconv"
@@ -1835,6 +1836,55 @@ func TestStressGoschedAndYield(t *testing.T) {
 				}
 				go flag.Store(true)
 				wg.Wait()
+			}
+		})
+	})
+}
+
+// ---- Pipe and NetPipe
+
+// Several writers share a Pipe while one goroutine reads it: each write
+// arrives whole (writes are serialized, as io's), and every byte written
+// is read. On NetPipe, deadlines are set while reads are waiting: each
+// read returns data or a timeout, never hangs.
+// Fails if: writes interleave, bytes are lost, or a read outlives its
+// deadline (stuck).
+func TestStressPipes(t *testing.T) {
+	bothModes(t, func(t *testing.T, w *dst.World) {
+		const writers = 4
+		n := rounds(300)
+		var round atomic.Int64
+		within(t, "Pipe and NetPipe", &round, n, func() {
+			for r := 1; r <= n; r++ {
+				round.Store(int64(r))
+				pr, pw := dst.Pipe(w)
+				var wg sync.WaitGroup
+				for i := range writers {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						pw.Write(bytes.Repeat([]byte{byte('a' + i)}, 64))
+					}()
+				}
+				go func() { wg.Wait(); pw.Close() }()
+				got, err := io.ReadAll(pr)
+				if err != nil || len(got) != writers*64 {
+					panic(fmt.Sprintf("read %d bytes (%v), want %d", len(got), err, writers*64))
+				}
+				for i := 0; i < len(got); i += 64 {
+					if !bytes.Equal(got[i:i+64], bytes.Repeat(got[i:i+1], 64)) {
+						panic("two writes interleaved")
+					}
+				}
+				a, b := dst.NetPipe(w)
+				go b.Write([]byte("x"))
+				buf := make([]byte, 1)
+				a.SetReadDeadline(time.Now().Add(time.Duration(r%3) * 50 * time.Microsecond))
+				if n, err := a.Read(buf); n == 0 && !errors.Is(err, os.ErrDeadlineExceeded) {
+					panic(fmt.Sprintf("a read with a deadline returned %d %v", n, err))
+				}
+				a.Close()
+				b.Close()
 			}
 		})
 	})
