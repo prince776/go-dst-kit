@@ -44,8 +44,12 @@ var (
 // probability ExploreFresh; otherwise a feature is drawn with weight
 // 1/(runs that had it), AFLFast's power schedule, among features forked
 // from fewer than ExploreBudget times, and the run forks one of the first
-// few runs that had it after their own last fork. Fault-point firings are
-// coverage only. Forks keep the root seed's fault mix and features.
+// few runs that had it after their own last fork, from distinct root
+// seeds. Fault-point firings are coverage only. Forks keep the root seed's
+// fault mix and features, so exploration doesn't dig into one root for
+// long: a root is forked at most ExploreRootBudget times without result,
+// a fork counting against it only if it reached nothing no earlier run had
+// (a root whose forks keep finding new features stays open).
 //
 // It runs opts.Explore runs (default opts.Seeds) and reports as Sweep
 // does, Results in run order.
@@ -66,6 +70,8 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 		path Path
 		fork Fork // where to fork it (Seed unset)
 	}
+	rootUses := map[uint64]int{} // forks of each root seed that found nothing new
+	rootOpen := func(c carrier) bool { return rootUses[c.path.Seed] < opts.ExploreRootBudget }
 	type feature struct {
 		reached int       // runs that had it
 		uses    int       // runs forked from it
@@ -74,7 +80,9 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 	feats := map[string]*feature{}
 	nextSeed := opts.FirstSeed
 	fresh := func() Path { p := Path{Seed: nextSeed}; nextSeed++; return p }
-	open := func(f *feature) bool { return len(f.from) > 0 && f.uses < opts.ExploreBudget }
+	open := func(f *feature) bool {
+		return f.uses < opts.ExploreBudget && slices.ContainsFunc(f.from, rootOpen)
+	}
 
 	var results []Result
 	var divs []*Divergence
@@ -105,7 +113,14 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 				}
 				if x -= 1 / float64(f.reached); x < 0 {
 					f.uses++
-					c := f.from[rng.IntN(len(f.from))]
+					var from []carrier
+					for _, c := range f.from {
+						if rootOpen(c) {
+							from = append(from, c)
+						}
+					}
+					c := from[rng.IntN(len(from))]
+					rootUses[c.path.Seed]++ // refunded if it finds something new
 					fk := c.fork
 					fk.Seed = rng.Uint64()>>1 + 1
 					batch[i] = c.path.Then(fk)
@@ -134,23 +149,29 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 			if k := len(r.ForkSteps); k > 0 {
 				last = r.ForkSteps[k-1]
 			}
+			novel := false
 			note := func(name string, at uint64, fk Fork) {
 				f := feats[name]
 				if f == nil {
 					f = &feature{}
 					feats[name] = f
+					novel = true
 				}
 				f.reached++
 				// Keep the first few runs that had it after their own last
 				// fork (a fork applies only after the earlier ones) with
 				// forks to spare: forks pick among them, so they don't all
 				// descend from one root.
-				if len(f.from) < carriers && at > last && len(r.Path.Forks) < maxForks {
+				if len(f.from) < carriers && at > last && len(r.Path.Forks) < maxForks &&
+					!slices.ContainsFunc(f.from, func(c carrier) bool { return c.path.Seed == r.Path.Seed }) {
 					f.from = append(f.from, carrier{r.Path, fk})
 				}
 			}
 			for _, ft := range runFeatures(r, by) {
 				note(ft.name, ft.at, ft.fork)
+			}
+			if novel && len(r.Path.Forks) > 0 {
+				rootUses[r.Path.Seed]-- // the fork found something new: its root stays open
 			}
 		}
 		if stop {

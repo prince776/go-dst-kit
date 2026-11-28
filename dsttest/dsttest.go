@@ -72,6 +72,10 @@
 //     its runs reached, and exploring by states forks from rarely reached
 //     ones: a bug after a rare state no marker or interleaving shows is
 //     found several times more often than by a sweep or the other signals.
+//   - [explore-spreads] Exploration mixes fresh seeds (half by default)
+//     with forks, and doesn't dig into one root seed for long: forks of a
+//     root that find nothing new are capped (ExploreRootBudget), and a
+//     feature's carriers come from distinct roots.
 //   - [gray-explores] With Gray faults, across seeds: slow links, lossy
 //     links losing segments, connections reset at a heal, slow machines
 //     stalling, and slow disks all occur; none of the stalls, losses or
@@ -276,12 +280,15 @@ type Options struct {
 	// instead of sweeping Seeds (see Explore; -dst.explore).
 	Explore int
 	// ExploreFresh is the share of guided runs that are fresh seeds
-	// (default 0.25); ExploreBudget caps the runs forked from one marker
-	// (default max(8, Explore/10)); ExploreBatch is the generation size
+	// (default 0.5); ExploreBudget caps the runs forked from one feature
+	// (default max(8, Explore/10)); ExploreRootBudget caps the forks of
+	// one root seed that find nothing new (default 8); ExploreBatch is the
+	// generation size
 	// (default 32; fixed, so an exploration replays on any machine).
-	ExploreFresh  float64
-	ExploreBudget int
-	ExploreBatch  int
+	ExploreFresh      float64
+	ExploreBudget     int
+	ExploreRootBudget int
+	ExploreBatch      int
 	// ExploreBy is what guided runs steer by, a comma-separated set of
 	// "markers" (Sometimes), "order" (pairs of markers in the order runs
 	// first reached them), "pairs" (interleaving pairs: see
@@ -349,8 +356,11 @@ func (o *Options) defaults() {
 	if *flagExplore > 0 {
 		o.Explore = *flagExplore
 	}
+	if o.ExploreRootBudget == 0 {
+		o.ExploreRootBudget = 8
+	}
 	if o.ExploreFresh == 0 {
-		o.ExploreFresh = 0.25
+		o.ExploreFresh = 0.5
 	}
 	if o.ExploreBudget == 0 {
 		o.ExploreBudget = max(8, max(o.Explore, o.Seeds)/10)

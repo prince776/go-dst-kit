@@ -3,6 +3,7 @@ package dsttest_test
 import (
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,6 +179,77 @@ func TestExploreByStates(t *testing.T) {
 	}
 }
 
+// decoys: a twentieth of root seeds are dead ends rich in rare states (30
+// states of their own, which no other root reaches, then nothing), and a hundredth reach a rare
+// state A after which a 1-in-10 event fails. Forks of a dead end find
+// nothing new. Which roots are dead ends is recorded in deadEnds.
+func decoys(deadEnds *sync.Map) func(h *dsttest.Harness) {
+	return func(h *dsttest.Harness) {
+		dead := h.World().Rand().Stream("kind").IntN(20) == 0
+		deadEnds.Store(h.Seed(), dead)
+		state, a := uint64(0), false
+		h.State(func() uint64 { return state })
+		h.Go(func(w *dst.World) {
+			for round := range 120 {
+				switch {
+				case dead && round >= 10 && round < 40:
+					state = h.Seed()<<8 | uint64(round) // states of this root's own
+				case round == 10 && w.Rand().IntN(100) == 0:
+					a, state = true, 1
+				case round == 100 && a && w.Rand().IntN(10) == 0:
+					h.Fail(errors.New("A, then B"))
+				}
+				w.Rand().Uint64()
+				w.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
+// Verifies: [explore-spreads]
+// Exploration doesn't dig into one root seed for long: forks of a root
+// that find nothing new are capped (ExploreRootBudget), so dead-end roots
+// rich in rare states don't soak up the forks, and the bug behind the
+// rare state A is found several times more often than without the cap
+// (expected about 10 failing runs against 2). Fails if a dead-end root is
+// forked more than the budget, if the cap doesn't win clearly, or if a
+// failing path doesn't replay.
+func TestExploreSpreadsOverRoots(t *testing.T) {
+	o := exploreOpts
+	o.Explore, o.KeepGoing, o.ExploreBy = 1000, true, "states"
+	explore := func(rootBudget int) (dsttest.Report, int) {
+		var dead sync.Map
+		o.ExploreRootBudget = rootBudget
+		rep := dsttest.Explore(o, decoys(&dead))
+		perRoot := map[uint64]int{}
+		for _, r := range rep.Results {
+			if v, _ := dead.Load(r.Path.Seed); v == true && len(r.Path.Forks) > 0 {
+				perRoot[r.Path.Seed]++
+			}
+		}
+		most := 0
+		for _, n := range perRoot {
+			most = max(most, n)
+		}
+		return rep, most
+	}
+	capped, most := explore(0) // the default, 8
+	uncapped, mostUncapped := explore(1 << 30)
+	t.Logf("failing runs: capped %d (a dead-end root forked at most %d times), uncapped %d (%d)",
+		len(capped.Failed), most, len(uncapped.Failed), mostUncapped)
+	if most > 8 {
+		t.Errorf("a dead-end root was forked %d times, want at most 8 (forks finding nothing new)", most)
+	}
+	if n := len(capped.Failed); n < 3 || n < 3*len(uncapped.Failed) {
+		t.Fatalf("capped %d failing runs, uncapped %d: want several times more with root budgets", n, len(uncapped.Failed))
+	}
+	f := capped.Failed[0]
+	var dead sync.Map
+	if r := dsttest.RunPath(f.Path, o, decoys(&dead), nil); r.Err == nil {
+		t.Errorf("path %v passed on replay", f.Path)
+	}
+}
+
 // An exploration is the same whatever the parallelism: the same paths, in
 // the same order, by markers and by every signal. By markers, each of the
 // two markers is forked from its budget's worth of times. Fails if they
@@ -209,6 +281,7 @@ func TestExploreDeterministic(t *testing.T) {
 	run := func(par int) []string {
 		o := exploreOpts
 		o.Explore, o.Parallel, o.KeepGoing, o.ExploreBy = 200, par, true, "markers"
+		o.ExploreRootBudget = 1 << 30 // feature budgets alone (TestExploreSpreadsOverRoots has root budgets)
 		var out []string
 		for _, r := range dsttest.Explore(o, twoRare).Results {
 			out = append(out, r.Path.String())
