@@ -78,3 +78,43 @@ func TestYieldWaitsForProgress(t *testing.T) {
 	go func() { time.Sleep(time.Millisecond); flag.Store(true) }()
 	spin(w, &flag)
 }
+
+// Verifies: [gosched-stays-runnable]
+// Fails if: a loop that makes its own progress and calls Gosched waits
+// for time to advance (it would finish at the next timer, an hour on,
+// as with Yield), or Gosched never lets another runnable goroutine run
+// before it goes on.
+func TestGoschedStaysRunnable(t *testing.T) {
+	otherFirst := false
+	for seed := uint64(1); seed <= 50; seed++ {
+		var took time.Duration
+		var otherRan, otherAtYield bool
+		res := simworld.Run(simworld.Options{Seed: seed, MaxSteps: 10_000}, func(w *dst.World) {
+			var wg dst.WaitGroup
+			wg.Go(w, func() { w.Sleep(time.Hour) }) // the next timer is far off
+			w.Sleep(time.Millisecond)               // the sleeper is asleep now
+			start := w.Now()
+			otherRan = false
+			wg.Go(w, func() { otherRan = true })
+			ranAtSpawn := otherRan
+			for i := 0; i < 10; i++ { // makes its own progress
+				w.Gosched()
+				if i == 0 && !ranAtSpawn && otherRan {
+					otherAtYield = true
+				}
+			}
+			took = w.Since(start)
+			wg.Wait()
+		})
+		if res.Err != nil {
+			t.Fatalf("seed %d: %v", seed, res.Err)
+		}
+		if took != 0 {
+			t.Fatalf("seed %d: a self-progressing loop on Gosched took %v of simulated time, want 0", seed, took)
+		}
+		otherFirst = otherFirst || otherAtYield
+	}
+	if !otherFirst {
+		t.Fatal("in 50 seeds, no runnable goroutine ever ran at a Gosched before the loop went on")
+	}
+}

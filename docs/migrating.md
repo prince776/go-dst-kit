@@ -57,6 +57,7 @@ and why no World reaches it.
 | `context.WithCancel`, `WithTimeout`, `WithDeadline` | `dst.WithCancel(w, ctx)`, `dst.WithTimeout(w, ctx, d)`, `dst.WithDeadline(w, ctx, t)` | `Background`, `WithValue` are fine as they are |
 | `context.AfterFunc` | `dst.AfterDone(ctx, f)` | |
 | `runtime.Gosched` (a spin waiting for another goroutine) | `w.Yield()` | in simulation it returns once another goroutine has made progress or time has advanced; a spin no one can end is a deadlock |
+| `runtime.Gosched` (a turn for others, in a loop that makes its own progress) | `w.Gosched()` | a plain scheduling point: the goroutine stays runnable. dstmigrate writes `w.Yield()` for every Gosched (the safe default for spins); switch these by hand. The wrong choice shows as simulated time jumping to the next timer, and as a liveness hang when that timer is the end of the run. Rule: if the loop's exit condition depends on another goroutine, it is a spin (Yield); if the loop ends by its own work, Gosched |
 | `math/rand` | `w.Rand()` | seeded per machine in simulation |
 | `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
 | `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | paths are relative to the World's root |
