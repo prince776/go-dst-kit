@@ -1,0 +1,88 @@
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/prince776/go-dst-kit/realworld"
+)
+
+var __w = realworld.New(realworld.Options{})
+
+// The rest of os's filesystem API: the same output whichever World runs it.
+func main() {
+	top, err := os.MkdirTemp("", "fsmore-*")
+	if err != nil {
+		fmt.Println("mkdirtemp:", err)
+		return
+	}
+	defer os.RemoveAll(top)
+	fmt.Println("temp in TempDir:", filepath.Dir(top) == filepath.Clean(os.TempDir()))
+	os.MkdirAll(filepath.Join(top, "d"), 0o755)
+	os.MkdirAll(filepath.Join(top, "other"), 0o755)
+	os.WriteFile(filepath.Join(top, "d", "x.txt"), []byte("hello world"), 0o644)
+	os.WriteFile(filepath.Join(top, "other", "secret.txt"), []byte("s"), 0o644)
+	os.Symlink(filepath.Join(top, "other"), filepath.Join(top, "link"))
+
+	var walked []string
+	filepath.WalkDir(top, func(p string, _ fs.DirEntry, _ error) error {
+		if p != top && !strings.HasPrefix(filepath.Base(p), "other") && !strings.Contains(p, "other") {
+			walked = append(walked, strings.TrimPrefix(p, top+"/"))
+		}
+		return nil
+	})
+	fmt.Println("walk:", strings.Join(walked, " "))
+	n := 0
+	filepath.Walk(top, func(string, fs.FileInfo, error) error { n++; return nil })
+	fmt.Println("walk count:", n)
+	m, _ := filepath.Glob(filepath.Join(top, "*", "*.txt"))
+	fmt.Println("glob:", len(m))
+
+	name := filepath.Join(top, "d", "x.txt")
+	os.Chmod(name, 0o600)
+	fi, _ := os.Stat(name)
+	fmt.Println("mode:", fi.Mode().Perm())
+	os.Truncate(name, 5)
+	b, _ := os.ReadFile(name)
+	fmt.Printf("truncated: %q\n", b)
+	mt := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	os.Chtimes(name, mt, mt)
+	fi, _ = os.Stat(name)
+	fmt.Println("mtime:", fi.ModTime().UTC())
+
+	f, err := os.CreateTemp(filepath.Join(top, "d"), "t-*.log")
+	if err != nil {
+		fmt.Println("createtemp:", err)
+		return
+	}
+	f.Chmod(0o640)
+	f.Close()
+	fi, _ = os.Stat(f.Name())
+	fmt.Println("temp file mode:", fi.Mode().Perm(), strings.HasSuffix(f.Name(), ".log"))
+	d, _ := os.Open(filepath.Join(top, "d"))
+	names, _ := d.Readdirnames(-1)
+	d.Close()
+	fmt.Println("names:", len(names))
+	d, _ = os.Open(top)
+	infos, _ := d.Readdir(-1)
+	d.Close()
+	for _, i := range infos {
+		if i.Name() == "link" {
+			fmt.Println("readdir link is a symlink:", i.Mode()&fs.ModeSymlink != 0)
+		}
+	}
+	sub := os.DirFS(filepath.Join(top, "d"))
+	b, err = fs.ReadFile(sub, "x.txt")
+	fmt.Printf("dirfs: %q %v\n", b, err)
+	old, _ := ioutil.TempDir(top, "old")
+	of, _ := ioutil.TempFile(old, "f")
+	of.Close()
+	es, _ := os.ReadDir(old)
+	fmt.Println("ioutil temp:", len(es), slices.Contains([]bool{true}, strings.HasPrefix(filepath.Base(old), "old")))
+}

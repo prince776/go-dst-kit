@@ -73,11 +73,15 @@ and why no World reaches it.
 | `crypto/rand.Read`, `Reader`, `Text` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)`, `dst.CryptoText(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
 | `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | in production names reach os as they are; a simulated disk is rooted (names relative to it) |
 | `os.ReadFile`, `WriteFile`, `Create`, `Open` | `dst.ReadFile(w.FS(), ...)`, ... | `dst.SyncDir(fsys, dir)` to fsync a directory |
+| `os.Chmod`, `Chtimes`, `Truncate`, `MkdirTemp`, `CreateTemp`, `DirFS` | `dst.Chmod(w.FS(), ...)`, ... | os's own in production; a simulated disk names temporary files from a counter and puts `MkdirTemp("", ...)` in `tmp`; modes and times aren't crash-modelled |
+| `filepath.Walk`, `WalkDir`, `Glob` | `dst.Walk(w.FS(), ...)`, ... | filepath's own in production (symbolic links as there) |
+| `(*os.File).Chmod`, `Readdir`, `Readdirnames` | `dst.FileChmod(f, m)`, `dst.Readdir(f, n)`, `dst.Readdirnames(f, n)` | the `*os.File`'s own methods in production |
 | `os.Link` (a hard link) | `dst.Link(w.FS(), old, new)` | like a create, the new name is durable once its directory is synced |
 | `syscall.Flock(fd, LOCK_EX\|LOCK_NB)` on a lock file (gofrs/flock's `TryLock`) | `unlock, err := dst.LockFile(w.FS(), name)` | `dst.ErrLocked` when held; released by `unlock` or the process's death; unix only in the real World |
-| `net.Listen`, `net.Dial`, `DialContext` | `w.Net().Listen`, `w.Net().Dial`, `w.Net().DialContext` | returns ordinary `net.Listener` and `net.Conn` |
-| `http.Serve`, `http.DefaultClient` | `dsthttp.Serve(w, ln, h)`, `dsthttp.Client(w)` | handlers are unchanged |
-| `grpc.NewServer`, `grpc.NewClient` | `dstgrpc.NewServer(w)`, `dstgrpc.NewClient(w, target)` | generated stubs are unchanged |
+| `net.Listen`, `net.Dial`, `DialContext`, `DialTimeout` | `w.Net().Listen`, `w.Net().Dial`, `w.Net().DialContext`, `dst.DialTimeout(w, ...)` | returns ordinary `net.Listener` and `net.Conn` |
+| `io.Pipe`, `net.Pipe` | `dst.Pipe(w)`, `dst.NetPipe(w)` | io's and net's own pipes in the real World |
+| `http.Serve`, `ListenAndServe`, `http.Get` (`Post`, ...), `http.DefaultClient` | `dsthttp.Serve(w, ln, h)`, `dsthttp.ListenAndServe(w, addr, h)`, `dsthttp.DefaultClient(w).Get`, `dsthttp.DefaultClient(w)` | handlers are unchanged; `DefaultClient` is `http.DefaultClient` in the real World |
+| `grpc.NewServer`, `grpc.NewClient` | `dstgrpc.NewServerExact(w, opts...)`, `dstgrpc.NewClientExact(w, target, opts...)` | grpc's own calls in the real World (no default credentials); interceptor options as `dstgrpc.UnaryInterceptorOption` and kin, which dstmigrate writes; generated stubs are unchanged |
 
 What doesn't wait needs no change: `sync/atomic`, `sync.Map`, encoding,
 `strings`, `errors`, pure computation.

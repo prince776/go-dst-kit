@@ -174,6 +174,102 @@ func TestMigrateExact(t *testing.T) {
 	}
 }
 
+// Verifies: [inexact-is-kept]
+// io.Pipe, net.Pipe, net.Listen, Dial, DialTimeout, http.Serve, http.Get
+// and http.DefaultClient migrate to the World's (std's objects in the
+// real World: a setting on DefaultClient still applies), and the program
+// prints the same before and after; *io.PipeReader becomes dst's.
+// Fails if any is left as is or rewritten inexactly (DefaultClient as a
+// new client loses its setting).
+func TestMigrateNetIO(t *testing.T) {
+	want, got, migrated, warnings := beforeAndAfter(t, "netio")
+	if !strings.Contains(want, "http hello 200 5s") {
+		t.Fatalf("the original program printed %q", want)
+	}
+	for _, re := range []string{`dst\.Pipe\(__w\)`, `dst\.NetPipe\(__w\)`, `__w\.Net\(\)\.Listen\(`, `__w\.Net\(\)\.Dial\(`, `dst\.DialTimeout\(__w, `,
+		`dsthttp\.Serve\(goArg\d+, hl, mux\)`, `dsthttp\.DefaultClient\(__w\)\.Get\(`, `dsthttp\.DefaultClient\(__w\)\.Timeout = `, `func pipeRead\(r \*dst\.PipeReader\)`} {
+		if !regexp.MustCompile(re).MatchString(migrated) {
+			t.Errorf("want %s in:\n%s", re, migrated)
+		}
+	}
+	if regexp.MustCompile(`\b(io|net|http)\.(Pipe|Listen|Dial|DialTimeout|Serve|Get)\(`).MatchString(migrated) {
+		t.Errorf("a std call survived:\n%s", migrated)
+	}
+	if strings.Contains(warnings, "no World equivalent") {
+		t.Errorf("reported:\n%s", warnings)
+	}
+	if got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+}
+
+// Verifies: [inexact-is-kept]
+// The rest of os's filesystem API (Chmod, Chtimes, Truncate, MkdirTemp,
+// CreateTemp, DirFS, ioutil's TempDir and TempFile), filepath.Walk,
+// WalkDir and Glob, and *os.File's Chmod, Readdir and Readdirnames
+// migrate to dst's helpers, and the program prints the same before and
+// after (including a walk past a symbolic link, which filepath doesn't
+// follow).
+// Fails if any is left or reported, or behaves differently once migrated.
+func TestMigrateFSMore(t *testing.T) {
+	want, got, migrated, warnings := beforeAndAfter(t, "fsmore")
+	if !strings.Contains(want, "walk: d d/x.txt link") {
+		t.Fatalf("the original program printed %q", want)
+	}
+	if regexp.MustCompile(`\b(os|filepath)\.(Chmod|Chtimes|Truncate|MkdirTemp|CreateTemp|DirFS|Walk|WalkDir|Glob)\(|\bioutil\.|\b(d|f)\.(Chmod|Readdir|Readdirnames)\(`).MatchString(migrated) {
+		t.Errorf("a std call survived:\n%s", migrated)
+	}
+	for _, re := range []string{`dst\.WalkDir\(__w\.FS\(\), `, `dst\.MkdirTemp\(__w\.FS\(\), "", `, `dst\.CreateTemp\(__w\.FS\(\), `, `dst\.FileChmod\(f, `, `dst\.Readdirnames\(d, -1\)`, `dst\.DirFS\(__w\.FS\(\), `} {
+		if !regexp.MustCompile(re).MatchString(migrated) {
+			t.Errorf("want %s in:\n%s", re, migrated)
+		}
+	}
+	for _, l := range strings.Split(warnings, "\n") {
+		// os.Symlink sets the program up (symbolic links are still to come).
+		if (strings.Contains(l, "no World equivalent") || strings.Contains(l, "isn't part of dst.File")) && !strings.Contains(l, "os.Symlink") {
+			t.Errorf("reported: %s", l)
+		}
+	}
+	if got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+}
+
+// Verifies: [inexact-is-kept]
+// grpc.NewServer and grpc.NewClient migrate to dstgrpc's exact
+// constructors, grpc's interceptor options to dstgrpc's carrying ones,
+// *grpc.ClientConn (but in an interceptor's signature, where grpc passes
+// its own) and *grpc.Server to dstgrpc's, and the program prints
+// the same before and after: a client without credentials still fails
+// with grpc's error, interceptors run in grpc's order. Options the tool
+// can't see into (a variable, a spread slice) and grpc options that
+// don't apply in simulation are reported, naming the call site, and kept.
+// Fails if a grpc constructor or interceptor option survives, the
+// output changes, or an opaque option goes unreported.
+func TestMigrateGRPC(t *testing.T) {
+	want, got, migrated, warnings := beforeAndAfter(t, "grpc")
+	if !strings.Contains(want, "no transport security set") || !strings.Contains(want, "order: cu cc1 su sc1") {
+		t.Fatalf("the original program printed %q", want)
+	}
+	if regexp.MustCompile(`\bgrpc\.(NewServer|NewClient|UnaryInterceptor|ChainUnaryInterceptor|WithUnaryInterceptor|WithChainUnaryInterceptor)\(|\*grpc\.Server\b|call\(c \*grpc\.ClientConn`).MatchString(migrated) {
+		t.Errorf("a grpc constructor, option or type survived:\n%s", migrated)
+	}
+	for _, re := range []string{`dstgrpc\.NewServerExact\(__w, dstgrpc\.UnaryInterceptorOption\(`, `dstgrpc\.NewClientExact\(__w, `, `func call\(c dstgrpc\.ClientConn\)`, `func stop\(s \*dstgrpc\.Server\)`,
+		`cc \*grpc\.ClientConn, inv grpc\.UnaryInvoker`} { // an interceptor's connection is grpc's
+		if !regexp.MustCompile(re).MatchString(migrated) {
+			t.Errorf("want %s in:\n%s", re, migrated)
+		}
+	}
+	for _, w := range []string{"p.go:", "can't see into these options of grpc.NewClient", "can't see into this option of grpc.NewServer", "grpc.MaxRecvMsgSize (an option of grpc.NewServer) has no effect in a simulated World"} {
+		if !strings.Contains(warnings, w) {
+			t.Errorf("want %q reported:\n%s", w, warnings)
+		}
+	}
+	if got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+}
+
 // beforeAndAfter runs testdata/<name>/p.go.txt as a program on the real
 // World, migrates it (no -world: it defines __w), runs it again, and
 // returns both outputs, the migrated source and the tool's warnings.
@@ -196,8 +292,32 @@ func beforeAndAfter(t *testing.T, name string) (want, got, migrated, warnings st
 		}
 		return string(out)
 	}
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/"+name+"\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => "+kit+"\n"), 0o644)
+	gomod := "module example.com/" + name + "\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => " + kit + "\n"
+	if strings.Contains(string(src), `"google.golang.org/grpc"`) {
+		// dstgrpc is a module of its own, with grpc's requirements.
+		g, err := os.ReadFile(filepath.Join(kit, "dstgrpc", "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reqs := string(g)[strings.Index(string(g), "require ("):strings.Index(string(g), "replace")]
+		gomod += "\nrequire github.com/prince776/go-dst-kit/dstgrpc v0.0.0\n\nreplace github.com/prince776/go-dst-kit/dstgrpc => " + filepath.Join(kit, "dstgrpc") + "\n\n" + reqs
+		sum, _ := os.ReadFile(filepath.Join(kit, "dstgrpc", "go.sum"))
+		os.WriteFile(filepath.Join(dir, "go.sum"), sum, 0o644)
+	}
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644)
 	os.WriteFile(filepath.Join(dir, "p.go"), src, 0o644)
+	tidy := func() {
+		if !strings.Contains(gomod, "dstgrpc") {
+			return
+		}
+		cmd := exec.Command("go", "mod", "tidy")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=mod")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("go mod tidy (from the module cache only): %v\n%s", err, out)
+		}
+	}
+	tidy()
 	want = run("go", "run", ".")
 	bin := filepath.Join(dir, "dstmigrate")
 	build := exec.Command("go", "build", "-o", bin, ".")
@@ -208,6 +328,8 @@ func beforeAndAfter(t *testing.T, name string) (want, got, migrated, warnings st
 	warnings = run(bin, ".")
 	m, _ := os.ReadFile(filepath.Join(dir, "p.go"))
 	migrated = string(m)
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644) // what the migration needs
+	tidy()
 	cmd := exec.Command("go", "run", ".")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -220,19 +342,19 @@ func beforeAndAfter(t *testing.T, name string) (want, got, migrated, warnings st
 // File I/O through package os (and io/ioutil) migrates to the World's FS:
 // the result compiles and vets, no os filesystem call or *os.File is
 // left, WriteString becomes io.WriteString, and a call with no World
-// equivalent (os.Chmod) is reported, not silently kept; comments stay
+// equivalent (os.Chown) is reported, not silently kept; comments stay
 // where they were.
 // Fails if any os filesystem call or *os.File survives, the result
-// doesn't build, os.Chmod goes unreported, or a rewritten call moves the
+// doesn't build, os.Chown goes unreported, or a rewritten call moves the
 // comment after it.
 func TestMigrateFiles(t *testing.T) {
 	got, stderr := migrateSample(t, "files", "Store=$.w")
-	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|MkdirAll|Mkdir|ReadDir|Link)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
+	for _, bad := range []string{`os\.(OpenFile|Open|Create|ReadFile|WriteFile|Rename|Remove|RemoveAll|Stat|MkdirAll|Mkdir|ReadDir|Link|Chmod)\(`, `\*os\.File`, `ioutil\.WriteFile`, `\bf\.WriteString\(`} {
 		if regexp.MustCompile(bad).MatchString(got) {
 			t.Errorf("%q survived:\n%s", bad, got)
 		}
 	}
-	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `dst\.Link\(s\.w\.FS\(\), tmp, tmp\+"3"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`,
+	for _, want := range []string{`s\.w\.FS\(\)\.Rename\(`, `dst\.Open\(s\.w\.FS\(\), `, `io\.WriteString\(f, "hello"\)`, `dst\.Link\(s\.w\.FS\(\), tmp, tmp\+"3"\)`, `func size\(f dst\.File\)`, `os\.IsNotExist\(err\)`, `dst\.Chmod\(s\.w\.FS\(\), `,
 		`\n// size takes a file: its type becomes dst\.File\.\nfunc size`} {
 		if !regexp.MustCompile(want).MatchString(got) {
 			t.Errorf("want %q in:\n%s", want, got)
@@ -241,8 +363,8 @@ func TestMigrateFiles(t *testing.T) {
 	if !strings.Contains(stderr, "os.Lstat has no World equivalent") || !strings.Contains(got, "os.Lstat(tmp)") {
 		t.Errorf("os.Lstat wasn't kept and reported; stderr:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "os.Chmod has no World equivalent") {
-		t.Errorf("os.Chmod wasn't reported; stderr:\n%s", stderr)
+	if !strings.Contains(stderr, "os.Chown has no World equivalent") {
+		t.Errorf("os.Chown wasn't reported; stderr:\n%s", stderr)
 	}
 }
 
@@ -262,7 +384,7 @@ func TestMigrateFilesWorldCall(t *testing.T) {
 // A file named by -real-fs keeps its os file I/O: it uses the real
 // filesystem on purpose (a test's temporary directory).
 // Fails if any of the sample's os calls or *os.File is rewritten, or
-// os.Chmod is reported.
+// os.Chown is reported.
 func TestMigrateFilesRealFS(t *testing.T) {
 	got, stderr := migrateSample(t, "files", "Store=$.w", "-real-fs", "x.go,p.go")
 	for _, want := range []string{`os\.Rename\(`, `os\.Open\(`, `\*os\.File`, `f\.WriteString\(`} {

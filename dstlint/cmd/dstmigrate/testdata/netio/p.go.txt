@@ -1,0 +1,75 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
+
+	"github.com/prince776/go-dst-kit/realworld"
+)
+
+var __w = realworld.New(realworld.Options{})
+
+func pipeRead(r *io.PipeReader) string { b, _ := io.ReadAll(r); return string(b) }
+
+// Pipes, sockets and HTTP: the same output whichever World runs it.
+func main() {
+	r, w := io.Pipe()
+	go func() { w.Write([]byte("through a pipe")); w.Close() }()
+	fmt.Println(pipeRead(r))
+
+	a, b := net.Pipe()
+	go func() { a.Write([]byte("net pipe")); a.Close() }()
+	got, _ := io.ReadAll(b)
+	fmt.Println(string(got))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Println("listen:", err)
+		return
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Write([]byte("tcp hello"))
+			c.Close()
+		}
+	}()
+	for _, dial := range []func() (net.Conn, error){
+		func() (net.Conn, error) { return net.Dial("tcp", ln.Addr().String()) },
+		func() (net.Conn, error) { return net.DialTimeout("tcp", ln.Addr().String(), time.Second) },
+	} {
+		c, err := dial()
+		if err != nil {
+			fmt.Println("dial:", err)
+			return
+		}
+		got, _ := io.ReadAll(c)
+		fmt.Println(string(got))
+		c.Close()
+	}
+	ln.Close()
+
+	hl, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Println("listen:", err)
+		return
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(rw http.ResponseWriter, _ *http.Request) { rw.Write([]byte("http hello")) })
+	go http.Serve(hl, mux)
+	http.DefaultClient.Timeout = 5 * time.Second
+	resp, err := http.Get("http://" + hl.Addr().String() + "/")
+	if err != nil {
+		fmt.Println("get:", err)
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	fmt.Println(string(body), resp.StatusCode, http.DefaultClient.Timeout)
+}

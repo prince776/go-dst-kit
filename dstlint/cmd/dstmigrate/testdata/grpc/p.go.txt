@@ -1,0 +1,81 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"strings"
+	"sync"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	hv1 "google.golang.org/grpc/health/grpc_health_v1"
+
+	"github.com/prince776/go-dst-kit/realworld"
+)
+
+var __w = realworld.New(realworld.Options{})
+
+var (
+	mu    sync.Mutex
+	order []string
+)
+
+func tag(name string) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		mu.Lock()
+		order = append(order, name)
+		mu.Unlock()
+		return h(ctx, req)
+	}
+}
+
+func ctag(name string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, inv grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		mu.Lock()
+		order = append(order, name)
+		mu.Unlock()
+		return inv(ctx, method, req, reply, cc, opts...)
+	}
+}
+
+func call(c *grpc.ClientConn) (string, error) {
+	r, err := hv1.NewHealthClient(c).Check(context.Background(), &hv1.HealthCheckRequest{})
+	if err != nil {
+		return "", err
+	}
+	return r.Status.String(), nil
+}
+
+func stop(s *grpc.Server) { s.GracefulStop() }
+
+// A gRPC service and client: the same output whichever World runs it.
+func main() {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Println("listen:", err)
+		return
+	}
+	extra := grpc.ChainUnaryInterceptor(tag("sc1"))
+	s := grpc.NewServer(grpc.UnaryInterceptor(tag("su")), extra, grpc.MaxRecvMsgSize(1<<20))
+	hv1.RegisterHealthServer(s, health.NewServer())
+	go s.Serve(ln)
+	defer stop(s)
+
+	if _, err := grpc.NewClient(ln.Addr().String()); err != nil {
+		fmt.Println("no credentials:", err)
+	}
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	c, err := grpc.NewClient(ln.Addr().String(), append(opts, grpc.WithUnaryInterceptor(ctag("cu")), grpc.WithChainUnaryInterceptor(ctag("cc1")))...)
+	if err != nil {
+		fmt.Println("client:", err)
+		return
+	}
+	defer c.Close()
+	st, err := call(c)
+	fmt.Println("check:", st, err)
+	mu.Lock()
+	fmt.Println("order:", strings.Join(order, " "))
+	mu.Unlock()
+}

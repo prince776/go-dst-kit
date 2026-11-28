@@ -27,15 +27,31 @@
 //     (rand.N to dst.N), math/rand's (v1) to its MathRand by the same
 //     names (Seed too), and crypto/rand.Read, Reader and Text to the
 //     World's;
+//   - io.Pipe and net.Pipe to dst.Pipe and dst.NetPipe (*io.PipeReader
+//     and *io.PipeWriter to dst's), net.Dial, Listen and ListenPacket to
+//     w.Net()'s, net.DialTimeout to dst.DialTimeout;
+//   - http.Get, Post, Head and PostForm to dsthttp.DefaultClient(w)'s,
+//     http.DefaultClient and DefaultTransport to dsthttp's, http.Serve and
+//     ListenAndServe to dsthttp's (each the std object in the real World);
+//   - grpc.NewServer and NewClient to dstgrpc.NewServerExact and
+//     NewClientExact (grpc's own calls in the real World), grpc's
+//     interceptor options to dstgrpc's carrying ones, *grpc.ClientConn
+//     and *grpc.Server to dstgrpc's (but in interceptor signatures);
+//     options it can't see into are reported, as are grpc.Dial and
+//     DialContext;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
 //     RemoveAll, Rename, Stat, ReadDir to w.FS()'s methods;
-//     os.Open, Create, ReadFile, WriteFile, Link (and ioutil's) to dst's
-//     helpers; *os.File to dst.File, f.WriteString to io.WriteString.
+//     os.Open, Create, ReadFile, WriteFile, Link, Chmod, Chtimes,
+//     Truncate, MkdirTemp, CreateTemp, DirFS (and ioutil's ReadFile,
+//     WriteFile, TempDir, TempFile) and filepath.Walk, WalkDir and Glob to
+//     dst's helpers, each os's or filepath's own function in the
+//     production World; *os.File to dst.File, f.WriteString to
+//     io.WriteString, f.Chmod, Readdir and Readdirnames to dst's helpers.
 //     Names pass through unchanged: the production real World's FS is
 //     the os package, so they mean what they did; a simulated disk (and a
 //     real World made with a Dir) is rooted, so code that runs simulated
 //     uses names relative to it. Calls with no World equivalent
-//     (os.Chmod, filepath.Walk, (*os.File).Fd, ...) are reported.
+//     (os.Chown, os.Symlink, (*os.File).Fd, ...) are reported.
 //     -real-fs names files whose file I/O stays on the real filesystem
 //     on purpose (tests' temporary directories, operator tools): base
 //     name patterns, as path.Match takes them.
@@ -63,7 +79,7 @@
 //     the rewrite would change what migrated code sees in production.
 //   - [inexact-is-kept] A call is rewritten only to its exact World
 //     equivalent, so migrated code behaves in production as it did; a
-//     call without one (os.Chmod, filepath.Walk, ...) is kept and
+//     call without one (os.Chown, (*os.File).Fd, ...) is kept and
 //     reported.
 package main
 
@@ -90,7 +106,151 @@ import (
 	"golang.org/x/tools/imports"
 )
 
-const dstPath = "github.com/prince776/go-dst-kit/dst"
+const (
+	dstPath     = "github.com/prince776/go-dst-kit/dst"
+	dsthttpPath = "github.com/prince776/go-dst-kit/dsthttp"
+	dstgrpcPath = "github.com/prince776/go-dst-kit/dstgrpc"
+	grpcPath    = "google.golang.org/grpc"
+)
+
+// grpcInterceptors are grpc's interceptor options; each becomes
+// dstgrpc's carrying one (the same grpc option in the real World, its
+// interceptor carried into a simulated one).
+var grpcInterceptors = map[string]bool{"UnaryInterceptor": true, "StreamInterceptor": true, "ChainUnaryInterceptor": true,
+	"ChainStreamInterceptor": true, "WithUnaryInterceptor": true, "WithStreamInterceptor": true,
+	"WithChainUnaryInterceptor": true, "WithChainStreamInterceptor": true}
+
+// grpcChecked are grpc's credential options: a simulated World checks
+// them as grpc does (NewClientExact refuses a client without any).
+var grpcChecked = map[string]bool{"WithTransportCredentials": true, "WithCredentialsBundle": true, "WithInsecure": true, "Creds": true}
+
+// grpcCall rewrites grpc.NewServer and grpc.NewClient to dstgrpc's exact
+// constructors and grpc's interceptor options to dstgrpc's carrying
+// ones, and reports what a simulated World won't see.
+func (m *migrator) grpcCall(n *ast.CallExpr, s *ast.SelectorExpr, pos token.Pos) {
+	name := s.Sel.Name
+	switch {
+	case name == "NewServer" || name == "NewClient":
+		opts := n.Args
+		if name == "NewClient" && len(opts) > 0 {
+			opts = opts[1:]
+		}
+		m.grpcOptions(n, name, opts)
+		n.Fun = sel(ast.NewIdent("dstgrpc"), name+"Exact")
+		n.Args = append([]ast.Expr{m.w()}, n.Args...)
+	case grpcInterceptors[name]:
+		n.Fun = sel(ast.NewIdent("dstgrpc"), name+"Option")
+	case name == "Dial" || name == "DialContext":
+		m.warn(n, "grpc."+name+" has no World equivalent (it connects at once, by the passthrough resolver); grpc.NewClient has (dstgrpc.NewClientExact)")
+		return
+	default:
+		return
+	}
+	m.need(dstgrpcPath)
+	setPos(n, pos)
+	m.changes++
+}
+
+// grpcOptions reports the options of a grpc.NewServer or NewClient call
+// that a simulated World won't apply: grpc options other than
+// interceptors and credentials (its transport isn't grpc's), and any
+// option this tool can't see into (a variable, another package's
+// function, a spread slice), whose interceptors would not run there.
+func (m *migrator) grpcOptions(n *ast.CallExpr, fn string, opts []ast.Expr) {
+	for i, o := range opts {
+		if c, ok := o.(*ast.CallExpr); ok {
+			if s, ok := c.Fun.(*ast.SelectorExpr); ok {
+				if id, ok := s.X.(*ast.Ident); ok {
+					if m.info.Uses[id] == nil && id.Name == "dstgrpc" {
+						continue // an interceptor option this migration just rewrote
+					}
+					if pn, ok := m.info.Uses[id].(*types.PkgName); ok {
+						switch pn.Imported().Path() {
+						case grpcPath:
+							if grpcInterceptors[s.Sel.Name] || grpcChecked[s.Sel.Name] {
+								continue
+							}
+							m.warn(o, "grpc."+s.Sel.Name+" (an option of grpc."+fn+") has no effect in a simulated World, whose transport isn't grpc's")
+							continue
+						case dstgrpcPath:
+							continue
+						}
+					}
+				}
+			}
+		}
+		what := "this option"
+		if n.Ellipsis.IsValid() && i == len(opts)-1 {
+			what = "these options"
+		}
+		m.warn(o, "dstmigrate can't see into "+what+" of grpc."+fn+": an interceptor in them would not run in a simulated World (make it with dstgrpc.UnaryInterceptorOption and its kin)")
+	}
+}
+
+// markInterceptorConns records in keepGRPC the *grpc.ClientConn types in
+// d's interceptor signatures.
+func (m *migrator) markInterceptorConns(d ast.Node) {
+	ast.Inspect(d, func(n ast.Node) bool {
+		ft, ok := n.(*ast.FuncType)
+		if !ok || ft.Params == nil {
+			return true
+		}
+		interceptor := false
+		for _, f := range ft.Params.List {
+			if named, ok := m.info.TypeOf(f.Type).(*types.Named); ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == grpcPath &&
+				(named.Obj().Name() == "UnaryInvoker" || named.Obj().Name() == "Streamer") {
+				interceptor = true
+			}
+		}
+		if interceptor {
+			for _, f := range ft.Params.List {
+				if m.keepGRPC == nil {
+					m.keepGRPC = map[ast.Node]bool{}
+				}
+				m.keepGRPC[f.Type] = true
+			}
+		}
+		return true
+	})
+}
+
+// grpcClientMethods are the *grpc.ClientConn methods dstgrpc.ClientConn
+// has; grpcServerMethods the *grpc.Server ones *dstgrpc.Server has.
+var (
+	grpcClientMethods = map[string]bool{"Invoke": true, "NewStream": true, "Close": true}
+	grpcServerMethods = map[string]bool{"RegisterService": true, "Serve": true, "Stop": true, "GracefulStop": true}
+)
+
+// grpcMethod reports a method call on a *grpc.ClientConn or *grpc.Server
+// (which the migration makes dstgrpc's) that dstgrpc's lacks.
+func (m *migrator) grpcMethod(n *ast.CallExpr, s *ast.SelectorExpr) {
+	p, ok := m.info.TypeOf(s.X).(*types.Pointer)
+	if !ok {
+		return
+	}
+	named, ok := p.Elem().(*types.Named)
+	if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != grpcPath {
+		return
+	}
+	switch named.Obj().Name() {
+	case "ClientConn":
+		if !grpcClientMethods[s.Sel.Name] {
+			m.warn(n, "(*grpc.ClientConn)."+s.Sel.Name+" isn't part of dstgrpc.ClientConn")
+		}
+	case "Server":
+		if !grpcServerMethods[s.Sel.Name] {
+			m.warn(n, "(*grpc.Server)."+s.Sel.Name+" isn't part of *dstgrpc.Server")
+		}
+	}
+}
+
+// need records that the file's rewrites use package path.
+func (m *migrator) need(path string) {
+	if m.imports == nil {
+		m.imports = map[string]bool{}
+	}
+	m.imports[path] = true
+}
 
 func main() {
 	worldFlag := flag.String("world", "", "receiver type -> World expression, $ for the receiver: 'Raft=$.w,Pool=$.world'")
@@ -179,6 +339,10 @@ func main() {
 }
 
 type migrator struct {
+	// keepGRPC are the *grpc.ClientConn types in interceptor signatures
+	// (a parameter list with a grpc.UnaryInvoker or grpc.Streamer): grpc
+	// passes its own connection there, so they stay grpc's.
+	keepGRPC  map[ast.Node]bool
 	warned    map[string]bool
 	testWorld string
 	inTest    bool
@@ -455,6 +619,7 @@ func recvType(e ast.Expr) string {
 // decl rewrites statements first (they need the original types: select,
 // send, receive), then types and calls.
 func (m *migrator) decl(d ast.Node) {
+	m.markInterceptorConns(d)
 	var sigs []*types.Signature // enclosing functions, innermost last
 	astutil.Apply(d, func(c *astutil.Cursor) bool {
 		switch n := c.Node().(type) {
@@ -577,7 +742,32 @@ func (m *migrator) decl(d ast.Node) {
 					m.changes++
 				}
 			}
+			// *grpc.ClientConn and *grpc.Server: dstgrpc's (grpc's own in
+			// the real World).
+			if s, ok := n.X.(*ast.SelectorExpr); ok && !m.keepGRPC[n] {
+				if tn, ok := m.info.Uses[s.Sel].(*types.TypeName); ok && tn.Pkg() != nil && tn.Pkg().Path() == grpcPath &&
+					(tn.Name() == "ClientConn" || tn.Name() == "Server") {
+					if tn.Name() == "ClientConn" {
+						m.replace(c, sel(ast.NewIdent("dstgrpc"), "ClientConn")) // an interface
+					} else {
+						n.X = sel(ast.NewIdent("dstgrpc"), "Server")
+					}
+					m.need(dstgrpcPath)
+					m.changes++
+				}
+			}
 		case *ast.SelectorExpr:
+			// http.DefaultClient and DefaultTransport: dsthttp's (the same
+			// objects in the real World).
+			if v, ok := m.info.Uses[n.Sel].(*types.Var); ok && v.Pkg() != nil && v.Pkg().Path() == "net/http" && (v.Name() == "DefaultClient" || v.Name() == "DefaultTransport") {
+				fn := map[string]string{"DefaultClient": "DefaultClient", "DefaultTransport": "Transport"}[v.Name()]
+				r := call(sel(ast.NewIdent("dsthttp"), fn), m.w())
+				setPos(r, n.Pos())
+				m.replace(c, r)
+				m.need(dsthttpPath)
+				m.changes++
+				break
+			}
 			// crypto/rand.Reader, under any import name: the World's
 			// dst.CryptoReader.
 			if v, ok := m.info.Uses[n.Sel].(*types.Var); ok && v.Name() == "Reader" && v.Pkg() != nil && v.Pkg().Path() == "crypto/rand" {
@@ -595,6 +785,11 @@ func (m *migrator) decl(d ast.Node) {
 					// become dst.Cond, so their constructor must too.
 					id.Name = "dst"
 					m.changes++
+				case "io.PipeReader", "io.PipeWriter":
+					if _, isType := m.info.Uses[n.Sel].(*types.TypeName); isType {
+						id.Name = "dst"
+						m.changes++
+					}
 				case "time.Timer", "time.Ticker":
 					if _, isType := m.info.Uses[n.Sel].(*types.TypeName); isType {
 						id.Name = "dst"
@@ -752,6 +947,7 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	if !m.realFS {
 		m.fileMethod(c, n)
 	}
+	m.grpcMethod(n, s)
 	pkg, ok := s.X.(*ast.Ident)
 	if !ok {
 		return
@@ -815,9 +1011,60 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			m.fileCall(n, s, obj.Imported().Path())
 		}
 	case "path/filepath":
-		if !m.realFS && s.Sel.Name == "Walk" || s.Sel.Name == "WalkDir" || s.Sel.Name == "Glob" {
-			m.warn(n, "filepath."+s.Sel.Name+" reads the real filesystem; walk the World's FS with ReadDir")
+		switch s.Sel.Name {
+		case "Walk", "WalkDir", "Glob":
+			if !m.realFS {
+				// filepath's own in the production World (dst.WalkDir).
+				n.Fun = sel(ast.NewIdent("dst"), s.Sel.Name)
+				n.Args = append([]ast.Expr{call(sel(m.w(), "FS"))}, n.Args...)
+				setPos(n, pos)
+				m.changes++
+			}
 		}
+	case "io":
+		if s.Sel.Name == "Pipe" {
+			r := call(sel(ast.NewIdent("dst"), "Pipe"), m.w())
+			setPos(r, pos)
+			m.replace(c, r)
+			m.changes++
+		}
+	case "net":
+		switch s.Sel.Name {
+		case "Dial", "Listen", "ListenPacket":
+			n.Fun = sel(call(sel(m.w(), "Net")), s.Sel.Name)
+			setPos(n, pos)
+			m.changes++
+		case "DialTimeout":
+			n.Fun = sel(ast.NewIdent("dst"), "DialTimeout")
+			n.Args = append([]ast.Expr{m.w()}, n.Args...)
+			setPos(n, pos)
+			m.changes++
+		case "Pipe":
+			r := call(sel(ast.NewIdent("dst"), "NetPipe"), m.w())
+			setPos(r, pos)
+			m.replace(c, r)
+			m.changes++
+		case "ListenTCP", "DialTCP", "ListenUDP", "DialUDP", "ListenUnix", "DialUnix", "ListenIP", "DialIP", "FileConn", "FileListener":
+			m.warn(n, "net."+s.Sel.Name+" has no World equivalent (it returns net's concrete types); use Listen, Dial or ListenPacket")
+		}
+	case "net/http":
+		switch s.Sel.Name {
+		case "Get", "Post", "Head", "PostForm":
+			n.Fun = sel(call(sel(ast.NewIdent("dsthttp"), "DefaultClient"), m.w()), s.Sel.Name)
+			m.need(dsthttpPath)
+			setPos(n, pos)
+			m.changes++
+		case "ListenAndServe", "Serve":
+			n.Fun = sel(ast.NewIdent("dsthttp"), s.Sel.Name)
+			n.Args = append([]ast.Expr{m.w()}, n.Args...)
+			m.need(dsthttpPath)
+			setPos(n, pos)
+			m.changes++
+		case "ListenAndServeTLS", "ServeTLS":
+			m.warn(n, "http."+s.Sel.Name+" has no World equivalent yet; it still uses the real network")
+		}
+	case grpcPath:
+		m.grpcCall(n, s, pos)
 	case "runtime":
 		if s.Sel.Name == "Gosched" {
 			// A spin waiting for another goroutine: in a simulation only
@@ -850,13 +1097,17 @@ var fsMethods = map[string]string{"OpenFile": "OpenFile", "Mkdir": "Mkdir", "Mkd
 
 // fsHelpers are the os (and io/ioutil) functions package dst has as
 // helpers taking the FS first.
-var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile", "Link": "Link"}
+var fsHelpers = map[string]string{"Open": "Open", "Create": "Create", "ReadFile": "ReadFile", "WriteFile": "WriteFile", "Link": "Link",
+	"Chmod": "Chmod", "Chtimes": "Chtimes", "Truncate": "Truncate", "MkdirTemp": "MkdirTemp", "CreateTemp": "CreateTemp", "DirFS": "DirFS"}
+
+// ioutilHelpers are io/ioutil's functions that are os's under other
+// names, mapped to dst's helper for the os one.
+var ioutilHelpers = map[string]string{"ReadFile": "ReadFile", "WriteFile": "WriteFile", "TempDir": "MkdirTemp", "TempFile": "CreateTemp"}
 
 // fsMissing are os functions that touch the filesystem but have no World
 // equivalent: left as they are, with a warning.
-var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "Chtimes": true, "Truncate": true,
-	"Symlink": true, "Readlink": true, "MkdirTemp": true, "CreateTemp": true, "Chdir": true,
-	"Getwd": true, "Lstat": true, "DirFS": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true, "TempFile": true, "TempDir": true}
+var fsMissing = map[string]bool{"Chown": true, "Lchown": true, "Symlink": true, "Readlink": true, "Chdir": true,
+	"Getwd": true, "Lstat": true, "OpenInRoot": true, "OpenRoot": true, "CopyFS": true}
 
 // fileCall rewrites a filesystem call of package os (or io/ioutil) to
 // the World's FS: os.Rename(a, b) to w.FS().Rename(a, b), os.Open(name)
@@ -869,15 +1120,17 @@ func (m *migrator) fileCall(n *ast.CallExpr, s *ast.SelectorExpr, pkg string) {
 	switch {
 	case pkg == "os" && fsMethods[name] != "":
 		n.Fun = sel(fsys(), fsMethods[name])
-	case fsHelpers[name] != "" && (pkg == "os" || name == "ReadFile" || name == "WriteFile"):
+	case pkg == "os" && fsHelpers[name] != "":
 		n.Fun = sel(ast.NewIdent("dst"), fsHelpers[name])
+		n.Args = append([]ast.Expr{fsys()}, n.Args...)
+	case pkg == "io/ioutil" && ioutilHelpers[name] != "":
+		n.Fun = sel(ast.NewIdent("dst"), ioutilHelpers[name])
 		n.Args = append([]ast.Expr{fsys()}, n.Args...)
 	case pkg == "io/ioutil" && name == "ReadDir":
 		m.warn(n, "ioutil.ReadDir returns FileInfos; use the World's FS ReadDir (DirEntries) by hand")
 		return
-	case fsMissing[name]:
+	case pkg == "os" && fsMissing[name]:
 		switch name {
-		case "TempDir": // a path, not I/O
 		case "Lstat":
 			m.warn(n, "os.Lstat has no World equivalent; it still uses the real filesystem (w.FS().Stat would do where no symbolic link can be: the real World's Stat follows them)")
 		default:
@@ -905,6 +1158,11 @@ func (m *migrator) fileMethod(c *astutil.Cursor, n *ast.CallExpr) {
 	case "Read", "Write", "ReadAt", "WriteAt", "Seek", "Close", "Name", "Stat", "Sync", "Truncate", "ReadDir":
 	case "WriteString":
 		m.replace(c, call(sel(ast.NewIdent("io"), "WriteString"), append([]ast.Expr{s.X}, n.Args...)...))
+		m.changes++
+	case "Chmod", "Readdir", "Readdirnames":
+		// dst's helpers: the *os.File's own methods in the real World.
+		fn := map[string]string{"Chmod": "FileChmod", "Readdir": "Readdir", "Readdirnames": "Readdirnames"}[s.Sel.Name]
+		m.replace(c, call(sel(ast.NewIdent("dst"), fn), append([]ast.Expr{s.X}, n.Args...)...))
 		m.changes++
 	default:
 		m.warn(n, "(*os.File)."+s.Sel.Name+" isn't part of dst.File")
@@ -952,6 +1210,9 @@ func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 		if id, ok := f.X.(*ast.Ident); ok {
 			if _, isPkg := m.info.Uses[id].(*types.PkgName); isPkg {
 				break // pkg.F
+			}
+			if m.info.Uses[id] == nil && (id.Name == "dst" || id.Name == "dsthttp") {
+				break // a function this migration just wrote (dsthttp.Serve)
 			}
 		}
 		selection := m.info.Selections[f]

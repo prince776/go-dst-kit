@@ -81,6 +81,7 @@ var funcs = map[string]map[string]string{
 		"Float64": "w.Rand()", "Float32": "w.Rand()", "Perm": "w.Rand()", "Shuffle": "w.Rand()",
 		"ExpFloat64": "w.Rand()", "NormFloat64": "w.Rand()",
 	},
+	"io":          {"Pipe": "dst.Pipe(w)"},
 	"sync":        {"NewCond": "dst.NewCond", "OnceFunc": "dst.OnceFunc", "OnceValue": "dst.OnceValue", "OnceValues": "dst.OnceValues"},
 	"runtime":     {"Gosched": "w.Yield"},
 	"crypto/rand": {"Read": "w.Rand().CryptoRead", "Int": "crypto/rand.Int(dst.CryptoReader(w), max)", "Text": "dst.CryptoText(w)"},
@@ -89,20 +90,24 @@ var funcs = map[string]map[string]string{
 		"ReadFile": "dst.ReadFile(w.FS(), ...)", "WriteFile": "dst.WriteFile(w.FS(), ...)",
 		"Remove": "w.FS().Remove", "RemoveAll": "w.FS().RemoveAll", "Rename": "w.FS().Rename",
 		"Mkdir": "w.FS().Mkdir", "MkdirAll": "w.FS().MkdirAll", "ReadDir": "w.FS().ReadDir",
-		"Stat": "w.FS().Stat", "Lstat": "w.FS().Stat where no symbolic link can be (the real World's Stat follows them)", "Truncate": "File.Truncate", "Link": "dst.Link(w.FS(), ...)",
+		"Stat": "w.FS().Stat", "Lstat": "w.FS().Stat where no symbolic link can be (the real World's Stat follows them)", "Truncate": "dst.Truncate(w.FS(), ...)", "Link": "dst.Link(w.FS(), ...)",
+		"Chmod": "dst.Chmod(w.FS(), ...)", "Chtimes": "dst.Chtimes(w.FS(), ...)", "MkdirTemp": "dst.MkdirTemp(w.FS(), ...)",
+		"CreateTemp": "dst.CreateTemp(w.FS(), ...)", "DirFS": "dst.DirFS(w.FS(), dir)",
 	},
+	"path/filepath": {"Walk": "dst.Walk(w.FS(), ...)", "WalkDir": "dst.WalkDir(w.FS(), ...)", "Glob": "dst.Glob(w.FS(), ...)"},
+	"io/ioutil":     {"ReadFile": "dst.ReadFile(w.FS(), ...)", "WriteFile": "dst.WriteFile(w.FS(), ...)", "TempDir": "dst.MkdirTemp(w.FS(), ...)", "TempFile": "dst.CreateTemp(w.FS(), ...)"},
 	"net": {
-		"Dial": "w.Net().Dial", "DialTimeout": "w.Net().DialContext", "Listen": "w.Net().Listen",
+		"Dial": "w.Net().Dial", "DialTimeout": "dst.DialTimeout(w, ...)", "Listen": "w.Net().Listen", "Pipe": "dst.NetPipe(w)",
 		"ListenTCP": "w.Net().Listen", "DialTCP": "w.Net().Dial", "ListenPacket": "w.Net().ListenPacket",
 		"ListenUDP": "w.Net().ListenPacket", "DialUDP": "w.Net().Dial",
 	},
 	"net/http": {
-		"ListenAndServe": "dsthttp.Serve", "Serve": "dsthttp.Serve", "Get": "dsthttp.Client(w).Get",
-		"Post": "dsthttp.Client(w).Post", "Head": "dsthttp.Client(w).Head", "PostForm": "dsthttp.Client(w).PostForm",
+		"ListenAndServe": "dsthttp.ListenAndServe(w, ...)", "Serve": "dsthttp.Serve(w, ...)", "Get": "dsthttp.DefaultClient(w).Get",
+		"Post": "dsthttp.DefaultClient(w).Post", "Head": "dsthttp.DefaultClient(w).Head", "PostForm": "dsthttp.DefaultClient(w).PostForm",
 	},
 	"google.golang.org/grpc": {
-		"NewServer": "dstgrpc.NewServer", "NewClient": "dstgrpc.NewClient", "Dial": "dstgrpc.NewClient",
-		"DialContext": "dstgrpc.NewClient",
+		"NewServer": "dstgrpc.NewServerExact(w, ...)", "NewClient": "dstgrpc.NewClientExact(w, ...)", "Dial": "grpc.NewClient, as dstgrpc.NewClientExact(w, ...)",
+		"DialContext": "grpc.NewClient, as dstgrpc.NewClientExact(w, ...)",
 	},
 }
 
@@ -119,7 +124,7 @@ var typeNames = map[string]map[string]string{
 
 // vars maps package path -> variable name -> the World replacement.
 var vars = map[string]map[string]string{
-	"net/http":    {"DefaultClient": "dsthttp.Client(w)", "DefaultTransport": "dsthttp.Transport(w)"},
+	"net/http":    {"DefaultClient": "dsthttp.DefaultClient(w)", "DefaultTransport": "dsthttp.Transport(w)"},
 	"crypto/rand": {"Reader": "dst.CryptoReader(w)"},
 }
 

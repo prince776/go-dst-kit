@@ -73,6 +73,7 @@ func (s *Store) list() ([]string, error) {
 	}
 	c.Close()
 	_ = os.Chmod(filepath.Join(s.dir, "new"), 0o600)
+	_ = os.Chown(filepath.Join(s.dir, "new"), -1, -1)
 	return out, os.RemoveAll(filepath.Join(s.dir, "old"))
 }
 
