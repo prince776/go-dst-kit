@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/internal/worldhook"
 )
 
 // Serve accepts connections on ln and serves each with h, until ln fails.
@@ -171,7 +172,7 @@ func (t transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
-	stop := dst.AfterDone(ctx, func() { c.SetDeadline(longAgo) })
+	stop := worldhook.AfterDoneSync(ctx, func() { c.SetDeadline(longAgo) })
 	fail := func(err error) (*http.Response, error) {
 		stop()
 		c.Close()

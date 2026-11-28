@@ -92,8 +92,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/internal/sched"
+	"github.com/prince776/go-dst-kit/internal/worldhook"
 )
 
 // Options configure the network.
@@ -512,7 +512,7 @@ func (h *Host) DialContext(ctx context.Context, network, address string) (net.Co
 	if deadline, ok := ctx.Deadline(); ok {
 		timer = s.At(h.trueAt(deadline), func() { d.finish(nil, os.ErrDeadlineExceeded) })
 	}
-	stop := dst.AfterDone(ctx, func() { d.finish(nil, ctx.Err()) })
+	stop := worldhook.AfterDoneSync(ctx, func() { d.finish(nil, ctx.Err()) })
 	for !d.done {
 		s.ParkOn(d, "dial "+to.String())
 	}

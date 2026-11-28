@@ -64,12 +64,13 @@ It's a mechanical substitution, and it can be done one package at a time
 | `go f()` | `w.Go(f)` |
 | `make(chan T, n)`, `c <- v`, `<-c`, `range c` | `dst.MakeChan[T](w, n)`, `c.Send(v)`, `c.Recv()`, `c.All()` |
 | `select { ... }` | `dst.Select(w, dst.OnRecv(c, fn), dst.OnSend(c, v, fn), dst.OnDone(ctx, fn), dst.Default(fn))` |
-| `time.Now`, `time.Sleep`, `time.NewTimer`, `time.After` | `w.Now()`, `w.Sleep(d)`, `w.NewTimer(d)`, `w.After(d)` |
-| `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` | `dst.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond` (zero values work) |
-| `context.WithTimeout`, `WithCancel` | `dst.WithTimeout(w, ctx, d)`, `dst.WithCancel(w, ctx)` |
+| `time.Now`, `time.Sleep`, `time.NewTimer`, `time.After`, `time.Tick` | `w.Now()`, `w.Sleep(d)`, `w.NewTimer(d)`, `w.After(d)`, `w.Tick(d)` |
+| `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond`, `Pool` | `dst.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond`, `Pool` (zero values work) |
+| `sync.OnceFunc`, `OnceValue`, `OnceValues` | `dst.OnceFunc`, `OnceValue`, `OnceValues` |
+| `context.WithTimeout`, `WithCancel`, their `Cause` variants, `AfterFunc` | `dst.WithTimeout(w, ctx, d)`, `dst.WithCancel(w, ctx)`, `dst.WithTimeoutCause`, ..., `dst.AfterDone` |
 | `runtime.Gosched` | `w.Yield()` |
-| `math/rand` | `w.Rand()` |
-| `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` |
+| `math/rand/v2`, `math/rand` | `w.Rand()`, `w.MathRand()` (same names; `rand.N` is `dst.N(w.Rand(), n)`) |
+| `crypto/rand.Read`, `Reader`, `Text` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)`, `dst.CryptoText(w)` |
 | `os.OpenFile`, `os.Rename`, ... | `w.FS().OpenFile`, `w.FS().Rename`, ... |
 | `net.Listen`, `net.Dial` | `w.Net().Listen`, `w.Net().Dial` |
 | `http.Serve`, `http.Client` | `dsthttp.Serve(w, ln, h)`, `dsthttp.Client(w)` |

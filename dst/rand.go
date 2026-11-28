@@ -16,13 +16,23 @@ import (
 // reader and use system randomness, and before that some read an extra
 // byte at random. Give simulated machines fixed keys.
 type Rand interface {
+	// math/rand/v2's top-level functions, by the same names.
 	Int() int
 	IntN(n int) int
+	Int32() int32
+	Int32N(n int32) int32
 	Int64() int64
 	Int64N(n int64) int64
+	Uint() uint
+	UintN(n uint) uint
 	Uint32() uint32
+	Uint32N(n uint32) uint32
 	Uint64() uint64
+	Uint64N(n uint64) uint64
+	Float32() float32
 	Float64() float64
+	ExpFloat64() float64
+	NormFloat64() float64
 	Perm(n int) []int
 	Shuffle(n int, swap func(i, j int))
 	// CryptoRead fills p with random bytes: crypto/rand.Read.
@@ -37,8 +47,31 @@ type Rand interface {
 }
 
 // CryptoReader is crypto/rand.Reader for a World, for libraries that take
-// an io.Reader of random bytes.
-func CryptoReader(w *World) io.Reader { return cryptoReader{w.Rand()} }
+// an io.Reader of random bytes. In the real World it is crypto/rand.Reader
+// itself (code and crypto packages that check for the default reader see
+// it).
+func CryptoReader(w *World) io.Reader {
+	if w.s == nil {
+		return crand.Reader
+	}
+	return cryptoReader{w.Rand()}
+}
+
+// CryptoText is crypto/rand.Text for a World: 26 characters of the
+// standard base32 alphabet, 128 random bits. In the real World it is
+// crypto/rand.Text.
+func CryptoText(w *World) string {
+	if w.s == nil {
+		return crand.Text()
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+	src := make([]byte, 26)
+	w.Rand().CryptoRead(src)
+	for i := range src {
+		src[i] = alphabet[src[i]%32]
+	}
+	return string(src)
+}
 
 type cryptoReader struct{ r Rand }
 
@@ -77,12 +110,38 @@ func (r *simRand) CryptoRead(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// N is math/rand/v2's N on r: a random value in [0, n) of n's integer
+// type (a time.Duration, say). It panics if n <= 0. In the real World it
+// is rand.N itself.
+func N[Int intType](r Rand, n Int) Int {
+	if _, real := r.(realRand); real {
+		return rand.N(n)
+	}
+	if n <= 0 {
+		panic("invalid argument to N")
+	}
+	return Int(r.Uint64N(uint64(n)))
+}
+
+type intType interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr
+}
+
 type realRand struct{}
 
 func (realRand) Int() int                           { return rand.Int() }
 func (realRand) IntN(n int) int                     { return rand.IntN(n) }
 func (realRand) Int64() int64                       { return rand.Int64() }
 func (realRand) Int64N(n int64) int64               { return rand.Int64N(n) }
+func (realRand) Int32() int32                       { return rand.Int32() }
+func (realRand) Int32N(n int32) int32               { return rand.Int32N(n) }
+func (realRand) Uint() uint                         { return rand.Uint() }
+func (realRand) UintN(n uint) uint                  { return rand.UintN(n) }
+func (realRand) Uint32N(n uint32) uint32            { return rand.Uint32N(n) }
+func (realRand) Uint64N(n uint64) uint64            { return rand.Uint64N(n) }
+func (realRand) Float32() float32                   { return rand.Float32() }
+func (realRand) ExpFloat64() float64                { return rand.ExpFloat64() }
+func (realRand) NormFloat64() float64               { return rand.NormFloat64() }
 func (realRand) Uint32() uint32                     { return rand.Uint32() }
 func (realRand) Uint64() uint64                     { return rand.Uint64() }
 func (realRand) Float64() float64                   { return rand.Float64() }

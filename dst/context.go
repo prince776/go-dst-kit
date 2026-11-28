@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/internal/sched"
+	"github.com/prince776/go-dst-kit/internal/worldhook"
 )
 
 // WithCancel is context.WithCancel for a World.
@@ -22,10 +23,32 @@ func WithCancel(w *World, parent context.Context) (context.Context, context.Canc
 	return c, func() { c.cancel(context.Canceled, nil) }
 }
 
+// WithCancelCause is context.WithCancelCause for a World: cancel records
+// its cause, which context.Cause returns (Canceled for a nil cause).
+func WithCancelCause(w *World, parent context.Context) (context.Context, context.CancelCauseFunc) {
+	if w.s == nil {
+		return context.WithCancelCause(parent)
+	}
+	c := newSimCtx(w, parent)
+	return c, func(cause error) { c.cancel(context.Canceled, cause) }
+}
+
 // WithTimeout is context.WithTimeout for a World: the deadline follows the
 // World's clock.
 func WithTimeout(w *World, parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	return WithDeadline(w, parent, w.Now().Add(d))
+	if w.s == nil {
+		return context.WithTimeout(parent, d)
+	}
+	return withDeadline(w, parent, w.Now().Add(d), nil)
+}
+
+// WithTimeoutCause is context.WithTimeoutCause for a World: when the
+// timeout expires, context.Cause returns cause.
+func WithTimeoutCause(w *World, parent context.Context, d time.Duration, cause error) (context.Context, context.CancelFunc) {
+	if w.s == nil {
+		return context.WithTimeoutCause(parent, d, cause)
+	}
+	return withDeadline(w, parent, w.Now().Add(d), cause)
 }
 
 // WithDeadline is context.WithDeadline for a World.
@@ -33,6 +56,21 @@ func WithDeadline(w *World, parent context.Context, deadline time.Time) (context
 	if w.s == nil {
 		return context.WithDeadline(parent, deadline)
 	}
+	return withDeadline(w, parent, deadline, nil)
+}
+
+// WithDeadlineCause is context.WithDeadlineCause for a World: when the
+// deadline passes, context.Cause returns cause.
+func WithDeadlineCause(w *World, parent context.Context, deadline time.Time, cause error) (context.Context, context.CancelFunc) {
+	if w.s == nil {
+		return context.WithDeadlineCause(parent, deadline, cause)
+	}
+	return withDeadline(w, parent, deadline, cause)
+}
+
+// withDeadline is a simulated WithDeadlineCause (a nil cause: the
+// deadline's own error).
+func withDeadline(w *World, parent context.Context, deadline time.Time, cause error) (context.Context, context.CancelFunc) {
 	c := newSimCtx(w, parent)
 	cancel := func() { c.cancel(context.Canceled, nil) }
 	if pd, ok := parent.Deadline(); ok && !pd.After(deadline) {
@@ -40,10 +78,10 @@ func WithDeadline(w *World, parent context.Context, deadline time.Time) (context
 	}
 	c.deadline, c.hasDeadline = deadline, true
 	if w.Until(deadline) <= 0 {
-		c.cancel(context.DeadlineExceeded, nil)
+		c.cancel(context.DeadlineExceeded, cause)
 	} else if c.err == nil {
 		// The deadline is in this machine's local time.
-		c.timer = w.s.At(w.m.TrueAt(deadline.Sub(w.epoch)), func() { c.cancel(context.DeadlineExceeded, nil) })
+		c.timer = w.s.At(w.m.TrueAt(deadline.Sub(w.epoch)), func() { c.cancel(context.DeadlineExceeded, cause) })
 	}
 	return c, cancel
 }
@@ -190,20 +228,53 @@ func (c *simCtx) cancel(err, cause error) {
 	}
 }
 
-// AfterDone arranges for f to run once ctx is done, and returns a function
-// that cancels that (reporting whether it did). For a simulated context, f
-// runs synchronously in whoever cancels it; otherwise this is
-// context.AfterFunc (f runs in its own goroutine).
+// AfterDone is context.AfterFunc for a World: once ctx is done, f runs
+// in its own goroutine (a goroutine of the context's World, for a
+// simulated context), and stop cancels that, reporting whether it
+// stopped f from being run. If ctx is already done, f starts at once.
 func AfterDone(ctx context.Context, f func()) (stop func() bool) {
+	if c := simCtxOf(ctx); c != nil {
+		m, inc := c.w.m, c.w.m.Incarnation
+		return c.AfterFunc(func() {
+			if m.Alive(inc) { // a dead machine's goroutines don't start
+				c.w.s.Spawn(m, "AfterDone "+funcName(f), f)
+			}
+		})
+	}
+	return afterDoneStd(ctx, f)
+}
+
+// afterDoneSync is AfterDone with f run synchronously, inside whatever
+// ends a simulated context (worldhook.AfterDoneSync).
+func afterDoneSync(ctx context.Context, f func()) (stop func() bool) {
+	if c := simCtxOf(ctx); c != nil {
+		return c.AfterFunc(f)
+	}
+	return afterDoneStd(ctx, f)
+}
+
+func init() { worldhook.AfterDoneSync = afterDoneSync }
+
+// simCtxOf is the simulated context that decides when ctx is done: ctx
+// itself, or one below context.WithValue wrappers; nil if there is none
+// (a context that is never done, or a standard one).
+func simCtxOf(ctx context.Context) *simCtx {
 	d := ctx.Done()
 	if d == nil {
-		return func() bool { return false }
+		return nil
 	}
 	if c, ok := ctx.(*simCtx); ok {
-		return c.AfterFunc(f)
+		return c
 	}
 	if c, ok := ctx.Value(simCtxKey{}).(*simCtx); ok && c.inner.Done() == d {
-		return c.AfterFunc(f)
+		return c
+	}
+	return nil
+}
+
+func afterDoneStd(ctx context.Context, f func()) (stop func() bool) {
+	if ctx.Done() == nil {
+		return func() bool { return false }
 	}
 	if sched.CurrentTask() != nil {
 		panic(fmt.Sprintf("dst: a simulated World can't watch a %T; derive contexts with dst.WithCancel, WithTimeout or WithDeadline", ctx))

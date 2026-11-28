@@ -13,23 +13,28 @@
 //     case's callback records that it fired (and what it received), and a
 //     switch after the select runs the original case bodies, so break,
 //     continue and return mean what they did;
-//   - time.Now, Since, Until, Sleep, After, AfterFunc, NewTimer and
-//     NewTicker to the World's methods, *time.Timer and *time.Ticker to
-//     *dst.Timer and *dst.Ticker;
+//   - time.Now, Since, Until, Sleep, After, AfterFunc, NewTimer,
+//     NewTicker and Tick to the World's methods, *time.Timer and
+//     *time.Ticker to *dst.Timer and *dst.Ticker;
+//   - context.WithCancel, WithTimeout, WithDeadline and their Cause
+//     variants to dst's, context.AfterFunc to dst.AfterDone;
 //   - sync.Mutex, RWMutex, WaitGroup, Once, Cond and Pool to their dst
-//     types, sync.NewCond to dst.NewCond;
+//     types, sync.NewCond, OnceFunc, OnceValue and OnceValues to dst's;
 //   - go statements to w.Go, evaluating the call's arguments first as go
 //     does, and wg.Go(f) on a sync.WaitGroup to wg.Go(w, f);
 //   - runtime.Gosched to w.Yield (a spin loop must let others run);
-//   - math/rand calls to the World's Rand (math/rand/v2's generic N to a
-//     converted Int64N; functions with no equivalent are reported), and
-//     crypto/rand.Read and crypto/rand.Reader to the World's;
+//   - math/rand/v2's functions to the World's Rand by the same names
+//     (rand.N to dst.N), math/rand's (v1) to its MathRand by the same
+//     names (Seed too), and crypto/rand.Read, Reader and Text to the
+//     World's;
 //   - file I/O to the World's FS: os.OpenFile, Mkdir, MkdirAll, Remove,
 //     RemoveAll, Rename, Stat, ReadDir to w.FS()'s methods;
 //     os.Open, Create, ReadFile, WriteFile, Link (and ioutil's) to dst's
 //     helpers; *os.File to dst.File, f.WriteString to io.WriteString.
-//     Names pass through unchanged, and a World's FS is rooted, so they
-//     must be relative to its root. Calls with no World equivalent
+//     Names pass through unchanged: the production real World's FS is
+//     the os package, so they mean what they did; a simulated disk (and a
+//     real World made with a Dir) is rooted, so code that runs simulated
+//     uses names relative to it. Calls with no World equivalent
 //     (os.Chmod, filepath.Walk, (*os.File).Fd, ...) are reported.
 //     -real-fs names files whose file I/O stays on the real filesystem
 //     on purpose (tests' temporary directories, operator tools): base
@@ -56,6 +61,10 @@
 //   - [lstat-keeps-links] os.Lstat is kept and reported, not rewritten to
 //     the World's Stat: the real World's Stat follows symbolic links, so
 //     the rewrite would change what migrated code sees in production.
+//   - [inexact-is-kept] A call is rewritten only to its exact World
+//     equivalent, so migrated code behaves in production as it did; a
+//     call without one (os.Chmod, filepath.Walk, ...) is kept and
+//     reported.
 package main
 
 import (
@@ -580,7 +589,8 @@ func (m *migrator) decl(d ast.Node) {
 			}
 			if id, ok := n.X.(*ast.Ident); ok {
 				switch id.Name + "." + n.Sel.Name {
-				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond", "sync.NewCond", "sync.Pool":
+				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond", "sync.NewCond", "sync.Pool",
+					"sync.OnceFunc", "sync.OnceValue", "sync.OnceValues":
 					// sync.NewCond(l) is dst.NewCond(l): the Cond fields
 					// become dst.Cond, so their constructor must too.
 					id.Name = "dst"
@@ -753,44 +763,49 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	switch obj.Imported().Path() {
 	case "time":
 		switch s.Sel.Name {
-		case "Now", "Since", "Until", "Sleep", "After", "AfterFunc", "NewTimer", "NewTicker":
+		case "Now", "Since", "Until", "Sleep", "After", "AfterFunc", "NewTimer", "NewTicker", "Tick":
 			n.Fun = sel(m.w(), s.Sel.Name)
 			setPos(n, pos)
 			m.changes++
 		}
-	case "math/rand", "math/rand/v2":
+	case "math/rand":
+		// v1's functions, by the same names, on the World's MathRand
+		// (math/rand's own functions in the real World: Seed and the
+		// GODEBUGs keep their meaning).
 		switch s.Sel.Name {
-		case "Int", "Intn", "IntN", "Int63", "Int63n", "Int64", "Int64N", "Uint32", "Uint64", "Float64", "Perm", "Shuffle":
-			name := map[string]string{"Intn": "IntN", "Int63": "Int64", "Int63n": "Int64N"}[s.Sel.Name]
-			if name == "" {
-				name = s.Sel.Name
-			}
-			n.Fun = sel(call(sel(m.w(), "Rand")), name)
+		case "Int", "Intn", "Int31", "Int31n", "Int63", "Int63n", "Uint32", "Uint64", "Float32", "Float64",
+			"ExpFloat64", "NormFloat64", "Perm", "Shuffle", "Read", "Seed":
+			n.Fun = sel(call(sel(m.w(), "MathRand")), s.Sel.Name)
+			setPos(n, pos)
+			m.changes++
+		}
+	case "math/rand/v2":
+		switch s.Sel.Name {
+		case "Int", "IntN", "Int32", "Int32N", "Int64", "Int64N", "Uint", "UintN", "Uint32", "Uint32N",
+			"Uint64", "Uint64N", "Float32", "Float64", "ExpFloat64", "NormFloat64", "Perm", "Shuffle":
+			n.Fun = sel(call(sel(m.w(), "Rand")), s.Sel.Name)
 			setPos(n, pos)
 			m.changes++
 		case "N":
-			// rand.N(d) (math/rand/v2, generic): T(w.Rand().Int64N(int64(d))).
-			if len(n.Args) == 1 {
-				t := types.TypeString(m.info.TypeOf(n), m.qualifier)
-				r := call(expr(t), call(sel(call(sel(m.w(), "Rand")), "Int64N"), call(ast.NewIdent("int64"), n.Args[0])))
-				setPos(r, pos)
-				m.replace(c, r)
-				m.changes++
-			}
-		default:
-			if _, isFunc := m.info.Uses[s.Sel].(*types.Func); isFunc && s.Sel.Name != "New" && !strings.HasPrefix(s.Sel.Name, "New") {
-				m.warn(n, "rand."+s.Sel.Name+" has no World equivalent; it still draws from the global generator")
-			}
+			// rand.N(n), generic: dst.N(w.Rand(), n), rand.N itself in the
+			// real World.
+			n.Fun = sel(ast.NewIdent("dst"), "N")
+			n.Args = append([]ast.Expr{call(sel(m.w(), "Rand"))}, n.Args...)
+			setPos(n, pos)
+			m.changes++
 		}
 	case "context":
 		switch s.Sel.Name {
+		case "AfterFunc":
+			// context.AfterFunc(ctx, f): dst.AfterDone(ctx, f), which a
+			// simulated context's cancel also runs in a goroutine of its own.
+			n.Fun = sel(ast.NewIdent("dst"), "AfterDone")
+			setPos(n, pos)
+			m.changes++
 		case "WithCancel", "WithTimeout", "WithDeadline", "WithCancelCause", "WithTimeoutCause", "WithDeadlineCause":
-			// The World's: a simulated World waits on its own contexts only.
-			n.Fun = sel(ast.NewIdent("dst"), strings.TrimSuffix(s.Sel.Name, "Cause"))
-			if strings.HasSuffix(s.Sel.Name, "Cause") {
-				m.warn(n, "context."+s.Sel.Name+": dst has no Cause variant; rewritten without the cause")
-				n.Args = n.Args[:len(n.Args)-1]
-			}
+			// The World's (each the std call in the real World): a simulated
+			// World waits on its own contexts only.
+			n.Fun = sel(ast.NewIdent("dst"), s.Sel.Name)
 			n.Args = append([]ast.Expr{m.w()}, n.Args...)
 			setPos(n, pos)
 			m.changes++
@@ -812,8 +827,14 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			m.changes++
 		}
 	case "crypto/rand":
-		if s.Sel.Name == "Read" {
+		switch s.Sel.Name {
+		case "Read":
 			n.Fun = sel(call(sel(m.w(), "Rand")), "CryptoRead")
+			setPos(n, pos)
+			m.changes++
+		case "Text":
+			n.Fun = sel(ast.NewIdent("dst"), "CryptoText")
+			n.Args = []ast.Expr{m.w()}
 			setPos(n, pos)
 			m.changes++
 		}
@@ -839,8 +860,8 @@ var fsMissing = map[string]bool{"Chmod": true, "Chown": true, "Lchown": true, "C
 
 // fileCall rewrites a filesystem call of package os (or io/ioutil) to
 // the World's FS: os.Rename(a, b) to w.FS().Rename(a, b), os.Open(name)
-// to dst.Open(w.FS(), name). Names are passed through unchanged: a
-// World's FS is rooted, so they must be relative to its root.
+// to dst.Open(w.FS(), name). Names are passed through unchanged (the
+// production real World's FS is the os package).
 func (m *migrator) fileCall(n *ast.CallExpr, s *ast.SelectorExpr, pkg string) {
 	name := s.Sel.Name
 	pos := n.Pos() // before the rewrite: the new Fun has none

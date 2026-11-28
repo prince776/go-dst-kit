@@ -14,12 +14,11 @@ import (
 // compiles and vets, with no raw channel operation, select, go statement
 // or time.Now left, a nil channel in a literal compiles, and a nil channel
 // argument becomes the zero dst.Chan
-// without moving the comment after it; math/rand/v2's N and
-// crypto/rand.Reader become the World's, runtime.Gosched becomes
-// w.Yield, and a rand function with no
-// World equivalent is reported. Fails if any survives, the result doesn't
-// build, the nil argument is kept or moves the comment, or the unmapped
-// rand call goes unreported.
+// without moving the comment after it; math/rand and math/rand/v2 calls
+// (N, NormFloat64) and crypto/rand.Reader become the World's by name,
+// and runtime.Gosched becomes w.Yield. Fails if any survives, the result
+// doesn't build, the nil argument is kept or moves the comment, or a
+// rand call is reported or renamed.
 func TestMigrateSample(t *testing.T) {
 	_, here, _, _ := runtime.Caller(0)
 	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
@@ -52,8 +51,11 @@ func TestMigrateSample(t *testing.T) {
 	warnings := must(bin, "-world", "Pool=$.wd", ".")
 	must("go", "vet", ".")
 	got, _ := os.ReadFile(filepath.Join(dir, "p.go"))
-	if !strings.Contains(warnings, "rand.NormFloat64 has no World equivalent") {
-		t.Errorf("rand.NormFloat64 kept without a warning:\n%s", warnings)
+	if strings.Contains(warnings, "rand.") {
+		t.Errorf("a rand function was reported: each has its World equivalent:\n%s", warnings)
+	}
+	if !regexp.MustCompile(`p\.wd\.Rand\(\)\.NormFloat64\(\)`).Match(got) || !regexp.MustCompile(`dst\.N\(p\.wd\.Rand\(\), d\)`).Match(got) || !regexp.MustCompile(`p\.wd\.MathRand\(\)\.Intn\(3\)`).Match(got) {
+		t.Errorf("rand calls not rewritten to the World's by name:\n%s", got)
 	}
 	for _, bad := range []string{`<-`, `select {`, `\bgo [a-z]`, `time\.(Now|Sleep|After)\(`, `make\(chan`, `\bchan\b`, `sync\.`, `rand\.Intn`, `mrand\.N\(`, `crand\.`, `context\.With`, `runtime\.Gosched`} {
 		if regexp.MustCompile(bad).Match(got) {
@@ -130,10 +132,57 @@ func TestMigrateGoArgsEvaluatedNow(t *testing.T) {
 // Fails if Lstat is rewritten to the World's Stat (the migrated program
 // then fails its Lstat), or isn't reported.
 func TestMigrateLstatKeepsLinks(t *testing.T) {
+	want, got, migrated, warnings := beforeAndAfter(t, "lstat")
+	if want != "lstat: symlink true\nstat: dangling\n" {
+		t.Fatalf("the original program printed %q: the case doesn't test a dangling link", want)
+	}
+	if !strings.Contains(warnings, "os.Lstat has no World equivalent") {
+		t.Errorf("os.Lstat wasn't reported:\n%s", warnings)
+	}
+	if got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+}
+
+// Verifies: [inexact-is-kept]
+// The std APIs with an exact World counterpart migrate to it, and the
+// program prints the same before and after: context's Cause variants
+// (the cause reaches context.Cause; the select on Done is migrated and
+// sees it end), context.AfterFunc, time.Tick, sync.OnceValue,
+// crypto/rand.Text, math/rand (v1) and v2 calls, and rand.N on an
+// unsigned type beyond MaxInt64.
+// Fails if any of them is rewritten inexactly (the Cause variants used
+// to lose the cause, and WithCancelCause its parent: the result didn't
+// build; rand.N on an unsigned type used to become Int64N, which panics
+// beyond MaxInt64) or not at all.
+func TestMigrateExact(t *testing.T) {
+	want, got, migrated, warnings := beforeAndAfter(t, "cause")
+	if !strings.Contains(want, "done: boom") || !strings.Contains(want, "unsigned N in range: true") {
+		t.Fatalf("the original program printed %q", want)
+	}
+	for _, re := range []string{`dst\.WithCancelCause\(__w, context\.Background\(\)\)`, `dst\.WithTimeoutCause\(__w, ctx, 0, errBoom\)`, `dst\.Select\(`,
+		`dst\.N\(__w\.Rand\(\), big\+5\)`, `dst\.AfterDone\(`, `__w\.Tick\(`, `dst\.OnceValue\(`, `dst\.CryptoText\(__w\)`, `__w\.MathRand\(\)\.Intn\(`, `__w\.Rand\(\)\.Uint64N\(`} {
+		if !regexp.MustCompile(re).MatchString(migrated) {
+			t.Errorf("want %s in:\n%s", re, migrated)
+		}
+	}
+	if strings.Contains(warnings, "no World equivalent") {
+		t.Errorf("a call with an exact equivalent was reported:\n%s", warnings)
+	}
+	if got != want {
+		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
+	}
+}
+
+// beforeAndAfter runs testdata/<name>/p.go.txt as a program on the real
+// World, migrates it (no -world: it defines __w), runs it again, and
+// returns both outputs, the migrated source and the tool's warnings.
+func beforeAndAfter(t *testing.T, name string) (want, got, migrated, warnings string) {
+	t.Helper()
 	_, here, _, _ := runtime.Caller(0)
 	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
 	dir := t.TempDir()
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(here), "testdata", "lstat", "p.go.txt"))
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(here), "testdata", name, "p.go.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,26 +196,25 @@ func TestMigrateLstatKeepsLinks(t *testing.T) {
 		}
 		return string(out)
 	}
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/lstat\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => "+kit+"\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/"+name+"\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => "+kit+"\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "p.go"), src, 0o644)
-	want := run("go", "run", ".")
-	if want != "lstat: symlink true\nstat: dangling\n" {
-		t.Fatalf("the original program printed %q: the case doesn't test a dangling link", want)
-	}
+	want = run("go", "run", ".")
 	bin := filepath.Join(dir, "dstmigrate")
 	build := exec.Command("go", "build", "-o", bin, ".")
 	build.Dir = filepath.Dir(here)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
-	warnings := run(bin, ".")
-	migrated, _ := os.ReadFile(filepath.Join(dir, "p.go"))
-	if !strings.Contains(warnings, "os.Lstat has no World equivalent") {
-		t.Errorf("os.Lstat wasn't reported:\n%s", warnings)
+	warnings = run(bin, ".")
+	m, _ := os.ReadFile(filepath.Join(dir, "p.go"))
+	migrated = string(m)
+	cmd := exec.Command("go", "run", ".")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the migrated program failed: %v\n%s\nmigrated source:\n%s", err, out, migrated)
 	}
-	if got := run("go", "run", "."); got != want {
-		t.Errorf("the migrated program prints\n%s\nthe original\n%s\nmigrated source:\n%s", got, want, migrated)
-	}
+	return want, string(out), migrated, warnings
 }
 
 // File I/O through package os (and io/ioutil) migrates to the World's FS:

@@ -4,6 +4,7 @@
 package worldhook
 
 import (
+	"context"
 	"time"
 
 	"github.com/prince776/go-dst-kit/internal/sched"
@@ -20,3 +21,10 @@ type Spec struct {
 
 // NewWorld returns a *dst.World (as any, to avoid an import cycle).
 var NewWorld func(Spec) any
+
+// AfterDoneSync is dst's AfterDone with f run synchronously by whoever
+// ends a simulated context (the library's own network and HTTP plumbing,
+// which must react within the same step); dst.AfterDone runs f in its
+// own goroutine, as context.AfterFunc does. dst sets it in its init
+// function.
+var AfterDoneSync func(ctx context.Context, f func()) (stop func() bool)

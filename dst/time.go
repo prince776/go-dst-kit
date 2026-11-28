@@ -36,6 +36,20 @@ func (w *World) AfterFunc(d time.Duration, fn func()) *Timer {
 	return t
 }
 
+// Tick is time.Tick: a ticker's channel, nil (the zero Chan) for d <= 0.
+func (w *World) Tick(d time.Duration) Chan[time.Time] {
+	if w.s == nil {
+		if c := time.Tick(d); c != nil {
+			return RecvOnly(c)
+		}
+		return Chan[time.Time]{}
+	}
+	if d <= 0 {
+		return Chan[time.Time]{}
+	}
+	return w.NewTicker(d).C
+}
+
 // After is time.After.
 func (w *World) After(d time.Duration) Chan[time.Time] { return w.NewTimer(d).C }
 

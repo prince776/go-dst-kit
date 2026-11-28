@@ -16,13 +16,16 @@
 //	for v := range c        for v := range c.All()
 //	select { ... }          dst.Select(w, dst.OnRecv(c, ...), dst.OnSend(...), dst.Default(...))
 //	time.Now / Sleep        w.Now() / w.Sleep(d)
-//	time.NewTimer/After     w.NewTimer(d) / w.After(d)
+//	time.NewTimer/After     w.NewTimer(d) / w.After(d) (time.Tick: w.Tick(d))
 //	sync.Mutex/WaitGroup    dst.Mutex / dst.WaitGroup (zero values work)
 //	sync.Cond               dst.Cond (dst.NewCond)
-//	context.WithTimeout     dst.WithTimeout(w, ctx, d)
+//	sync.OnceFunc/OnceValue dst.OnceFunc / dst.OnceValue / dst.OnceValues
+//	context.WithTimeout     dst.WithTimeout(w, ctx, d) (and the Cause variants)
+//	context.AfterFunc       dst.AfterDone(ctx, f)
 //	runtime.Gosched         w.Yield()
-//	math/rand               w.Rand()
-//	crypto/rand.Read        w.Rand().CryptoRead (crypto/rand.Reader: dst.CryptoReader(w))
+//	math/rand/v2            w.Rand() (rand.N: dst.N(w.Rand(), n))
+//	math/rand (v1)          w.MathRand()
+//	crypto/rand.Read        w.Rand().CryptoRead (Reader: dst.CryptoReader(w), Text: dst.CryptoText(w))
 //	os, net                 w.FS(), w.Net()
 //	os.Link                 dst.Link(w.FS(), old, new)
 //
@@ -52,8 +55,10 @@
 //     context does: Call returns its error then, having run the operation
 //     unless the request was refused.
 //
-// Children: World, Current, Chan, Select, Mutex, RWMutex, WaitGroup, Once, Cond, Timer,
-// Ticker, WithCancel, WithTimeout, WithDeadline, Rand, Inject, Do, Call, Buggify
+// Children: World, Current, Chan, Select, Mutex, RWMutex, WaitGroup, Once, OnceFunc,
+// OnceValue, OnceValues, Cond, Pool, Timer, Ticker, WithCancel, WithCancelCause,
+// WithTimeout, WithTimeoutCause, WithDeadline, WithDeadlineCause, AfterDone, Rand, N,
+// MathRand, CryptoReader, CryptoText, Inject, Do, Call, Buggify
 // Depends on: internal/sched (the simulator's engine)
 package dst
 
@@ -76,6 +81,7 @@ type World struct {
 	m     *sched.Machine
 	epoch time.Time
 	rnd   Rand
+	math  *simMathRand // MathRand's, made on first use (simulated Worlds)
 	fs    FS
 	net   Net
 }

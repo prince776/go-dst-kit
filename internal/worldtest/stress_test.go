@@ -1421,7 +1421,8 @@ func TestStressSleepAndNow(t *testing.T) {
 // ---- Context
 
 // Cancellation races everything that hangs off a context: children made
-// while the parent is being cancelled are cancelled too, a timeout's
+// while the parent is being cancelled (by WithCancel, WithTimeout and
+// their Cause variants) are cancelled too, with the parent's cause, a timeout's
 // context ends with DeadlineExceeded, and AfterDone's stop agrees with
 // whether f ran: false means f runs exactly once, true that it never
 // does.
@@ -1436,18 +1437,27 @@ func TestStressContext(t *testing.T) {
 			var pending []func()
 			for r := 1; r <= n; r++ {
 				round.Store(int64(r))
-				parent, cancel := dst.WithCancel(w, context.Background())
+				parent, cancelCause := dst.WithCancelCause(w, context.Background())
+				cause := fmt.Errorf("round %d", r)
+				cancel := func() { cancelCause(cause) }
 				children := make(chan context.Context, 4)
 				var wg sync.WaitGroup
 				for i := range 4 {
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
-						if i%2 == 0 {
+						switch i {
+						case 0:
 							c, _ := dst.WithCancel(w, parent)
 							children <- c
-						} else {
+						case 1:
 							c, _ := dst.WithTimeout(w, parent, time.Hour)
+							children <- c
+						case 2:
+							c, _ := dst.WithCancelCause(w, parent)
+							children <- c
+						default:
+							c, _ := dst.WithTimeoutCause(w, parent, time.Hour, errors.New("not this one"))
 							children <- c
 						}
 					}()
@@ -1461,8 +1471,8 @@ func TestStressContext(t *testing.T) {
 				wg.Wait()
 				close(children)
 				for c := range children {
-					if _, ok := dst.Done(c).Recv(); ok || !errors.Is(c.Err(), context.Canceled) {
-						panic(fmt.Sprintf("a child of a cancelled parent: %v", c.Err()))
+					if _, ok := dst.Done(c).Recv(); ok || !errors.Is(c.Err(), context.Canceled) || context.Cause(c) != cause {
+						panic(fmt.Sprintf("a child of a cancelled parent: %v, cause %v (want %v)", c.Err(), context.Cause(c), cause))
 					}
 				}
 				for !stopped.Load() && runs.Load() == 0 {
@@ -1674,5 +1684,158 @@ func TestStressRealFSConcurrentCreate(t *testing.T) {
 		if k := failed.Load(); k > 0 {
 			t.Fatalf("%d of %d concurrent creates failed (first: %v)", k, n*goroutines, first.Load())
 		}
+	})
+}
+
+// ---- OnceFunc, OnceValue, OnceValues
+
+// Fresh functions each round, called by many goroutines at once: f runs
+// once and every caller gets its result after it finished; a panicking f
+// panics every caller with its value, as sync's do.
+// Fails if: f runs twice, a caller returns before f finished, or a
+// panic differs from sync's.
+func TestStressOnceFuncs(t *testing.T) {
+	bothModes(t, func(t *testing.T, w *dst.World) {
+		const goroutines = 8
+		n := rounds(1000)
+		var round atomic.Int64
+		within(t, "OnceFunc and OnceValue", &round, n, func() {
+			for r := 1; r <= n; r++ {
+				round.Store(int64(r))
+				var runs atomic.Int32
+				value := dst.OnceValue(func() int { runs.Add(1); runtime.Gosched(); return r })
+				bad := dst.OnceFunc(func() { runs.Add(1); panic(r) })
+				std := sync.OnceFunc(func() { panic(r) })
+				want := panicMsg(std)
+				var wg sync.WaitGroup
+				errs := make(chan string, 2*goroutines)
+				start := make(chan struct{})
+				for range goroutines {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						<-start
+						if v := value(); v != r {
+							errs <- fmt.Sprintf("OnceValue gave %d, want %d", v, r)
+						}
+						if m := panicMsg(bad); m != want {
+							errs <- fmt.Sprintf("a panicking OnceFunc panicked with %q, sync's with %q", m, want)
+						}
+					}()
+				}
+				close(start)
+				wg.Wait()
+				select {
+				case m := <-errs:
+					panic(m)
+				default:
+				}
+				if k := runs.Load(); k != 2 {
+					panic(fmt.Sprintf("the functions ran %d times, want 2 (once each)", k))
+				}
+			}
+		})
+	})
+}
+
+// ---- Pool
+
+// pooled is what the Pool test hands around: held while a goroutine
+// owns it.
+type pooled struct {
+	held atomic.Bool
+	n    int
+}
+
+// Goroutines Get, use and Put objects from one Pool in parallel, and
+// simulated goroutines use the same Pool meanwhile (a package-level pool
+// shared with simulations): an object is never handed to two holders at
+// once, the real World reuses objects (Put then Get can return one),
+// and a simulated goroutine always gets a fresh one from New.
+// Fails if: two goroutines hold one object at once, the real path never
+// reuses, or a simulated Get returns an object a real goroutine Put.
+func TestStressPool(t *testing.T) {
+	bothModes(t, func(t *testing.T, w *dst.World) {
+		const goroutines = 8
+		n := rounds(2000)
+		var made atomic.Int64
+		p := &dst.Pool{New: func() any { made.Add(1); return new(pooled) }}
+		var progress, reused atomic.Int64
+		within(t, "Pool", &progress, goroutines*n, func() {
+			var wg sync.WaitGroup
+			for range goroutines {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for range n {
+						o := p.Get().(*pooled)
+						if !o.held.CompareAndSwap(false, true) {
+							panic("Get returned an object another goroutine holds")
+						}
+						if o.n > 0 {
+							reused.Add(1)
+						}
+						o.n++ // a data race for -race if two hold it
+						o.held.Store(false)
+						p.Put(o)
+						progress.Add(1)
+					}
+				}()
+			}
+			simErr := make(chan error, 1)
+			go func() {
+				r := simworld.Run(simworld.Options{Seed: 7}, func(sw *dst.World) {
+					for range 200 {
+						if o := p.Get().(*pooled); o.n != 0 {
+							panic("a simulated Get returned an object a real goroutine had used")
+						}
+						p.Put(new(pooled))
+						sw.Gosched()
+					}
+				})
+				simErr <- r.Err
+			}()
+			wg.Wait()
+			if err := <-simErr; err != nil {
+				panic(fmt.Sprint("the simulation sharing the Pool: ", err))
+			}
+		})
+		if reused.Load() == 0 {
+			t.Fatalf("no Get returned a Put object in %d rounds (%d made): the real path isn't pooling", goroutines*n, made.Load())
+		}
+	})
+}
+
+// ---- Gosched and Yield
+
+// On the real World both are runtime.Gosched: a loop spinning on a flag
+// another goroutine sets ends with either, under parallel spinners.
+// Fails if: either blocks, or never lets the setter run (stuck).
+func TestStressGoschedAndYield(t *testing.T) {
+	bothModes(t, func(t *testing.T, w *dst.World) {
+		n := rounds(2000)
+		var round atomic.Int64
+		within(t, "Gosched and Yield spins", &round, n, func() {
+			for r := 1; r <= n; r++ {
+				round.Store(int64(r))
+				var flag atomic.Bool
+				var wg sync.WaitGroup
+				for i := range 4 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for !flag.Load() {
+							if i%2 == 0 {
+								w.Gosched()
+							} else {
+								w.Yield()
+							}
+						}
+					}()
+				}
+				go flag.Store(true)
+				wg.Wait()
+			}
+		})
 	})
 }

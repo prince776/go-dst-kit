@@ -59,16 +59,19 @@ and why no World reaches it.
 | `<-ctx.Done()` | `dst.Done(ctx).Recv()` or `dst.OnDone(ctx, fn)` | |
 | `time.Now`, `Since`, `Until` | `w.Now()`, `w.Since(t)`, `w.Until(t)` | `time.Time` and `time.Duration` are unchanged |
 | `time.Sleep(d)` | `w.Sleep(d)` | |
-| `time.NewTimer`, `After`, `AfterFunc`, `NewTicker` | `w.NewTimer(d)`, `w.After(d)`, `w.AfterFunc(d, f)`, `w.NewTicker(d)` | timers have `.C`-style channels as `dst.Chan` |
-| `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once` | `dst.Mutex`, `dst.RWMutex`, `dst.WaitGroup`, `dst.Once` | zero values work; `wg.Go(w, f)` too |
+| `time.NewTimer`, `After`, `AfterFunc`, `NewTicker`, `Tick` | `w.NewTimer(d)`, `w.After(d)`, `w.AfterFunc(d, f)`, `w.NewTicker(d)`, `w.Tick(d)` | timers have `.C`-style channels as `dst.Chan` |
+| `sync.Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Pool` | `dst.Mutex`, `dst.RWMutex`, `dst.WaitGroup`, `dst.Once`, `dst.Pool` | zero values work; `wg.Go(w, f)`, `TryLock`, `TryRLock`, `RLocker` too |
+| `sync.OnceFunc`, `OnceValue`, `OnceValues` | `dst.OnceFunc(f)`, `dst.OnceValue(f)`, `dst.OnceValues(f)` | work in a simulation even when made outside one (a package-level variable) |
 | `sync.NewCond(l)`, `sync.Cond` | `dst.NewCond(l)`, `dst.Cond{L: l}` | same semantics: a Signal with no waiter is lost |
 | `context.WithCancel`, `WithTimeout`, `WithDeadline` | `dst.WithCancel(w, ctx)`, `dst.WithTimeout(w, ctx, d)`, `dst.WithDeadline(w, ctx, t)` | `Background`, `WithValue` are fine as they are |
-| `context.AfterFunc` | `dst.AfterDone(ctx, f)` | |
+| `context.WithCancelCause`, `WithTimeoutCause`, `WithDeadlineCause` | `dst.WithCancelCause(w, ctx)`, ... | `context.Cause` works on them as on std's |
+| `context.AfterFunc` | `dst.AfterDone(ctx, f)` | f runs in its own goroutine, as with context.AfterFunc |
 | `runtime.Gosched` (a spin waiting for another goroutine) | `w.Yield()` | in simulation it returns once another goroutine has made progress or time has advanced; a spin no one can end is a deadlock |
 | `runtime.Gosched` (a turn for others, in a loop that makes its own progress) | `w.Gosched()` | a plain scheduling point: the goroutine stays runnable. dstmigrate writes `w.Yield()` for every Gosched (the safe default for spins); switch these by hand. The wrong choice shows as simulated time jumping to the next timer, and as a liveness hang when that timer is the end of the run. Rule: if the loop's exit condition depends on another goroutine, it is a spin (Yield); if the loop ends by its own work, Gosched |
-| `math/rand` | `w.Rand()` | seeded per machine in simulation |
-| `crypto/rand.Read`, `crypto/rand.Reader` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
-| `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | paths are relative to the World's root |
+| `math/rand/v2` (`rand.N`) | `w.Rand()`, same names (`dst.N(w.Rand(), n)`) | seeded per machine in simulation |
+| `math/rand` (v1) | `w.MathRand()`, same names | math/rand itself in the real World: `Seed` and the GODEBUGs keep their meaning |
+| `crypto/rand.Read`, `Reader`, `Text` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)`, `dst.CryptoText(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
+| `os.OpenFile`, `Rename`, `Remove`, `Mkdir`, `Stat`, `ReadDir` | `w.FS().OpenFile`, ... | in production names reach os as they are; a simulated disk is rooted (names relative to it) |
 | `os.ReadFile`, `WriteFile`, `Create`, `Open` | `dst.ReadFile(w.FS(), ...)`, ... | `dst.SyncDir(fsys, dir)` to fsync a directory |
 | `os.Link` (a hard link) | `dst.Link(w.FS(), old, new)` | like a create, the new name is durable once its directory is synced |
 | `syscall.Flock(fd, LOCK_EX\|LOCK_NB)` on a lock file (gofrs/flock's `TryLock`) | `unlock, err := dst.LockFile(w.FS(), name)` | `dst.ErrLocked` when held; released by `unlock` or the process's death; unix only in the real World |

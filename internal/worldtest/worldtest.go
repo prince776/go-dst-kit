@@ -9,7 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand"
+	mrandv2 "math/rand/v2"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -59,7 +63,14 @@ var Checks = []Check{
 	{"context/cancel-propagates", contextCancel},
 	{"context/timeout", contextTimeout},
 	{"context/std-children-work", contextStdChildren},
+	{"context/cause", contextCause},
+	{"context/after-done-own-goroutine", afterDoneOwnGoroutine},
 	{"rand/in-range", randInRange},
+	{"rand/v2-and-n", randV2},
+	{"rand/math-rand-v1", mathRandV1},
+	{"rand/crypto-text", cryptoText},
+	{"time/tick", tickChan},
+	{"sync/once-func-value-values", onceFuncs},
 }
 
 const tick = 5 * time.Millisecond
@@ -526,6 +537,228 @@ func contextStdChildren(w *dst.World) {
 		failf("after cancel: std %v, sub %v, value %v", std.Err(), sub.Err(), sub.Value(key{}))
 	}
 	dst.Done(valued).Recv() // a value wrapper can be waited on
+}
+
+var errCause = errors.New("the cause")
+
+// contextCause: the Cause variants record their cause for context.Cause
+// (Canceled for a nil one, the deadline's error when a deadline cancels
+// a WithCancelCause), children inherit it, and every one of them can be
+// waited on.
+func contextCause(w *dst.World) {
+	ctx, cancel := dst.WithCancelCause(w, context.Background())
+	child, childCancel := dst.WithCancel(w, ctx)
+	defer childCancel()
+	if context.Cause(ctx) != nil {
+		failf("Cause before cancel: %v", context.Cause(ctx))
+	}
+	cancel(errCause)
+	cancel(errors.New("a second cause")) // ignored, as in Go
+	dst.Done(ctx).Recv()
+	dst.Done(child).Recv()
+	if ctx.Err() != context.Canceled || context.Cause(ctx) != errCause || context.Cause(child) != errCause {
+		failf("WithCancelCause: Err %v, Cause %v, the child's Cause %v", ctx.Err(), context.Cause(ctx), context.Cause(child))
+	}
+	nilCtx, nilCancel := dst.WithCancelCause(w, context.Background())
+	nilCancel(nil)
+	if context.Cause(nilCtx) != context.Canceled {
+		failf("a nil cause: Cause %v, want Canceled", context.Cause(nilCtx))
+	}
+	tctx, tcancel := dst.WithTimeoutCause(w, context.Background(), tick, errCause)
+	defer tcancel()
+	dst.Done(tctx).Recv()
+	if tctx.Err() != context.DeadlineExceeded || context.Cause(tctx) != errCause {
+		failf("WithTimeoutCause: Err %v, Cause %v", tctx.Err(), context.Cause(tctx))
+	}
+	dctx, dcancel := dst.WithDeadlineCause(w, context.Background(), w.Now().Add(-time.Second), errCause)
+	defer dcancel()
+	if dctx.Err() != context.DeadlineExceeded || context.Cause(dctx) != errCause {
+		failf("WithDeadlineCause in the past: Err %v, Cause %v", dctx.Err(), context.Cause(dctx))
+	}
+	// Cancelled before the deadline: Canceled, and the cancel's cause.
+	ectx, ecancel := dst.WithTimeoutCause(w, context.Background(), time.Hour, errCause)
+	ecancel()
+	if ectx.Err() != context.Canceled || context.Cause(ectx) != context.Canceled {
+		failf("WithTimeoutCause cancelled early: Err %v, Cause %v", ectx.Err(), context.Cause(ectx))
+	}
+}
+
+// afterDoneOwnGoroutine: AfterDone's f runs in a goroutine of its own,
+// as context.AfterFunc's does, so it may wait for a lock the canceller
+// holds (on a context cancelled later, and on one already done).
+func afterDoneOwnGoroutine(w *dst.World) {
+	var mu dst.Mutex
+	ran := dst.MakeChan[string](w, 2)
+	ctx, cancel := dst.WithCancel(w, context.Background())
+	dst.AfterDone(ctx, func() { mu.Lock(); ran.Send("later"); mu.Unlock() })
+	mu.Lock()
+	cancel() // f can't run inside this: it would wait for mu, held here
+	dst.AfterDone(ctx, func() { mu.Lock(); ran.Send("already done"); mu.Unlock() })
+	mu.Unlock()
+	got := map[string]bool{}
+	for range 2 {
+		v, _ := ran.Recv()
+		got[v] = true
+	}
+	if !got["later"] || !got["already done"] {
+		failf("AfterDone's functions: %v", got)
+	}
+	stopped, stop := dst.WithCancel(w, context.Background())
+	if !dst.AfterDone(stopped, func() { failf("a stopped AfterDone ran") })() {
+		failf("stop before the cancel reported false")
+	}
+	stop()
+}
+
+// randV2: every math/rand/v2 function stays in its range (unsigned ones
+// beyond MaxInt64 too, through dst.N), and bad arguments panic as Go's.
+func randV2(w *dst.World) {
+	r := w.Rand()
+	const big = uint64(1)<<63 + 5
+	for range 200 {
+		if v := r.Int32N(7); v < 0 || v >= 7 {
+			failf("Int32N(7) = %d", v)
+		}
+		if v := r.Uint32N(7); v >= 7 {
+			failf("Uint32N(7) = %d", v)
+		}
+		if v := r.Uint64N(big); v >= big {
+			failf("Uint64N(%d) = %d", big, v)
+		}
+		if v := r.UintN(7); v >= 7 {
+			failf("UintN(7) = %d", v)
+		}
+		if v := r.Float32(); v < 0 || v >= 1 {
+			failf("Float32() = %v", v)
+		}
+		if v := r.ExpFloat64(); v < 0 {
+			failf("ExpFloat64() = %v", v)
+		}
+		if v := r.NormFloat64(); v != v {
+			failf("NormFloat64() = NaN")
+		}
+		if v := r.Int32(); v < 0 {
+			failf("Int32() = %d", v)
+		}
+		_ = r.Uint()
+		if v := dst.N(r, 3*time.Second); v < 0 || v >= 3*time.Second {
+			failf("N(3s) = %v", v)
+		}
+		if v := dst.N(r, big); v >= big {
+			failf("N(%d) = %d", big, v)
+		}
+	}
+	want := panics(func() { mrandv2.N(0) })
+	if m := panics(func() { dst.N(r, 0) }); m != want || m == "" {
+		failf("N(0) panicked with %q, Go's with %q", m, want)
+	}
+}
+
+// mathRandV1: math/rand's (v1) functions stay in range, and bad
+// arguments panic with v1's messages.
+func mathRandV1(w *dst.World) {
+	r := w.MathRand()
+	for range 200 {
+		if v := r.Intn(7); v < 0 || v >= 7 {
+			failf("Intn(7) = %d", v)
+		}
+		if v := r.Int31n(7); v < 0 || v >= 7 {
+			failf("Int31n(7) = %d", v)
+		}
+		if v := r.Int63n(7); v < 0 || v >= 7 {
+			failf("Int63n(7) = %d", v)
+		}
+		if r.Int() < 0 || r.Int31() < 0 || r.Int63() < 0 {
+			failf("a negative Int, Int31 or Int63")
+		}
+		if v := r.Float64(); v < 0 || v >= 1 {
+			failf("Float64() = %v", v)
+		}
+		if v := r.Float32(); v < 0 || v >= 1 {
+			failf("Float32() = %v", v)
+		}
+		if v := r.ExpFloat64(); v < 0 {
+			failf("ExpFloat64() = %v", v)
+		}
+	}
+	if p := r.Perm(5); len(p) != 5 {
+		failf("Perm(5) = %v", p)
+	}
+	b := make([]byte, 9)
+	if n, err := r.Read(b); n != 9 || err != nil {
+		failf("Read: %d %v", n, err)
+	}
+	for _, c := range []struct {
+		name string
+		v1   func()
+		mine func()
+	}{
+		{"Intn", func() { mrand.Intn(0) }, func() { r.Intn(0) }},
+		{"Int31n", func() { mrand.Int31n(0) }, func() { r.Int31n(0) }},
+		{"Int63n", func() { mrand.Int63n(0) }, func() { r.Int63n(0) }},
+	} {
+		if want, got := panics(c.v1), panics(c.mine); want != got || want == "" {
+			failf("%s(0) panicked with %q, math/rand's with %q", c.name, got, want)
+		}
+	}
+}
+
+// cryptoText: CryptoText is crypto/rand.Text's shape, and two differ.
+func cryptoText(w *dst.World) {
+	a, b := dst.CryptoText(w), dst.CryptoText(w)
+	if len(a) != 26 || strings.Trim(a, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") != "" || a == b {
+		failf("CryptoText: %q, %q", a, b)
+	}
+}
+
+// tickChan: Tick's channel ticks; for d <= 0 it is nil (never ready).
+func tickChan(w *dst.World) {
+	start := w.Now()
+	c := w.Tick(tick)
+	for i := 1; i <= 2; i++ {
+		if v, _ := c.Recv(); v.Sub(start) < time.Duration(i)*tick {
+			failf("tick %d at %v", i, v.Sub(start))
+		}
+	}
+	none := w.Tick(0)
+	fired := false
+	dst.Select(w, dst.OnRecv(none, func(time.Time, bool) { fired = true }), dst.Default(nil))
+	if fired || none.Cap() != 0 {
+		failf("Tick(0) is not a nil channel")
+	}
+}
+
+// onceFuncs: OnceFunc, OnceValue and OnceValues run f once for callers
+// that come together (they wait for it), and repeat its panic on every
+// call, as sync's do.
+func onceFuncs(w *dst.World) {
+	var runs atomic.Int32
+	f := dst.OnceFunc(func() { runs.Add(1); w.Sleep(tick) })
+	v := dst.OnceValue(func() int { runs.Add(1); w.Sleep(tick); return 7 })
+	vs := dst.OnceValues(func() (int, error) { runs.Add(1); w.Sleep(tick); return 8, io.EOF })
+	var wg dst.WaitGroup
+	for range 3 {
+		wg.Go(w, func() {
+			f()
+			if v() != 7 {
+				panic("OnceValue's value")
+			}
+			if a, err := vs(); a != 8 || err != io.EOF {
+				panic("OnceValues' values")
+			}
+		})
+	}
+	wg.Wait()
+	if runs.Load() != 3 {
+		failf("the functions ran %d times, want 3 (once each)", runs.Load())
+	}
+	bad := dst.OnceFunc(func() { panic("f failed") })
+	std := sync.OnceFunc(func() { panic("f failed") })
+	for range 2 {
+		if got, want := panics(bad), panics(std); got != want || want == "" {
+			failf("a panicking OnceFunc: %q, sync's %q", got, want)
+		}
+	}
 }
 
 func randInRange(w *dst.World) {

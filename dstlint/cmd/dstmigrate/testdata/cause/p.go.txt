@@ -1,0 +1,47 @@
+package main
+
+import (
+	"context"
+	crand "crypto/rand"
+	"errors"
+	"fmt"
+	mrand "math/rand"
+	"math/rand/v2"
+	"sync"
+	"time"
+
+	"github.com/prince776/go-dst-kit/realworld"
+)
+
+var __w = realworld.New(realworld.Options{})
+
+var errBoom = errors.New("boom")
+
+var answer = sync.OnceValue(func() int { return 42 })
+
+// Each line is the same whichever World runs it: the values are random,
+// so only their properties are printed.
+func main() {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	tctx, tcancel := context.WithTimeoutCause(ctx, 0, errBoom)
+	defer tcancel()
+	ran := make(chan string, 1)
+	context.AfterFunc(ctx, func() { ran <- "after func ran" })
+	cancel(errBoom)
+	select {
+	case <-ctx.Done():
+		fmt.Println("done:", context.Cause(ctx))
+	}
+	<-tctx.Done()
+	fmt.Println("timeout cause:", context.Cause(tctx))
+	fmt.Println(<-ran)
+	big := uint64(1) << 63
+	fmt.Println("unsigned N in range:", rand.N(big+5) < big+5)
+	fmt.Println("Uint64N in range:", rand.Uint64N(big+5) < big+5)
+	fmt.Println("v1 Intn in range:", mrand.Intn(3) < 3)
+	t := time.Tick(time.Millisecond)
+	<-t
+	fmt.Println("ticked")
+	fmt.Println("once value:", answer(), answer())
+	fmt.Println("text length:", len(crand.Text()))
+}
