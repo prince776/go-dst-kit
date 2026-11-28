@@ -290,6 +290,20 @@ func (m *Machine) OnCrash(fn func()) { m.onCrash = append(m.onCrash, fn) }
 // everything written to it, survived.
 func (m *Machine) Killed() bool { return m.killed }
 
+// Live returns the names of m's live tasks, sorted: those not finished
+// and not killed. A crash kills every task of the incarnation it ends, so
+// these are the current incarnation's.
+func (m *Machine) Live() []string {
+	var names []string
+	for _, t := range m.s.tasks {
+		if t.Machine == m && t.state != finished && !t.killed {
+			names = append(names, t.Name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
 type state int
 
 const (

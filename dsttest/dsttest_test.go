@@ -1408,3 +1408,68 @@ func TestKillKeepsSchedule(t *testing.T) {
 	}
 	t.Logf("%d seeds compared, %d mixed, power loss shrank the file in %d", compared, mixed, powerShrank)
 }
+
+// Verifies: [goroutines-are-the-live-ones]
+// Fails if: Goroutines lists a goroutine that returned, misses a parked
+// one, lists a crashed incarnation's goroutines after the restart, or
+// lists another machine's.
+func TestMachineGoroutines(t *testing.T) {
+	type snap struct {
+		when string
+		got  []string
+	}
+	var snaps []snap
+	r := dsttest.RunSeed(1, dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+		var db, other *dsttest.Machine
+		boots := 0
+		db = h.Machine("db", func(w *dst.World) {
+			boots++
+			w.GoNamed(fmt.Sprintf("parked%d", boots), func() {
+				ch := dst.MakeChan[int](w, 0)
+				ch.Recv() // never sent to
+			})
+			w.GoNamed("returns", func() {})
+			w.Sleep(10 * time.Millisecond) // "returns" has returned by now
+			snaps = append(snaps, snap{fmt.Sprintf("boot %d", boots), db.Goroutines()})
+			for {
+				w.Sleep(time.Second)
+			}
+		}, dsttest.NeverCrash)
+		other = h.Machine("other", func(w *dst.World) {
+			w.GoNamed("elsewhere", func() {
+				for {
+					w.Sleep(time.Second)
+				}
+			})
+			for {
+				w.Sleep(time.Second)
+			}
+		}, dsttest.NeverCrash)
+		_ = other
+		h.Go(func(w *dst.World) {
+			w.Sleep(100 * time.Millisecond)
+			db.Crash()
+			snaps = append(snaps, snap{"crashed", db.Goroutines()})
+			db.Restart()
+		})
+	}, nil)
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	main := ""
+	for _, s := range snaps {
+		for _, g := range s.got {
+			if strings.HasSuffix(g, "main") {
+				main = g
+			}
+		}
+	}
+	want := []snap{
+		{"boot 1", []string{main, "parked1"}},
+		{"crashed", nil},
+		{"boot 2", []string{main, "parked2"}},
+	}
+	if main == "" || fmt.Sprint(snaps) != fmt.Sprint(want) {
+		t.Fatalf("Goroutines over the run:\n got  %v\n want %v", snaps, want)
+	}
+}
