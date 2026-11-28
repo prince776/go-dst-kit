@@ -486,7 +486,7 @@ listing, a lock) moves the whole run, so gate debug logging or log after
 the crash; and a fault model of an engine's knob (BytesPerSync) must
 follow the engine's real accounting, or it overclaims bugs.
 
-**memberlist (in progress, 2026-11-27):** merged from `adopt/memberlist`:
+**memberlist (concluded 2026-11-28):** merged from `adopt/memberlist`:
 UDP on gray links (slow links delay datagrams, lossy ones lose them, from
 their own stream), UDP blackholes (`LinkOptions.UDPBlockShare`, in a
 quarter of Gray seeds), the fault timeline (`m.Downtime()`, `m.Pauses()`,
@@ -494,6 +494,18 @@ quarter of Gray seeds), the fault timeline (`m.Downtime()`, `m.Pauses()`,
 named by IP literals getting the net package's address types ([ip-hosts]).
 dstmigrate learned nil channels in composite literals and parameters,
 math/rand/v2's N, crypto/rand.Reader.
+
+memberlist's conclusion (its DST.md §14–16): 3 bugs and a doc gap; the
+1,800-seed baseline clean; a blind benchmark of 11 open issues found
+none, 7 reachable, so the harness gaps are named (a refusing merge
+delegate, configs with ProbeTimeout ≥ ProbeInterval, mass restarts). Its
+library proposals, not approved or built (each would come to Prince
+first): P1 a mass-restart nemesis on its own stream; P2 callback-latency
+faults; P3 `Machine.Incarnation()`/`DownAt(t)` for dead-process
+bookkeeping; P4 per-seed counts for Sometimes (how many seeds a relaxed
+check relied on, not how many polls); P5 stuck reports naming the lock
+holder, not only the waiter; P6 a doc recipe for checks conditioned on
+a fault envelope.
 
 **dst.WaitGroup was wrong in production (2026-11-28, found by pebble's
 suite on the migrated tree):** outside a simulation, `Wait` returned as
