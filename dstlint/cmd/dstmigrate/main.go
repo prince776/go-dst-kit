@@ -76,8 +76,15 @@
 // -test-world may name its package by import path
 // ('example.com/app/dstworld.Real()'): test files using it import it.
 //
-// Usage: dstmigrate [-world MAP] [-map MAP] [-tests] [-test-world EXPR]
-// [-real-fs PATTERNS] [-gosched FUNCS] [-n] packages...
+// -world-param names functions given the World as a new first
+// parameter, w, every call passing the World at hand; -world-field names
+// config types (Config.World) whose functions take the World from that
+// field, the real World when nil. A literal of a -world type that leaves
+// its World field unset gets the World at hand.
+//
+// Usage: dstmigrate [-world MAP] [-world-param FUNCS] [-world-field
+// TYPE.FIELD] [-map MAP] [-tests] [-test-world EXPR] [-real-fs PATTERNS]
+// [-gosched FUNCS] [-n] packages...
 //
 // Verified:
 //   - [lstat-keeps-links] os.Lstat is kept and reported, not rewritten to
@@ -266,6 +273,8 @@ func main() {
 	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies; a package by import path ('example.com/app/dstworld.Real()') is imported where used")
 	mapFlag := flag.String("map", "", "calls rewritten to a function taking the World first: 'importpath.Func=importpath.Func,(importpath.Type).Method=importpath.Func'")
 	realFS := flag.String("real-fs", "", "files whose os file I/O is left as is, by base name pattern: 'peersjson.go,*_test.go'")
+	worldParamFlag := flag.String("world-param", "", "functions given the World as a new first parameter, w, with every call passing the World at hand: 'Func,Type.Method'")
+	worldFieldFlag := flag.String("world-field", "", "config types whose field holds the World: a function given one takes its World from the field (the real World when nil); the field is added if missing: 'Config.World'")
 	goschedFlag := flag.String("gosched", "", "functions whose runtime.Gosched is a turn for others in a loop that makes its own progress, kept as w.Gosched (elsewhere it becomes w.Yield): 'Type.Method,Func'")
 	flag.Parse()
 	gosched := map[string]bool{}
@@ -274,6 +283,7 @@ func main() {
 			gosched[name] = false // set once a function of that name is met
 		}
 	}
+	threading := parseWorldThreading(*worldParamFlag, *worldFieldFlag)
 	worlds := map[string]string{}
 	for _, kv := range strings.Split(*worldFlag, ",") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(kv), "="); ok {
@@ -298,7 +308,7 @@ func main() {
 			continue
 		}
 		tw, twPath := worldImport(*testWorld)
-		m := &migrator{testWorld: tw, testWorldPath: twPath, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds, maps: callMaps, gosched: gosched}
+		m := &migrator{testWorld: tw, testWorldPath: twPath, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds, maps: callMaps, gosched: gosched, threading: &threading}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
 			if strings.HasSuffix(name, ".go") == false || seen[name] {
@@ -324,6 +334,8 @@ func main() {
 			if err != nil {
 				fatal(fmt.Errorf("%s: %w", name, err))
 			}
+			spliced = m.spliceWorld(spliced)
+			m.fills = nil
 			if formatted, err := format.Source(spliced); err == nil {
 				spliced = formatted
 			}
@@ -356,6 +368,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "dstmigrate: -gosched names %s, which no migrated package has\n", name)
 		}
 	}
+	for _, name := range slices.Sorted(maps.Keys(threading.params)) {
+		if !threading.params[name] {
+			fmt.Fprintf(os.Stderr, "dstmigrate: -world-param names %s, which no migrated package declares\n", name)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(threading.fields)) {
+		if !threading.met[name] {
+			fmt.Fprintf(os.Stderr, "dstmigrate: -world-field names %s, which no migrated package declares\n", name)
+		}
+	}
 }
 
 type migrator struct {
@@ -368,6 +390,8 @@ type migrator struct {
 	// gosched names the functions (Type.Method, Func) whose
 	// runtime.Gosched stays w.Gosched; a value is set once one is met.
 	gosched map[string]bool
+	// threading is -world-param and -world-field.
+	threading *worldThreading
 	// funcName is the function being rewritten, as gosched names it.
 	funcName string
 	// testWorldPath is the package testWorld's expression uses, imported
@@ -383,10 +407,15 @@ type migrator struct {
 	imports       map[string]bool    // packages the file's rewrites need
 	changes       int
 	needRecv      bool
-	world         string       // the World expression in the current function
-	plans         []selectPlan // the file's selects, in source order, for the text pass
-	selN          int
-	mutated       map[types.Object]bool // the file's variables that change (mutatedIn)
+	world         string   // the World expression in the current function
+	wUses         int      // how often a World expression was written
+	fills         []string // the file's World fields fillWorld leaves to spliceWorld
+	// worldArgs are the World arguments worldParamCall passed: a go
+	// statement doesn't copy them first (a World doesn't change).
+	worldArgs map[ast.Expr]bool
+	plans     []selectPlan // the file's selects, in source order, for the text pass
+	selN      int
+	mutated   map[types.Object]bool // the file's variables that change (mutatedIn)
 }
 
 // isChan reports whether e is a channel this migration converts: one of
@@ -487,6 +516,7 @@ func expr(src string) ast.Expr {
 }
 
 func (m *migrator) w() ast.Expr {
+	m.wUses++
 	if m.testWorldPath != "" && m.world == m.testWorld {
 		m.need(m.testWorldPath)
 	}
@@ -530,14 +560,31 @@ func (m *migrator) file(f *ast.File) bool {
 				m.gosched[m.funcName] = true
 			}
 		}
+		mapped := false
 		if ok && fd.Recv != nil && len(fd.Recv.List) == 1 {
 			tname := recvType(fd.Recv.List[0].Type)
 			if tmpl, ok := m.worlds[tname]; ok && len(fd.Recv.List[0].Names) == 1 {
 				m.world = strings.ReplaceAll(tmpl, "$", fd.Recv.List[0].Names[0].Name)
+				mapped = true
 			}
 		}
+		fallback := ""
+		switch {
+		case !ok || mapped:
+		case m.worldParam(fd):
+			m.world = "w"
+		default:
+			if from := m.configParam(fd); from != "" && !m.declaresW(fd) {
+				m.world, fallback = "w", from
+			}
+		}
+		uses := m.wUses
 		m.decl(d)
+		if fallback != "" && m.wUses > uses {
+			m.worldFallback(fd, fallback)
+		}
 	}
+	m.addWorldFields(f)
 	if m.changes > before {
 		astutil.AddImport(m.fset, f, dstPath)
 		for _, p := range slices.Sorted(maps.Keys(m.imports)) {
@@ -768,9 +815,11 @@ func (m *migrator) decl(d ast.Node) {
 			}
 		case *ast.CallExpr:
 			m.nilChanArgs(n)
+			m.worldParamCall(n)
 			m.callExpr(c, n)
 		case *ast.CompositeLit:
 			m.nilChanElems(n)
+			m.fillWorld(n)
 		case *ast.BinaryExpr:
 			if (n.Op == token.EQL || n.Op == token.NEQ) && (isNil(n.Y) && m.isChan(n.X) || isNil(n.X) && m.isChan(n.Y)) {
 				ch := n.X
@@ -1264,7 +1313,7 @@ func (m *migrator) goStmt(g *ast.GoStmt) ast.Stmt {
 		return ast.NewIdent(name.Name)
 	}
 	bind := func(e ast.Expr) ast.Expr {
-		if m.stable(e) {
+		if m.stable(e) || m.worldArgs[e] {
 			return e
 		}
 		return force(e)

@@ -232,6 +232,27 @@ The other flags:
 - `-real-fs 'peersjson.go,*_test.go'` leaves the os file I/O of the
   files it names (base-name patterns) as it is: tests' temporary
   directories, operator tools.
+- `-world-param 'randomTimeout,Store.snapshotName'` gives the functions
+  it names (`Func` or `Type.Method`) the World as a new first parameter,
+  `w`, and passes the World at hand at every call: the caller's, its
+  receiver's (`-world`), or the tests' (`-test-world`). Use it for
+  helpers with no owner to hold a World.
+- `-world-field 'Config.World'` threads a library's options: each
+  function given a `*Config` (or `Config`) that needs a World starts
+  with
+
+  ```go
+  w := conf.World
+  if w == nil {
+  	w = realworld.Default()
+  }
+  ```
+
+  and uses `w`. The field is added to the type if it hasn't one.
+- With `-world 'T=$.w'`, a literal of `T` that leaves `w` unset gets
+  the World at hand (`&T{w: w, ...}`), through one embedded struct
+  too; a type with a method taking a World (an `init(w)`) sets its own,
+  and is left alone.
 - `-gosched 'shard.evict,drain'` names the functions (`Type.Method` or
   `Func`) whose `runtime.Gosched` is a turn for others in a loop that
   makes its own progress: they keep `w.Gosched()`. Every other Gosched

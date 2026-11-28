@@ -1,0 +1,94 @@
+package p
+
+import (
+	"math/rand"
+	"time"
+)
+
+// Config already has its World field; Options gets one.
+type Config struct {
+	Timeout time.Duration
+	World   *dst.World
+}
+
+type Options struct {
+	Name string
+}
+
+type state struct {
+	w *dst.World
+}
+
+// Server keeps its World in an embedded struct.
+type Server struct {
+	state
+	timeout time.Duration
+	done    chan struct{}
+}
+
+type metric struct {
+	w    *dst.World
+	last time.Time
+	name string
+}
+
+// pending sets its own World.
+type pending struct {
+	w  *dst.World
+	ch chan error
+}
+
+func (p *pending) init(w *dst.World) { p.w = w; p.ch = make(chan error, 1) }
+
+// jitter is a -world-param function: its draw needs a World.
+func jitter(d time.Duration) time.Duration {
+	return d + time.Duration(rand.Int63n(int64(d)))
+}
+
+func newMetric(name string) *metric {
+	return &metric{
+		last: time.Now(),
+		name: name,
+	}
+}
+
+func startMonitor(
+	name string,
+	every time.Duration,
+) *metric {
+	m := newMetric(name)
+	go report(m, jitter(every))
+	return m
+}
+
+func report(m *metric, d time.Duration) { _ = m; _ = d }
+
+// NewServer takes its World from the config.
+func NewServer(conf *Config) *Server {
+	// Validate the configuration.
+	if conf.Timeout == 0 {
+		conf.Timeout = time.Second
+	}
+	s := &Server{
+		timeout: jitter(conf.Timeout),
+		done:    make(chan struct{}),
+	}
+	return s
+}
+
+// Describe takes a config but needs no World: no fallback.
+func Describe(conf *Config) string { return conf.Timeout.String() }
+
+func Open(opts *Options) *metric { return startMonitor(opts.Name, time.Second) }
+
+func (s *Server) tick() time.Duration {
+	p := &pending{}
+	p.init(s.w)
+	_ = metric{s.w, time.Time{}, "positional"}
+	return jitter(s.timeout)
+}
+
+func logEvery(d time.Duration) { time.Sleep(d) }
+
+// run starts a -world-param function: the World argument isn't copied.
+func (s *Server) run() { go logEvery(s.timeout) }

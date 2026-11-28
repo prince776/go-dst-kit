@@ -555,3 +555,48 @@ func TestMigrateGosched(t *testing.T) {
 		t.Errorf("the typo wasn't reported; stderr:\n%s", stderr)
 	}
 }
+
+// -world-param gives the named functions the World as w and passes the
+// World at hand at every call (uncopied by a go statement); -world-field
+// starts a function given the config with the World from its field (the
+// real World when nil), and adds the field where it is missing; literals
+// of types keeping their World in a field get the World at hand, through
+// an embedded struct too, unless the type sets its own or the literal
+// is positional. The result builds (go vet).
+// Fails if any of these is missing or lands where it shouldn't: a
+// fallback in a function that needs no World, a World field filled in a
+// self-setting type, a parameter list on its own lines joined onto one.
+func TestMigrateWorldThreading(t *testing.T) {
+	got, stderr := migrateSample(t, "worldthread", "Server=$.w,metric=$.w,pending=$.w",
+		"-world-param", "jitter,newMetric,startMonitor,logEvery,nowhere", "-world-field", "Config.World,Options.World,Missing.World")
+	for _, want := range []string{
+		"func jitter(w *dst.World, d time.Duration) time.Duration {",
+		"func newMetric(w *dst.World, name string) *metric {",
+		"func startMonitor(\n\tw *dst.World,\n\tname string,\n",
+		"m := newMetric(w, name)",
+		"goArg1 := jitter(w, every)\n\t\tw.Go(func() { report(m, goArg1) })",
+		"\tw := conf.World\n\tif w == nil {\n\t\tw = realworld.Default()\n\t}\n\n\t// Validate the configuration.\n",
+		"\t\tstate:   state{w: w},\n\t\ttimeout: jitter(w, conf.Timeout),",
+		"\treturn &metric{\n\t\tw:    w,\n\t\tlast: w.Now(),",
+		"\tName string\n\n\t// World is the World this runs in (go-dst-kit): its goroutines,\n\t// timers, clock, channels and randomness. Nil is the real World.\n\tWorld *dst.World\n}",
+		"w := opts.World",
+		"return startMonitor(w, opts.Name, time.Second)",
+		"return jitter(s.w, s.timeout)",
+		"s.w.Go(func() { logEvery(s.w, goArg2) })",
+		"p := &pending{}",
+		"_ = metric{s.w, time.Time{}, \"positional\"}",
+		"func Describe(conf *Config) string { return conf.Timeout.String() }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "realworld.Default()") != 2 {
+		t.Errorf("want fallbacks in NewServer and Open only:\n%s", got)
+	}
+	for _, want := range []string{"-world-param names nowhere", "-world-field names Missing"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+}
