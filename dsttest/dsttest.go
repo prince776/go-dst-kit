@@ -135,8 +135,13 @@
 //     machine's process (its other goroutines stop; its disk keeps the
 //     page cache) and the machine restarts; a panic it rejects, any panic
 //     without OnPanic, and any panic on a NeverCrash machine fails the run.
+//   - [plants-caught-by-their-checks] Plants passes only if the sweep
+//     with no plant passes, and each plant's sweep fails with every
+//     failing seed failing one of the plant's named Always or Final
+//     checks; it reports a plant whose switch is never reached, and one
+//     naming a check the setup doesn't register.
 //
-// Depends on: dst, internal/simworld
+// Depends on: dst, dstbugs, internal/simworld
 package dsttest
 
 import (

@@ -471,6 +471,35 @@ then trying something else): a bug needing two such features is left
 for a quarter of the seeds. A failing seed's report lists its features,
 and `dstbench` shows features that change a bug's rate 3x either way.
 
+## Proving the checks: planted bugs
+
+A check that never fails proves nothing. Plant the bug each check is
+for, behind a `dstbugs` switch (see below), and show the check catches
+it, and only it:
+
+```go
+//go:build dstbugs
+
+func TestChecksCatchTheirBugs(t *testing.T) {
+	dsttest.Plants(t, dsttest.Options{Seeds: 50, KeepGoing: true, Faults: dsttest.AllFaults}, cluster, []dsttest.Plant{
+		{Bug: "vote-twice", Checks: []string{"one vote per term"}, Why: "a node votes twice in a term"},
+		{Bug: "ack-before-fsync", Checks: []string{"acknowledged writes survive"}, Seeds: 300},
+	})
+}
+```
+
+`go test -tags dstbugs` sweeps once with no plant, which must pass, then
+once per plant with `$DSTBUG` set to it. A plant's sweep must fail, and
+every failing seed must fail one of its `Checks`: the names given to
+`h.Always` and `h.Final`, which every failure carries. A seed failing
+any other way (another check, a deadlock, a panic) is reported: a
+plant caught by the wrong check says the right one is weaker than it
+looks. So are a plant whose switch the sweep never reached (the workload
+can't trigger it) and one naming a check the setup doesn't register.
+Name your checks for what they guarantee; a check written as a
+`h.Failf` inside the workload has no name to match, so make it an
+`Always` or a `Final`.
+
 ## Measuring exploration: dstbench
 
 Each bug a sweep finds and you fix is ground truth: a known way the code
