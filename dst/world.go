@@ -58,6 +58,23 @@
 //   - [call-latency-honours-ctx] Injected latency ends when the caller's
 //     context does: Call returns its error then, having run the operation
 //     unless the request was refused.
+//   - [real-is-std] In the real World every primitive is its std
+//     counterpart plus at most one branch on a process-wide flag (is any
+//     simulation running?): no shadow state is read or written there, and
+//     each operation allocates exactly what std's does, but for the
+//     documented exceptions (a Timer or Ticker is one wrapper more; a
+//     Pipe's two ends one value more; Select2 and Select3 callbacks that
+//     capture variables one each; Select uses reflection).
+//
+// Mixing Worlds: a primitive a simulation used works in the real World
+// after the simulation ends. Real and simulated goroutines sharing one
+// primitive at once is a bug in the test: a WaitGroup reports it as
+// misuse; a lock or Cond a real goroutine releases doesn't wake simulated
+// waiters, which the run reports as a deadlock (and the determinism
+// check, as nondeterminism). The same holds between simulations running
+// at once (a sweep's parallel seeds): one can't wake another's waiters,
+// so a package-level lock they block on ends a run in a deadlock naming
+// it; seeds must not share state they wait on.
 //
 // Children: World, Current, Chan, Select, Mutex, RWMutex, WaitGroup, Once, OnceFunc,
 // OnceValue, OnceValues, Cond, Pool, Timer, Ticker, WithCancel, WithCancelCause,

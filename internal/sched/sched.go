@@ -177,6 +177,8 @@ type Scheduler struct {
 	// baton (nil between steps) and a count of steps begun, so a step that
 	// never hands back is noticed without a timer reset on every step.
 	running atomic.Pointer[Task]
+	live    atomic.Int32 // this run's goroutines alive (Live)
+	ended   atomic.Bool  // Run has returned (Live)
 	stepGen atomic.Uint64
 	permBuf []int // Perm's scratch, reused (see Perm)
 }
@@ -334,6 +336,7 @@ type Task struct {
 	killed     bool
 	blocked    string
 	goid       uint64
+	goidShared atomic.Uint64 // goid, for goroutines other than the scheduler's (HeldByCaller); 0 once it exits
 	prio       float64       // PCT priority (higher runs first)
 	sleepUntil time.Duration // with blocked == sleeping
 	site       uint64        // where it last handed off, or started (Options.Pairs)
@@ -621,9 +624,14 @@ func (t *Task) String() string {
 func (t *Task) main(fn func()) {
 	<-t.wake
 	t.goid = goid()
+	t.goidShared.Store(t.goid)
 	register(t)
 	defer func() {
 		unregister(t)
+		// The goroutine's g is about to be free for reuse, before the
+		// scheduler, taking the baton back, clears running: no goroutine
+		// may then match this task in HeldByCaller (a g is never 0).
+		t.goidShared.Store(0)
 		if r := recover(); r != nil {
 			if _, ok := r.(killSignal); !ok {
 				if t.Machine != nil && t.s.OnPanic != nil && t.s.OnPanic(t, r) {
@@ -737,8 +745,33 @@ func (s *Scheduler) misuse(holder *Task) {
 	runtime.Goexit() // a foreign goroutine: stop it before it touches the run
 }
 
-// Stepping reports whether a task holds the baton now (mid-step).
+// Stepping reports whether a task holds the baton now (mid-step). Only
+// the scheduler's own goroutines may ask; any other uses HeldByCaller.
 func (s *Scheduler) Stepping() bool { return s.cur != nil }
+
+// HeldByCaller reports whether the calling goroutine is the task holding
+// the baton now. Any goroutine may ask, while the run goes on: a real
+// goroutine, or one of another simulation, using a primitive this
+// scheduler's goroutines used (a package-level lock shared by parallel
+// seeds). It compares goroutine identities (goid: a few nanoseconds on
+// amd64 and arm64, runtime.Stack elsewhere).
+func (s *Scheduler) HeldByCaller() bool {
+	t := s.running.Load()
+	return t != nil && t.goidShared.Load() == goid()
+}
+
+// Live reports whether goroutines of this run may still run: some are
+// alive and Run hasn't returned (an aborted run's parked goroutines stay
+// alive, but never run again). Any goroutine may ask.
+func (s *Scheduler) Live() bool { return s.live.Load() > 0 && !s.ended.Load() }
+
+// Misuse fails the run with msg as a misuse of the World, from the
+// running task, which it ends (it doesn't return).
+func (s *Scheduler) Misuse(msg string) {
+	s.Fail(&MisuseError{msg: msg, Stack: callerStack()})
+	s.abortOnce.Do(func() { close(s.abort) })
+	panic(killSignal{})
+}
 
 // Unwinding reports whether the task holding the baton is a killed one
 // running its deferred functions.
@@ -988,6 +1021,7 @@ func (s *Scheduler) Resume(m *Machine) {
 func (s *Scheduler) Run(done func() bool) error {
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
+	defer s.ended.Store(true) // Live: none of its goroutines runs again
 	go s.watch(stopWatch)
 	s.loopGoid = goid()
 	for !s.failed() && !done() {

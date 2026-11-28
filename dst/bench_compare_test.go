@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,6 +102,100 @@ func contended(w *dst.World, total int) {
 
 func BenchmarkMutexContendedReal(b *testing.B) { contended(realworld.New(realworld.Options{}), b.N) }
 func BenchmarkMutexContendedSim(b *testing.B)  { inSim(b, func(w *dst.World) { contended(w, b.N) }) }
+
+// ---- uncontended sync primitives (the real World's passthrough cost) ----
+
+func BenchmarkMutexRaw(b *testing.B) {
+	var m sync.Mutex
+	for range b.N {
+		m.Lock()
+		m.Unlock()
+	}
+}
+
+func BenchmarkMutexReal(b *testing.B) {
+	var m dst.Mutex
+	for range b.N {
+		m.Lock()
+		m.Unlock()
+	}
+}
+
+// The real World's Mutex while a simulation runs in the same process:
+// the branch is taken, the registry says "not simulated", and nothing
+// else (HeldByCaller, the sharing check) is reached.
+func BenchmarkMutexRealAlongsideSim(b *testing.B) {
+	stop := simAlongside(b)
+	defer stop()
+	var m dst.Mutex
+	b.ResetTimer()
+	for range b.N {
+		m.Lock()
+		m.Unlock()
+	}
+}
+
+func BenchmarkRWMutexReadRaw(b *testing.B) {
+	var m sync.RWMutex
+	for range b.N {
+		m.RLock()
+		m.RUnlock()
+	}
+}
+
+func BenchmarkRWMutexReadReal(b *testing.B) {
+	var m dst.RWMutex
+	for range b.N {
+		m.RLock()
+		m.RUnlock()
+	}
+}
+
+func BenchmarkWaitGroupRaw(b *testing.B) {
+	var g sync.WaitGroup
+	for range b.N {
+		g.Add(1)
+		g.Done()
+		g.Wait()
+	}
+}
+
+func BenchmarkWaitGroupReal(b *testing.B) {
+	var g dst.WaitGroup
+	for range b.N {
+		g.Add(1)
+		g.Done()
+		g.Wait()
+	}
+}
+
+func BenchmarkOnceRaw(b *testing.B) {
+	var o sync.Once
+	for range b.N {
+		o.Do(func() {})
+	}
+}
+
+func BenchmarkOnceReal(b *testing.B) {
+	var o dst.Once
+	for range b.N {
+		o.Do(func() {})
+	}
+}
+
+func BenchmarkCondSignalRaw(b *testing.B) {
+	c := sync.NewCond(&sync.Mutex{})
+	for range b.N {
+		c.Signal()
+	}
+}
+
+func BenchmarkCondSignalReal(b *testing.B) {
+	c := dst.NewCond(&dst.Mutex{})
+	for range b.N {
+		c.Signal()
+	}
+}
 
 // ---- context ----
 
@@ -316,4 +411,23 @@ func BenchmarkHTTPSim(b *testing.B) {
 		get(dsthttp.Client(w), "http://localhost:80/", b.N)
 		ln.Close()
 	})
+}
+
+// simAlongside starts a simulation that stays running (blocked on a raw
+// channel, its watchdog far off) until the returned function is called.
+func simAlongside(t testing.TB) (stop func()) {
+	block := make(chan struct{})
+	ended := make(chan struct{})
+	var started atomic.Bool
+	go func() {
+		simworld.Run(simworld.Options{Seed: 1, Watchdog: time.Hour}, func(*dst.World) {
+			started.Store(true)
+			<-block
+		})
+		close(ended)
+	}()
+	for !started.Load() {
+		time.Sleep(time.Millisecond)
+	}
+	return func() { close(block); <-ended }
 }
