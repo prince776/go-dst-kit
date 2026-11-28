@@ -477,27 +477,23 @@ Each bug a sweep finds and you fix is ground truth: a known way the code
 was wrong. Keep them re-insertable, and you can measure whether a change
 to the sweep, the workload or the library finds bugs more often.
 
-1. Re-insert each fixed bug behind a switch that only a build tag can
-   turn on, so normal builds compile the buggy paths out:
+1. Re-insert each fixed bug behind a `dstbugs` switch. Only a build with
+   the `dstbugs` tag can turn one on; every other build compiles it to
+   the constant false, so production keeps the fixed path and pays
+   nothing:
 
    ```go
-   //go:build !dstbugs
-   package mypkg
-   func bug(name string) bool { return false }
-   ```
-
-   ```go
-   //go:build dstbugs
-   package mypkg
-   var activeBug = os.Getenv("DSTBUG")
-   func bug(name string) bool { return name != "" && name == activeBug }
-   ```
-
-   ```go
-   if !bug("close-without-fsync") {
+   if !dstbugs.Bug("close-without-fsync") {
        f.Sync()
    }
    ```
+
+   `go test -tags dstbugs` with `DSTBUG=close-without-fsync` (a
+   comma-separated list; read at each call, so a test can `t.Setenv` it)
+   turns it on. `dstbugs.Fix(name)`, listed in `DSTFIX`, is the same
+   switch for a candidate fix you are trying before it replaces the code.
+   `dstbugs.Hits(name)` says how often a switch was reached in the
+   process: one a workload never reaches can't matter to it.
 
    Re-insert the bug as it was, not a stronger version: an easier bug
    flatters the sweep. A check: with the bug re-inserted, the sweep should
