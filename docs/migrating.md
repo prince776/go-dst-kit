@@ -237,7 +237,12 @@ The other flags:
   it names (`Func` or `Type.Method`) the World as a new first parameter,
   `w`, and passes the World at hand at every call: the caller's, its
   receiver's (`-world`), or the tests' (`-test-world`). Use it for
-  helpers with no owner to hold a World.
+  helpers with no owner to hold a World. Check the calls in a method
+  that sets up its receiver (an `init(opts)`): there the receiver's
+  World may not be set yet, and the World to pass is the options'
+  (pebble's `failoverManager.init` calling `newStopper`). Names are
+  matched in every migrated package, so give a common one (`Open`,
+  `New`) by hand.
 - `-world-field 'Config.World'` threads a library's options: each
   function given a `*Config` (or `Config`) that needs a World starts
   with
