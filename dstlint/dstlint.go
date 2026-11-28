@@ -110,7 +110,7 @@ var funcs = map[string]map[string]string{
 var typeNames = map[string]map[string]string{
 	"sync": {
 		"Mutex": "dst.Mutex", "RWMutex": "dst.RWMutex", "WaitGroup": "dst.WaitGroup",
-		"Once": "dst.Once", "Cond": "dst.Cond",
+		"Once": "dst.Once", "Cond": "dst.Cond", "Pool": "dst.Pool",
 	},
 	"time":     {"Timer": "dst.Timer", "Ticker": "dst.Ticker"},
 	"net/http": {"Server": "dsthttp.Serve"},

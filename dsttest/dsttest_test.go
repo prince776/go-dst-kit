@@ -1576,3 +1576,71 @@ func TestWorldsNot(t *testing.T) {
 		t.Fatal(r.Err)
 	}
 }
+
+// poolMark is the object TestPoolsDontCrossSeeds passes through a pool
+// shared by two simulations, as a package-level pool would be.
+type poolMark struct{ seed int }
+
+// Verifies: [pools-dont-cross-seeds]
+// Fails if: an object Put in one simulation, by a live goroutine or by a
+// killed one's deferred Put at the end-of-run unwind, is returned by Get
+// in that simulation, the next one in the same process, or real code
+// after them; one real code Put is returned in a simulation; or a
+// simulated Get doesn't call New (or doesn't return nil without one).
+func TestPoolsDontCrossSeeds(t *testing.T) {
+	pool := &dst.Pool{New: func() any { return &poolMark{seed: 0} }}
+	var bare dst.Pool
+	gets := map[int][]int{}
+	unwound := 0 // killed goroutines' deferred Puts that ran
+	run := func(seed int) {
+		r := dsttest.RunSeed(uint64(seed), dsttest.Options{FaultPhase: time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+			var m *dsttest.Machine
+			m = h.Machine("m", func(w *dst.World) {
+				for i := 0; i < 20; i++ {
+					gets[seed] = append(gets[seed], pool.Get().(*poolMark).seed)
+					pool.Put(&poolMark{seed: seed})
+				}
+				if x := bare.Get(); x != nil {
+					h.Failf("a Pool without New: Get = %v in a simulation, want nil", x)
+				}
+				// Killed while holding one: its deferred Put runs only at
+				// the end-of-run unwind.
+				w.Go(func() {
+					x := &poolMark{seed: seed}
+					defer func() {
+						unwound++
+						pool.Put(x)
+					}()
+					w.Sleep(time.Hour)
+				})
+				w.Sleep(10 * time.Millisecond)
+				m.Kill()
+			}, dsttest.NeverCrash)
+		}, nil)
+		if r.Err != nil {
+			t.Fatalf("seed %d: %v", seed, r.Err)
+		}
+	}
+	// Real code's objects don't reach a simulation either (seed -1).
+	for i := 0; i < 20; i++ {
+		pool.Put(&poolMark{seed: -1})
+	}
+	run(1)
+	run(2)
+	if unwound < 2 { // a run may be repeated (determinism check)
+		t.Fatalf("%d killed goroutines' deferred Puts ran, want one or more per seed (the case would be vacuous)", unwound)
+	}
+	// Nor does real code in the process get a simulation's.
+	for i := 0; i < 100; i++ {
+		if x := pool.Get().(*poolMark); x.seed > 0 {
+			t.Fatalf("the real World got an object Put by seed %d's simulation", x.seed)
+		}
+	}
+	for _, seed := range []int{1, 2} {
+		for _, from := range gets[seed] {
+			if from != 0 {
+				t.Fatalf("seed %d got an object Put by %d (gets %v; -1 is real code): Get must call New", seed, from, gets[seed])
+			}
+		}
+	}
+}

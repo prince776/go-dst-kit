@@ -158,9 +158,9 @@ func (w *World) GoNamed(name string, fn func()) {
 	w.s.Yield()
 }
 
-// Yield lets other goroutines run, as runtime.Gosched does. Use it where
-// code waits for another goroutine without any World operation in between,
-// such as a loop spinning on an atomic:
+// Yield lets other goroutines run, as runtime.Gosched does in a spin. Use
+// it where code waits for another goroutine without any World operation
+// in between, such as a loop spinning on an atomic:
 //
 //	for flag.Load() == 0 {
 //		w.Yield()
@@ -173,6 +173,15 @@ func (w *World) GoNamed(name string, fn func()) {
 // that nothing can ever end is reported as a deadlock.
 //
 // Verified:
+// Yield or Gosched? A loop whose exit condition depends on another
+// goroutine is a spin and takes Yield. A loop that makes its own progress
+// and only offers others a turn (evicting a batch of entries per lock
+// hold, say) takes Gosched. Yield in a self-progressing loop is wrong when
+// nothing else can run: simulated time jumps to the next timer before the
+// loop goes on, and if that timer is far off (the end of the run) it shows
+// as a liveness hang.
+//
+// Verified:
 //   - [yield-waits-for-progress] In a simulated World, Yield returns only
 //     after another goroutine has taken a step or time has advanced; a
 //     spin waiting for a sleeping goroutine ends at its wake-up after a
@@ -183,6 +192,24 @@ func (w *World) Yield() {
 		return
 	}
 	w.s.YieldToOthers()
+}
+
+// Gosched is a plain scheduling point, as runtime.Gosched is outside a
+// spin: the goroutine stays runnable, and another runnable one may run
+// first. In the real World it is runtime.Gosched. Use it in a loop that
+// makes its own progress and only offers others a turn; a loop waiting
+// for another goroutine takes Yield (see Yield for telling them apart).
+//
+// Verified:
+//   - [gosched-stays-runnable] Gosched never waits for time to advance:
+//     a self-progressing loop calling it finishes at the same simulated
+//     instant, and another runnable goroutine may run before it goes on.
+func (w *World) Gosched() {
+	if w.s == nil {
+		runtime.Gosched()
+		return
+	}
+	w.s.Yield()
 }
 
 // Sleep pauses the goroutine for d, as time.Sleep does.
