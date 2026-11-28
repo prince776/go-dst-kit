@@ -97,6 +97,10 @@
 //   - [kill-keeps-schedule] Turning Kill on changes which crashes keep the
 //     page cache, not when crashes happen or to which machine; Kill alone
 //     only kills; and a killed machine finds everything it wrote.
+//   - [goroutines-are-the-live-ones] A machine's Goroutines are exactly
+//     its current incarnation's goroutines that haven't returned: a
+//     returned one isn't listed, a parked one is, a crashed incarnation's
+//     aren't after a restart, and another machine's never are.
 //   - [panic-fail-stop] With OnPanic, a panic it accepts kills only its
 //     machine's process (its other goroutines stop; its disk keeps the
 //     page cache) and the machine restarts; a panic it rejects, any panic
@@ -517,6 +521,14 @@ func (m *Machine) Kill() {
 		m.m.Kill()
 	}
 }
+
+// Goroutines returns the names of the machine's live goroutines in its
+// current incarnation, sorted: those started (with World.Go or GoNamed,
+// or its boot) that haven't returned, parked ones included. A crashed
+// incarnation's goroutines aren't listed, nor another machine's. A test
+// takes it before and after some work to find goroutines the work
+// leaked, such as ones a Close should have stopped.
+func (m *Machine) Goroutines() []string { return m.m.M.Live() }
 
 // Killed reports whether the machine's last crash was a kill (its disk
 // kept everything written) rather than a power loss. A machine's start
