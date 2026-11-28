@@ -23,6 +23,11 @@ import (
 // Verified:
 //   - [lock-is-a-scheduling-point] Another goroutine may run before Lock
 //     acquires. So a lost update across two locked sections is found.
+//   - [no-touch-after-release] Outside a simulation, an Unlock or RUnlock
+//     (of a Mutex or RWMutex) and a WaitGroup's Done don't touch their
+//     primitive once they have released it, as sync's don't: whoever goes
+//     next (the next holder, the returning Wait) may reset or recycle the
+//     struct that holds it at once, and -race stays quiet.
 type Mutex struct {
 	mu      sync.Mutex
 	waiters atomic.Int32 // simulated goroutines parked on this mutex
@@ -69,17 +74,22 @@ func simSchedSlow(cache *atomic.Pointer[sched.Scheduler]) *sched.Scheduler {
 func (m *Mutex) TryLock() bool { return m.mu.TryLock() }
 
 // Unlock is (*sync.Mutex).Unlock.
+//
+// Like every unlock and Done here, it reads the primitive only before
+// releasing it: once released, another goroutine may take it and reset
+// or recycle the struct that holds it (a pooled object), as
+// sync.Mutex allows.
 func (m *Mutex) Unlock() {
+	var s *sched.Scheduler
 	if sched.Active() {
-		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
+		if s = simSchedSlow(&m.s); s != nil && s.Unwinding() {
 			return // a killed goroutine's deferred unlock: its process is gone
 		}
 	}
+	wake := m.waiters.Load() > 0 && s != nil
 	m.mu.Unlock()
-	if m.waiters.Load() > 0 {
-		if s := simSchedSlow(&m.s); s != nil {
-			s.WakeOne(m)
-		}
+	if wake {
+		s.WakeOne(m) // m as a key only
 	}
 }
 
@@ -112,13 +122,14 @@ func (m *RWMutex) Lock() {
 
 // Unlock is (*sync.RWMutex).Unlock.
 func (m *RWMutex) Unlock() {
-	if sched.Active() {
-		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
-			return // a killed goroutine's deferred unlock: its process is gone
-		}
+	s, wake, killed := m.beforeRelease()
+	if killed {
+		return // a killed goroutine's deferred unlock: its process is gone
 	}
 	m.mu.Unlock()
-	m.wake()
+	if wake {
+		s.WakeAll(m) // m as a key only
+	}
 }
 
 // RLock is (*sync.RWMutex).RLock.
@@ -139,13 +150,14 @@ func (m *RWMutex) RLock() {
 
 // RUnlock is (*sync.RWMutex).RUnlock.
 func (m *RWMutex) RUnlock() {
-	if sched.Active() {
-		if s := simSchedSlow(&m.s); s != nil && s.Unwinding() {
-			return // a killed goroutine's deferred unlock: its process is gone
-		}
+	s, wake, killed := m.beforeRelease()
+	if killed {
+		return // a killed goroutine's deferred unlock: its process is gone
 	}
 	m.mu.RUnlock()
-	m.wake()
+	if wake {
+		s.WakeAll(m) // m as a key only
+	}
 }
 
 // TryLock is (*sync.RWMutex).TryLock: it fails while anyone holds the
@@ -187,12 +199,16 @@ type rlocker RWMutex
 func (r *rlocker) Lock()   { (*RWMutex)(r).RLock() }
 func (r *rlocker) Unlock() { (*RWMutex)(r).RUnlock() }
 
-func (m *RWMutex) wake() {
-	if m.waiters.Load() > 0 {
-		if s := simSchedSlow(&m.s); s != nil {
-			s.WakeAll(m)
+// beforeRelease reads what an unlock needs before it releases m (see
+// Mutex.Unlock): the caller's scheduler, whether simulated goroutines wait,
+// and whether the caller is a killed goroutine unwinding.
+func (m *RWMutex) beforeRelease() (s *sched.Scheduler, wake, killed bool) {
+	if sched.Active() {
+		if s = simSchedSlow(&m.s); s != nil && s.Unwinding() {
+			return s, false, true
 		}
 	}
+	return s, s != nil && m.waiters.Load() > 0, false
 }
 
 // WaitGroup is sync.WaitGroup for code that runs in a World.
@@ -214,17 +230,24 @@ func (g *WaitGroup) Add(delta int) {
 	if n < 0 {
 		panic("sync: negative WaitGroup counter")
 	}
-	g.wg.Add(delta)
+	// Decided before the sync.WaitGroup's Add: once that lets a Wait
+	// return, the group is the waiter's to reset or recycle, and a Done
+	// must not touch it any more (sync.WaitGroup's doesn't).
+	var wake *sched.Scheduler
 	if n == 0 && g.waiters.Load() > 0 {
 		if t := sched.CurrentTask(); t != nil {
-			t.Sched().WakeAll(g)
+			wake = t.Sched()
 		} else if s := g.s.Load(); s != nil {
 			// Simulated goroutines wait, and this goroutine isn't one of
 			// theirs: their wake-up would be lost. Current reports the
 			// misuse and doesn't return here.
 			s.Current()
-			s.WakeAll(g)
+			wake = s
 		}
+	}
+	g.wg.Add(delta)
+	if wake != nil {
+		wake.WakeAll(g) // g as a key only
 	}
 }
 
