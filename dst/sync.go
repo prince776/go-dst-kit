@@ -148,6 +148,45 @@ func (m *RWMutex) RUnlock() {
 	m.wake()
 }
 
+// TryLock is (*sync.RWMutex).TryLock: it fails while anyone holds the
+// lock or a writer waits for it. In a simulated World it is a scheduling
+// point, as Lock is.
+func (m *RWMutex) TryLock() bool {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil {
+			s.Yield()
+			if m.writersWaiting.Load() > 0 {
+				return false // a parked writer: sync's would hold the lock's writer half
+			}
+		}
+	}
+	return m.mu.TryLock()
+}
+
+// TryRLock is (*sync.RWMutex).TryRLock: it fails while a writer holds the
+// lock or waits for it. In a simulated World it is a scheduling point, as
+// RLock is.
+func (m *RWMutex) TryRLock() bool {
+	if sched.Active() {
+		if s := simSchedSlow(&m.s); s != nil {
+			s.Yield()
+			if m.writersWaiting.Load() > 0 {
+				return false // a parked writer, which sync's would see
+			}
+		}
+	}
+	return m.mu.TryRLock()
+}
+
+// RLocker is (*sync.RWMutex).RLocker: a Locker whose Lock and Unlock are
+// m's RLock and RUnlock.
+func (m *RWMutex) RLocker() sync.Locker { return (*rlocker)(m) }
+
+type rlocker RWMutex
+
+func (r *rlocker) Lock()   { (*RWMutex)(r).RLock() }
+func (r *rlocker) Unlock() { (*RWMutex)(r).RUnlock() }
+
 func (m *RWMutex) wake() {
 	if m.waiters.Load() > 0 {
 		if s := simSchedSlow(&m.s); s != nil {

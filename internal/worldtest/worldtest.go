@@ -50,6 +50,7 @@ var Checks = []Check{
 	{"time/ticker-ticks-until-stopped", ticker},
 	{"sync/mutex-excludes", mutexExcludes},
 	{"sync/rwmutex", rwMutex},
+	{"sync/rwmutex-try-and-rlocker", rwMutexTry},
 	{"sync/waitgroup-waits", waitGroup},
 	{"sync/once-runs-once", once},
 	{"sync/cond-signal-wakes-one-broadcast-all", condSignalBroadcast},
@@ -360,6 +361,75 @@ func rwMutex(w *dst.World) {
 	if maxReaders.Load() < 2 {
 		failf("readers never overlapped (max %d)", maxReaders.Load())
 	}
+}
+
+// rwMutexTry: TryLock and TryRLock succeed and fail as sync.RWMutex's do
+// (held by a reader, by a writer, and with a writer waiting behind a
+// reader), and RLocker locks the read side.
+func rwMutexTry(w *dst.World) {
+	var mu dst.RWMutex
+	if !mu.TryRLock() {
+		failf("TryRLock on a free lock failed")
+	}
+	if !mu.TryRLock() {
+		failf("a second TryRLock beside a reader failed")
+	}
+	if mu.TryLock() {
+		failf("TryLock succeeded while readers hold the lock")
+	}
+	mu.RUnlock()
+	mu.RUnlock()
+	if !mu.TryLock() {
+		failf("TryLock on a free lock failed")
+	}
+	if mu.TryLock() || mu.TryRLock() {
+		failf("TryLock or TryRLock succeeded while a writer holds the lock")
+	}
+	mu.Unlock()
+	// A writer waits behind a reader: new readers and writers are refused.
+	mu.RLock()
+	got := dst.MakeChan[bool](w, 1)
+	release := dst.MakeChan[bool](w, 0)
+	w.Go(func() {
+		mu.Lock()
+		got.Send(true)
+		release.Recv() // hold it until the checks below are done
+		mu.Unlock()
+	})
+	// Until the writer waits, TryRLock succeeds; once it waits, it fails.
+	for i := 0; mu.TryRLock(); i++ {
+		mu.RUnlock()
+		if i == 1000 {
+			failf("TryRLock kept succeeding with a writer waiting for %v", 1000*tick)
+		}
+		w.Sleep(tick)
+	}
+	if mu.TryLock() {
+		failf("TryLock succeeded while a writer waits")
+	}
+	mu.RUnlock()
+	// The last reader left: the lock is the waiting writer's (it may hold
+	// it already, until released), not ours.
+	if mu.TryLock() {
+		failf("TryLock succeeded after the last reader left, ahead of the waiting writer")
+	}
+	got.Recv()
+	release.Send(true)
+	// RLocker is the read side: two holders at once, and a writer refused.
+	l := mu.RLocker()
+	l.Lock()
+	if !mu.TryRLock() {
+		failf("TryRLock failed beside RLocker's lock: it isn't the read side")
+	}
+	if mu.TryLock() {
+		failf("TryLock succeeded while RLocker holds the read side")
+	}
+	mu.RUnlock()
+	l.Unlock()
+	if !mu.TryLock() {
+		failf("TryLock failed after RLocker's unlocks")
+	}
+	mu.Unlock()
 }
 
 func waitGroup(w *dst.World) {
