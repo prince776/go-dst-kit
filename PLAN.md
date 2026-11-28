@@ -511,6 +511,18 @@ World's concurrency, and a race inside an adapter primitive needs that.
 Todo: a real-World stress test per primitive (reuse right after the wait,
 many goroutines, `-race`, thousands of rounds) in `internal/worldtest`.
 
+**dstmigrate read go statements' operands late (2026-11-28, found by
+pebble's suite):** `go f(a, b)` evaluates its function, receiver and
+arguments at the go statement; the rewrite to `w.Go(func(){ f(a, b) })`
+bound only composite operands, so a plain variable changed after the go
+statement was read inside the goroutine (pebble's TestWALHardCrashRandomized
+modelled the wrong keys, 20 of 20 runs). Fixed (de4bc27): every operand is
+bound unless it can't change; a before-and-after test of eight cases.
+Audit: raft's regenerated tree changed only upstream test files; rosedb,
+wal, go-diskqueue and LLM-Tor had no affected library go statement;
+memberlist regenerates after its baseline. The lesson for a rewriter:
+test it by running a program before and after the rewrite and comparing.
+
 **pebble (started 2026-11-28):** cockroachdb/pebble at 4b082f41, a
 subagent, same method; blind benchmark held outside the agents' reach.
 
