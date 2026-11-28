@@ -56,8 +56,19 @@ can't reproduce it. Under simulation:
 
 ## Migrating
 
+```
+go get github.com/prince776/go-dst-kit   # Go 1.25 or later; no dependencies
+```
+
 It's a mechanical substitution, and it can be done one package at a time
-([docs/migrating.md](docs/migrating.md)):
+([docs/migrating.md](docs/migrating.md)). `dstmigrate` does it for you:
+
+```
+go run github.com/prince776/go-dst-kit/dstlint/cmd/dstmigrate -world 'Server=$.w' ./pkg
+```
+
+rewrites the package in place by this table (`-tests` does its tests
+too; the flags are in migrating.md):
 
 | Go | World |
 |---|---|
@@ -102,7 +113,7 @@ wal/log.go:42:9: time.Now escapes the World; use w.Now()
 | Package | What |
 |---|---|
 | [`dst`](dst) | the World and everything code uses from it |
-| [`realworld`](realworld) | the production World: plain goroutines, `os`, `net` |
+| [`realworld`](realworld) | the production World: plain goroutines, `os`, `net`; `realworld.Default()` for code given none |
 | [`dsttest`](dsttest) | the runner: seeds, machines, faults, phases, invariants, replay |
 | [`check`](check) | oracles: a linearizability checker, a KV model, a history recorder |
 | [`dsthttp`](dsthttp) | `net/http` servers and clients over the World's network |

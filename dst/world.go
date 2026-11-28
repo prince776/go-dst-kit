@@ -108,6 +108,7 @@ type World struct {
 }
 
 func init() {
+	worldhook.SetCurrentReal = func(w any) { currentReal = w.(*World) }
 	worldhook.NewWorld = func(sp worldhook.Spec) any {
 		w := &World{s: sp.Sched, m: sp.Machine, epoch: sp.Epoch}
 		if w.s != nil {
@@ -140,9 +141,10 @@ func init() {
 // a simulation runs: such a goroutine gets real randomness and the real
 // clock, and nothing reports it. The determinism check is the backstop:
 // a seed whose runs differ because of it is reported as
-// nondeterministic. Outside a simulation the World Current returns has
-// goroutines, time, locks and randomness but no filesystem or network
-// (realworld.New gives those).
+// nondeterministic. Outside a simulation the World Current returns is
+// realworld.Default(), with the os filesystem and network, when the
+// program links the realworld package; without it, a real World with no
+// filesystem or network.
 //
 // Verified:
 //   - [current-is-the-callers] A goroutine a simulated World started gets
@@ -158,7 +160,9 @@ func Current() *World {
 	return currentReal
 }
 
-// currentReal is Current's real World.
+// currentReal is Current's real World: realworld.Default() once the
+// realworld package is linked in (its init sets it, before any goroutine
+// runs), else a real World with no filesystem or network.
 var currentReal = &World{rnd: realRand{}}
 
 // Simulated reports whether w is a simulated World.

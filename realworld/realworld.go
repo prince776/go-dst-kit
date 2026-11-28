@@ -16,6 +16,10 @@
 //     the *os.File itself. With a Dir, names are relative to it and
 //     checked as a simulated disk checks them, so both reject the same
 //     names.
+//   - [default-is-one] Default returns one World every time, from any
+//     goroutine: New(Options{}) (the os filesystem, no root), and the
+//     World dst.Current gives a goroutine no simulated World started, so
+//     its filesystem and network work there too. It allocates nothing.
 //
 // Depends on: dst
 package realworld
@@ -38,7 +42,28 @@ type Options struct {
 	Dir string
 }
 
-// New returns the real World.
+// New returns a real World.
 func New(opts Options) *dst.World {
 	return worldhook.NewWorld(worldhook.Spec{FS: newFS(opts.Dir), Net: osNet{}}).(*dst.World)
 }
+
+// Default returns the process's real World: New(Options{}), made once,
+// so its filesystem is the os package's with no root. It is the World
+// dst.Current returns to a goroutine no simulated World started.
+//
+// It is for code given no World, where the real one is meant: a
+// library's Config with a nil World field, an entry point.
+//
+//	func (c *Config) world() *dst.World {
+//		if c.World == nil {
+//			return realworld.Default()
+//		}
+//		return c.World
+//	}
+func Default() *dst.World { return def }
+
+// def is Default's World, made at init: the dst package's init (which
+// New needs) has run by then, and no goroutine has started.
+var def = New(Options{})
+
+func init() { worldhook.SetCurrentReal(def) }

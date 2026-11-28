@@ -22,6 +22,11 @@ type Spec struct {
 // NewWorld returns a *dst.World (as any, to avoid an import cycle).
 var NewWorld func(Spec) any
 
+// SetCurrentReal makes w (a *dst.World) the real World dst.Current
+// returns. realworld's init calls it with realworld.Default(), so the
+// two are one World, with the os filesystem and network.
+var SetCurrentReal func(w any)
+
 // AfterDoneSync is dst's AfterDone with f run synchronously by whoever
 // ends a simulated context (the library's own network and HTTP plumbing,
 // which must react within the same step); dst.AfterDone runs f in its

@@ -37,6 +37,32 @@ is given.
 
 In tests, `dsttest` gives each simulated machine its own World.
 
+**A library** whose constructors have callers it can't change
+(`yamux.Server(conn, cfg)`, `raft.NewRaft(conf, ...)`) adds a World field
+to the options it already takes, and uses the real World when it's nil,
+so every existing caller keeps working unchanged:
+
+```go
+type Config struct {
+	// ...
+	// World is what the library waits, sleeps, locks and spawns with.
+	// Nil means the real World: plain goroutines, time and os.
+	World *dst.World
+}
+
+func (c *Config) world() *dst.World {
+	if c.World == nil {
+		return realworld.Default()
+	}
+	return c.World
+}
+```
+
+`realworld.Default()` is one real World for the whole process, made at
+start; it is also the World `dst.Current` gives goroutines no simulation
+started. Read the World once, in the constructor, into a field: a World
+must not change under a running instance.
+
 **Last resort: `dst.Current()`.** Leaf code that no World can reach (a
 package-level helper called from everywhere, with no owner to pass it
 one: an assertion helper's random choice, say) can ask for the calling
