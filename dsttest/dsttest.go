@@ -65,8 +65,8 @@
 //   - [outages-explore] With Services faults the runner takes whole
 //     services down: every point of the service fails together.
 //   - [fault-classes-independent] Turning on pauses, outages, fault
-//     points or losses leaves the times of each seed's crashes and
-//     partitions as they were.
+//     points, losses or mass restarts leaves the times of each seed's
+//     crashes and partitions as they were.
 //   - [gray-explores] With Gray faults, across seeds: slow links, lossy
 //     links losing segments, connections reset at a heal, slow machines
 //     stalling, and slow disks all occur; none of the stalls, losses or
@@ -106,6 +106,15 @@
 //     pointer, an interface, an unexported field, in an array, a slice,
 //     a map's key or value; it reports none that is w, none inside
 //     the World's own types (package dst's), and it ends on cycles.
+//   - [mass-restart] With Faults.MassRestart, across seeds: each mass
+//     restart has at least ⌈Swarm.MassRestartShare·k⌉ of the k crashable
+//     machines (not NeverCrash, not lost) down at some instant within
+//     Swarm.MassRestartSpread of its start, and every one comes back;
+//     it takes no NeverCrash machine, and no machine goes down in the
+//     recovery phase; every machine an event takes down is killed with
+//     Faults.Kill alone and loses power without it. Without the fault none
+//     happens, and the four MassRestart fields are zero; every other
+//     Swarm field is what the seed draws without it.
 //   - [panic-fail-stop] With OnPanic, a panic it accepts kills only its
 //     machine's process (its other goroutines stop; its disk keeps the
 //     page cache) and the machine restarts; a panic it rejects, any panic
@@ -196,6 +205,15 @@ type Faults struct {
 	// though the next fsync succeeds, as on Linux (docs/fault-model.md).
 	// Machines marked NeverCrash are spared.
 	DiskErrors bool
+	// MassRestart takes most of the machines down at once, now and then,
+	// and brings each back after its own downtime: a power event (all
+	// within an instant), or a fast rolling deploy or a cluster-wide
+	// restart (spread over up to 10s). Lost and NeverCrash machines are
+	// spared. Each event is one kind: kills (the host stays up) with
+	// Faults.Kill, power loss with Faults.Crash, and with both, kills by
+	// Swarm.KillShare; with neither, power loss. Not in AllFaults, so
+	// existing sweeps keep their seeds.
+	MassRestart bool
 }
 
 // AllFaults enables every fault class but Loss, which only a system that
@@ -842,6 +860,12 @@ type Swarm struct {
 	WriteErrProb float64       // chance a write fails with EIO
 	ReadErrProb  float64       // chance a read fails with EIO
 
+	// Mass restarts (Faults.MassRestart; [mass-restart]).
+	MassRestartEvery  time.Duration // mean time between mass restarts (0: none)
+	MassRestartShare  float64       // share of the crashable machines each takes down, 0.5 to 1
+	MassRestartSpread time.Duration // the window an event's crashes fall in: 0 (a power event) to 10s
+	MassRestartDown   time.Duration // mean time each machine an event takes stays down
+
 	// Start is what clocks read at the start of the run: in half the seeds
 	// a random instant in 2030, in the other half just before a midnight,
 	// a month or a new year, so the boundary falls inside the run.
@@ -871,7 +895,8 @@ func (s Swarm) String() string {
 		fmt.Sprintf(", loss every ~%v, kills %.2f", s.LossEvery, s.KillShare) +
 		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f), udp blocked %.2f, mild %v}",
 			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor, s.UDPBlockShare, s.MildGray) +
-		fmt.Sprintf(", disk errors{full every ~%v, fsync %.3f, write %.4f, read %.4f}", s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb)
+		fmt.Sprintf(", disk errors{full every ~%v, fsync %.3f, write %.4f, read %.4f}", s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb) +
+		fmt.Sprintf(", mass restart every ~%v (share %.2f, spread %v, down ~%v)", s.MassRestartEvery, s.MassRestartShare, s.MassRestartSpread, s.MassRestartDown)
 }
 
 func (s Swarm) sched() string {
@@ -1022,6 +1047,41 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	if !noDiskHoles {
 		s = diskHoles(s, seed, f)
 	}
+	if !noMassRestart {
+		s = massRestart(s, seed, f)
+	}
+	return s
+}
+
+// noMassRestart skips massRestart's draws (tests of [mass-restart]
+// compare with it).
+var noMassRestart bool
+
+// massRestart draws the mass restarts: in two thirds of the seeds, one
+// every 2 to 8s on average; a quarter of them take every crashable
+// machine, the rest a share uniform in [0.5, 1); a quarter happen in an
+// instant (a power event), the rest spread over 10ms to 10s
+// (log-uniform); machines stay down 10ms to 3s on average (log-uniform).
+// It draws from a stream of its own, whatever Faults says, so every
+// other field is what the seed draws without it.
+func massRestart(s Swarm, seed uint64, f Faults) Swarm {
+	r := rand.New(rand.NewPCG(seed, 0x6d617373)) // "mass"
+	every := sometimes(r, time.Duration(2000+r.IntN(6000))*time.Millisecond)
+	all := r.IntN(4) == 0
+	share := 0.5 + 0.5*r.Float64()
+	instant := r.IntN(4) == 0
+	spread := time.Duration(10 * math.Pow(1000, r.Float64()) * float64(time.Millisecond))
+	down := time.Duration(10 * math.Pow(300, r.Float64()) * float64(time.Millisecond))
+	if !f.MassRestart || every == 0 {
+		return s
+	}
+	if all {
+		share = 1
+	}
+	if instant {
+		spread = 0
+	}
+	s.MassRestartEvery, s.MassRestartShare, s.MassRestartSpread, s.MassRestartDown = every, share, spread, down
 	return s
 }
 
@@ -1295,7 +1355,12 @@ func (h *Harness) nemesis(w *dst.World) {
 	schedule := func(after time.Duration, fn func()) {
 		events = append(events, event{w.Now().Add(after), fn})
 	}
-	var crash, partition, pause, outage, loss, fill func()
+	var crash, partition, pause, outage, loss, fill, mass func()
+	// massDown: down from a mass restart, and no ordinary crash since;
+	// ordinary crashes treat such a machine as up (it would be without
+	// mass restarts), so they pick, and draw, as they would without them.
+	massDown := map[*Machine]bool{}
+	rm := h.sim.S.Rand("nemesis/mass")
 	rf := h.sim.S.Rand("nemesis/full")
 	filled := map[*Machine]bool{}
 	fill = func() {
@@ -1333,9 +1398,10 @@ func (h *Harness) nemesis(w *dst.World) {
 		schedule(expFrom(ro, sw.OutageEvery), outage)
 	}
 	crash = func() {
-		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() || m.neverCrash })
+		alive := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.Dead() && !massDown[m] || m.lost || m.neverCrash })
 		if len(alive) > 0 {
 			m := alive[r.IntN(len(alive))]
+			delete(massDown, m) // this crash's restart owns it now
 			if sw.KillShare > 0 && rk.Float64() < sw.KillShare {
 				h.Logf("nemesis: kill %s", m.Name())
 				m.Kill()
@@ -1349,6 +1415,49 @@ func (h *Harness) nemesis(w *dst.World) {
 			})
 		}
 		schedule(exp(sw.CrashEvery), crash)
+	}
+	mass = func() {
+		cands := slices.DeleteFunc(slices.Clone(h.machines), func(m *Machine) bool { return m.lost || m.neverCrash })
+		n := int(math.Ceil(sw.MassRestartShare * float64(len(cands))))
+		kill := sw.KillShare > 0 && rm.Float64() < sw.KillShare
+		offsets := make([]time.Duration, len(cands))
+		for i := range offsets {
+			offsets[i] = time.Duration(rm.Float64() * float64(sw.MassRestartSpread))
+		}
+		picked := rm.Perm(len(cands))[:n]
+		// An event that wouldn't finish in the fault phase is skipped.
+		if n > 0 && !w.Now().Add(sw.MassRestartSpread).After(end) {
+			kind := "power loss"
+			if kill {
+				kind = "kills"
+			}
+			h.Logf("nemesis: mass restart (%d of %d within %v, %s)", n, len(cands), sw.MassRestartSpread, kind)
+			h.Sometimes("mass restart")
+			for _, i := range picked {
+				m := cands[i]
+				schedule(offsets[i], func() {
+					if m.Dead() || m.lost {
+						return // down already: it counts
+					}
+					massDown[m] = true
+					if kill {
+						h.Logf("nemesis: mass: kill %s", m.Name())
+						m.Kill()
+					} else {
+						h.Logf("nemesis: mass: crash %s", m.Name())
+						m.Crash()
+					}
+					schedule(expFrom(rm, sw.MassRestartDown), func() {
+						if massDown[m] { // else an ordinary crash's restart owns it
+							delete(massDown, m)
+							h.Logf("nemesis: mass: restart %s", m.Name())
+							m.Restart()
+						}
+					})
+				})
+			}
+		}
+		schedule(expFrom(rm, sw.MassRestartEvery), mass)
 	}
 	partition = func() {
 		names := []string{"test"}
@@ -1422,6 +1531,9 @@ func (h *Harness) nemesis(w *dst.World) {
 	}
 	if sw.FullEvery > 0 && slices.ContainsFunc(h.machines, func(m *Machine) bool { return !m.neverCrash }) {
 		schedule(expFrom(rf, sw.FullEvery), fill)
+	}
+	if sw.MassRestartEvery > 0 && slices.ContainsFunc(h.machines, func(m *Machine) bool { return !m.neverCrash }) {
+		schedule(expFrom(rm, sw.MassRestartEvery), mass)
 	}
 	if sw.LossEvery > 0 {
 		if h.canLose == nil {

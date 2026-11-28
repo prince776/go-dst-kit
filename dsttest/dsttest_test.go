@@ -601,10 +601,11 @@ func TestRealNeverInjects(t *testing.T) {
 }
 
 // Verifies: [fault-classes-independent]
-// Fails if: turning on pauses, service outages, fault points, losses or
-// gray failure changes when a seed's
+// Fails if: turning on pauses, service outages, fault points, losses,
+// gray failure or mass restarts changes when a seed's
 // crashes and partitions happen; or (negative) a different seed's schedule
-// is the same.
+// is the same, or (against vacuity) fewer than 10 ordinary crashes over 60
+// seeds happen while a mass restart has machines down.
 func TestFaultClassesIndependent(t *testing.T) {
 	schedule := func(seed uint64, f dsttest.Faults) string {
 		var b strings.Builder
@@ -630,7 +631,7 @@ func TestFaultClassesIndependent(t *testing.T) {
 	}
 	base := dsttest.Faults{Crash: true, Partition: true}
 	more := base
-	more.Pause, more.Services, more.Points, more.Loss, more.Gray = true, true, true, true, true
+	more.Pause, more.Services, more.Points, more.Loss, more.Gray, more.MassRestart = true, true, true, true, true, true
 	compared := 0
 	for seed := uint64(1); seed <= 10; seed++ {
 		a, b := schedule(seed, base), schedule(seed, more)
@@ -648,6 +649,53 @@ func TestFaultClassesIndependent(t *testing.T) {
 	if compared < 3 {
 		t.Fatalf("only %d of 10 seeds had crashes to compare", compared)
 	}
+
+	// Mass restarts take machines an ordinary crash could have picked:
+	// it must pick as if they were up. Against vacuity, some ordinary
+	// crashes happen while a mass restart has machines down.
+	massLines := func(seed uint64, f dsttest.Faults) (sched string, during int) {
+		var b strings.Builder
+		massDown := map[string]bool{}
+		dsttest.RunSeed(seed, dsttest.Options{Faults: f, FaultPhase: 10 * time.Second, RecoveryPhase: time.Second}, func(h *dsttest.Harness) {
+			for _, n := range []string{"a", "b", "c"} {
+				h.Machine(n, func(w *dst.World) {
+					for {
+						w.Sleep(10 * time.Millisecond)
+					}
+				})
+			}
+		}, func(format string, args ...any) {
+			line := fmt.Sprintf(format, args...)
+			f := strings.Fields(line)
+			switch {
+			case len(f) == 5 && f[1] == "nemesis:" && f[2] == "mass:" && (f[3] == "crash" || f[3] == "kill"):
+				massDown[f[4]] = true
+			case len(f) >= 3 && f[1] == "restart":
+				delete(massDown, f[2])
+			case len(f) == 4 && f[1] == "nemesis:" && (f[2] == "crash" || f[2] == "kill"):
+				if len(massDown) > 0 {
+					during++
+				}
+			}
+			if strings.Contains(line, "nemesis: crash") || strings.Contains(line, "nemesis: kill") || strings.Contains(line, "nemesis: restart") || strings.Contains(line, "partition") || strings.Contains(line, "heal") {
+				b.WriteString(line + "\n")
+			}
+		})
+		return b.String(), during
+	}
+	during := 0
+	for seed := uint64(1); seed <= 60; seed++ {
+		a, _ := massLines(seed, base)
+		b, d := massLines(seed, dsttest.Faults{Crash: true, Partition: true, MassRestart: true})
+		if a != b {
+			t.Fatalf("seed %d: crashes and partitions moved when mass restarts were turned on:\n%s---\n%s", seed, a, b)
+		}
+		during += d
+	}
+	if during < 10 {
+		t.Fatalf("vacuous: only %d ordinary crashes over 60 seeds happened while a mass restart had machines down", during)
+	}
+	t.Logf("%d ordinary crashes happened while a mass restart had machines down", during)
 }
 
 // Verifies: [call-fail-never-runs], [call-fail-after-runs], [call-latency-honours-ctx]

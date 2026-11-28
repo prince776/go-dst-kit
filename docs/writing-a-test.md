@@ -276,6 +276,7 @@ Model the service's documented failure modes, not only its happy path:
 |---|---|---|
 | Your machine loses power | machine crashes (`Faults.Crash`) | nothing: the code must recover on restart |
 | Your process dies (SIGKILL, a panic, OOM), the host stays up | process kills (`Faults.Kill`): the disk keeps unsynced writes | nothing: the code must recover on restart |
+| Most of your machines restart at once (a power event, a fast rolling deploy) | mass restarts (`Faults.MassRestart`; not in `AllFaults`) | nothing: the code must recover when few or none of its peers kept their state |
 | Your disk loses or tears unsynced writes | `w.FS()` (`Faults.Disk`) | nothing |
 | Your disk fills up, or fsyncs, writes and reads fail | `w.FS()` (`Faults.DiskErrors`): ENOSPC and EIO, a failed fsync losing the data | nothing: the code must handle the errors |
 | The network between your own machines | `w.Net()` (`Faults.Partition`, `Network`) | nothing |

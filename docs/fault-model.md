@@ -67,6 +67,18 @@ a law in the package that implements it, with a test.
   ports are refused until it listens again. (A power loss stays silent.)
 - **Restart** runs the machine's start function again on what its disk
   kept. It's a new incarnation: nothing in memory survives.
+- **Mass restarts** (`Faults.MassRestart`) take most machines down at
+  once, now and then: in two thirds of the seeds, every 2 to 8s on
+  average, each taking half to all of the machines that may crash (a
+  quarter of those seeds all of them), within a window from an instant (a
+  power event: a quarter of the seeds) up to 10s (a fast rolling deploy),
+  each machine back after its own downtime (10ms to 3s on average). An
+  event is all kills with `Faults.Kill`, all power losses with
+  `Faults.Crash`, and with both, kills by the seed's kill share. Ordinary
+  crashes pick as though the machines a mass restart took were up, so
+  turning mass restarts on moves no ordinary crash; the draws come from
+  streams of their own. It isn't in `AllFaults`, so existing sweeps keep
+  their seeds. A machine already down when its turn comes counts as taken.
 - A machine can also lose power inside an I/O call (below).
 - **Pause** stops a machine without crashing it, like SIGSTOP, a long GC
   pause or a VM stall: its goroutines don't run, so its sleeps and timers

@@ -507,6 +507,20 @@ check relied on, not how many polls); P5 stuck reports naming the lock
 holder, not only the waiter; P6 a doc recipe for checks conditioned on
 a fault envelope.
 
+**P1 built (Prince approved it 2026-11-28; on adopt/memberlist, awaiting
+review):** `Faults.MassRestart` and four `Swarm` fields
+(`MassRestartEvery`, `Share`, `Spread`, `Down`), drawn from a stream of
+their own ("mass") and run from another ("nemesis/mass"); law
+[mass-restart], `TestMassRestart`. Not in `AllFaults`, so existing
+sweeps keep their seeds (a decision for Prince). Ordinary crashes treat
+a machine a mass restart took as up, so they pick, and draw, as without
+mass restarts ([fault-classes-independent] now covers them, with a
+check that ordinary crashes do land during mass restarts). Hand-broken
+six ways, each caught: the share ignored, an event's crashes run into
+recovery, a NeverCrash machine taken, a mass field written into another
+(`Downtime`), the nemesis's mass draws on its main stream, and ordinary
+crashes skipping mass-downed machines.
+
 **dst.WaitGroup was wrong in production (2026-11-28, found by pebble's
 suite on the migrated tree):** outside a simulation, `Wait` returned as
 soon as the simulation's own counter read zero, but `Done` updates that
