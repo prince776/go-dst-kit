@@ -8,6 +8,12 @@
 //	conn, _ := dstgrpc.NewClient(w, "db-1:50051") // instead of grpc.NewClient
 //	client := pb.NewFooClient(conn)               // unchanged
 //
+// NewServerExact and NewClientExact take grpc's own options instead (what
+// dstmigrate rewrites grpc.NewServer and grpc.NewClient to): grpc's own
+// calls in the real World, with interceptors made by UnaryInterceptorOption
+// and its kin carried into simulation. NewClient adds insecure transport
+// credentials in the real World; NewClientExact adds nothing.
+//
 // In the real World these are grpc-go's server and client. In a simulated
 // World, Server implements grpc.ServiceRegistrar and the client implements
 // grpc.ClientConnInterface over the World's network with a compact framing
@@ -25,6 +31,14 @@
 //     answers.
 //   - [interceptors-run] Unary and stream interceptors wrap every call, on
 //     both sides.
+//   - [exact-is-grpc] NewServerExact and NewClientExact take grpc's own
+//     options and are grpc.NewServer and grpc.NewClient in the real World
+//     (no default added); in both Worlds a client without credentials is
+//     refused with grpc's error, a second unary server interceptor panics
+//     as in grpc, and the carried interceptors (UnaryInterceptorOption,
+//     WithChainUnaryInterceptorOption, ...) run in grpc's order.
+//   - [graceful-stop-waits] GracefulStop returns only after the calls
+//     being served have finished, and no new call is accepted.
 //
 // Depends on: dst, google.golang.org/grpc
 package dstgrpc
@@ -96,6 +110,7 @@ type Server struct {
 	stream   grpc.StreamServerInterceptor
 	services map[string]*service
 	lis      []net.Listener
+	calls    dst.WaitGroup // calls being served (GracefulStop waits)
 }
 
 type service struct {
@@ -152,7 +167,11 @@ func (s *Server) Serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
-		s.w.GoNamed("grpc "+c.RemoteAddr().String(), func() { s.serveCall(c) })
+		s.calls.Add(1)
+		s.w.GoNamed("grpc "+c.RemoteAddr().String(), func() {
+			defer s.calls.Done()
+			s.serveCall(c)
+		})
 	}
 }
 
@@ -165,6 +184,19 @@ func (s *Server) Stop() {
 	for _, ln := range s.lis {
 		ln.Close()
 	}
+}
+
+// GracefulStop is (*grpc.Server).GracefulStop: it stops accepting and
+// waits for the calls being served to finish.
+func (s *Server) GracefulStop() {
+	if s.real != nil {
+		s.real.GracefulStop()
+		return
+	}
+	for _, ln := range s.lis {
+		ln.Close()
+	}
+	s.calls.Wait()
 }
 
 // Frames: a type byte, a 4-byte length, the payload.
