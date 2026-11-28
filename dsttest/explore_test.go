@@ -211,12 +211,12 @@ func decoys(deadEnds *sync.Map) func(h *dsttest.Harness) {
 // that find nothing new are capped (ExploreRootBudget), so dead-end roots
 // rich in rare states don't soak up the forks, and the bug behind the
 // rare state A is found several times more often than without the cap
-// (expected about 10 failing runs against 2). Fails if a dead-end root is
+// (2000 runs: expected about 15 failing runs against 2). Fails if a dead-end root is
 // forked more than the budget, if the cap doesn't win clearly, or if a
 // failing path doesn't replay.
 func TestExploreSpreadsOverRoots(t *testing.T) {
 	o := exploreOpts
-	o.Explore, o.KeepGoing, o.ExploreBy = 1000, true, "states"
+	o.Explore, o.KeepGoing, o.ExploreBy = 2000, true, "states"
 	explore := func(rootBudget int) (dsttest.Report, int) {
 		var dead sync.Map
 		o.ExploreRootBudget = rootBudget
@@ -240,12 +240,77 @@ func TestExploreSpreadsOverRoots(t *testing.T) {
 	if most > 8 {
 		t.Errorf("a dead-end root was forked %d times, want at most 8 (forks finding nothing new)", most)
 	}
-	if n := len(capped.Failed); n < 3 || n < 3*len(uncapped.Failed) {
+	if n := len(capped.Failed); n < 5 || n < 3*len(uncapped.Failed) {
 		t.Fatalf("capped %d failing runs, uncapped %d: want several times more with root budgets", n, len(uncapped.Failed))
 	}
 	f := capped.Failed[0]
 	var dead sync.Map
 	if r := dsttest.RunPath(f.Path, o, decoys(&dead), nil); r.Err == nil {
+		t.Errorf("path %v passed on replay", f.Path)
+	}
+}
+
+// gates is a bug behind six gates in a row (moonpool's dungeon): every ten
+// rounds the run tries the next gate, passing it with probability 1/4; a
+// run that fails a gate is doomed (it tries no more), and passing the
+// sixth fails: 1 run in 4096. The abstract state carries the level and
+// noise (64 values drawn each round), so states are many and each rare;
+// the level alone is a progress quantity.
+func gates(h *dsttest.Harness) {
+	level, noise, doomed := int64(0), uint64(0), false
+	h.State(func() uint64 { return uint64(level)<<8 | noise })
+	h.Progress("level", func() int64 { return level })
+	h.Go(func(w *dst.World) {
+		for round := range 80 {
+			if round%10 == 9 && !doomed {
+				if w.Rand().IntN(4) != 0 {
+					doomed = true
+				} else if level++; level == 6 {
+					h.Fail(errors.New("past the sixth gate"))
+				}
+			}
+			noise = uint64(w.Rand().IntN(64))
+			w.Sleep(time.Millisecond)
+		}
+	})
+}
+
+// Verifies: [progress-explored]
+// Exploring by progress climbs a high-water mark: past six gates of 1 in 4
+// each, it fails many times in 600 runs where a sweep expects 0.15, alone
+// and alongside states (whose noise would spread the forks), and more
+// often than by states alone. Fails if it doesn't, if the first failure
+// isn't a fork at a step, if its path doesn't replay, or if the sweep's
+// report doesn't carry the highest level reached.
+func TestExploreByProgress(t *testing.T) {
+	o := exploreOpts
+	o.Seeds, o.Explore, o.KeepGoing = 600, 600, true
+	sw := dsttest.Sweep(o, gates)
+	if top := sw.Progress["level"]; top < 3 || top > 6 {
+		t.Errorf("the sweep's highest level is %d, want 3 to 6", top)
+	}
+	o.ExploreBy = "states"
+	byStates := dsttest.Explore(o, gates)
+	o.ExploreBy = "progress"
+	byProgress := dsttest.Explore(o, gates)
+	o.ExploreBy = "states,progress"
+	both := dsttest.Explore(o, gates)
+	t.Logf("failing runs: by progress %d, by states and progress %d, by states %d, sweep %d",
+		len(byProgress.Failed), len(both.Failed), len(byStates.Failed), len(sw.Failed))
+	for _, c := range []struct {
+		name string
+		rep  dsttest.Report
+	}{{"progress", byProgress}, {"states and progress", both}} {
+		if n := len(c.rep.Failed); n < 5 || n < 3*len(sw.Failed) || n <= len(byStates.Failed) {
+			t.Fatalf("by %s %d failing runs, by states %d, sweep %d: want several times the sweep's, and more than by states",
+				c.name, n, len(byStates.Failed), len(sw.Failed))
+		}
+	}
+	f := byProgress.Failed[0]
+	if len(f.Path.Forks) == 0 || f.Path.Forks[len(f.Path.Forks)-1].Step == 0 {
+		t.Errorf("the failure %v isn't a fork at a step", f.Path)
+	}
+	if r := dsttest.RunPath(f.Path, o, gates, nil); r.Err == nil {
 		t.Errorf("path %v passed on replay", f.Path)
 	}
 }

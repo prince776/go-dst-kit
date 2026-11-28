@@ -72,6 +72,13 @@
 //     its runs reached, and exploring by states forks from rarely reached
 //     ones: a bug after a rare state no marker or interleaving shows is
 //     found several times more often than by a sweep or the other signals.
+//   - [progress-explored] Each run records where its high-water mark of
+//     each progress quantity (Harness.Progress) first reached each level,
+//     a sweep reports each quantity's highest value, and exploring by
+//     progress forks just after a level is set, progress drawn before
+//     states and both before markers and pairs: a bug behind gates a run
+//     is doomed by failing is found where a sweep and exploring by states
+//     find nothing.
 //   - [explore-spreads] Exploration mixes fresh seeds (half by default)
 //     with forks, and doesn't dig into one root seed for long: forks of a
 //     root that find nothing new are capped (ExploreRootBudget), and a
@@ -141,6 +148,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"math"
+	"math/bits"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -292,8 +300,9 @@ type Options struct {
 	// ExploreBy is what guided runs steer by, a comma-separated set of
 	// "markers" (Sometimes), "order" (pairs of markers in the order runs
 	// first reached them), "pairs" (interleaving pairs: see
-	// Result.FirstPairs) and "states" (abstract states: Harness.State).
-	// Default all four (-dst.explore.by).
+	// Result.FirstPairs), "states" (abstract states: Harness.State) and
+	// "progress" (high-water marks: Harness.Progress). Default all five
+	// (-dst.explore.by).
 	ExploreBy string
 	// recordPairs makes runs record interleaving pairs (set by Explore).
 	recordPairs bool
@@ -372,7 +381,7 @@ func (o *Options) defaults() {
 		o.ExploreBy = *flagExploreBy
 	}
 	if o.ExploreBy == "" {
-		o.ExploreBy = "markers,order,pairs,states"
+		o.ExploreBy = "markers,order,pairs,states,progress"
 	}
 	if o.Parallel == 0 {
 		o.Parallel = runtime.GOMAXPROCS(0)
@@ -440,13 +449,20 @@ type Harness struct {
 	states      []func() uint64
 	firstStates map[uint64]uint64
 	lastStates  []uint64 // each State function's value after the last step
-	final       []named[func(w *dst.World) error]
-	cover       map[string]int
-	points      *points.Registry
-	expect      []string
-	workload    []*sched.Task
-	seed        uint64
-	features    map[string]bool
+	// progress are the progress quantities (Progress); progressTop is each
+	// one's high-water level so far, firstProgress the step each level was
+	// first reached at.
+	progress      []named[func() int64]
+	progressTop   []int
+	firstProgress map[string]uint64
+	progressMax   map[string]int64
+	final         []named[func(w *dst.World) error]
+	cover         map[string]int
+	points        *points.Registry
+	expect        []string
+	workload      []*sched.Task
+	seed          uint64
+	features      map[string]bool
 }
 
 type named[T any] struct {
@@ -730,6 +746,38 @@ func (h *Harness) Swarm() Swarm { return h.swarm }
 // Several State functions are kept apart: equal values from two of them
 // are two states.
 func (h *Harness) State(fn func() uint64) { h.states = append(h.states, fn) }
+
+// Progress registers a quantity a run can push toward trouble, which
+// exploration climbs: fn returns it now (for a cluster, say, how long it
+// has had no leader, or how many stress conditions hold at once). It runs
+// after every scheduling step, as State does (it may read the system's
+// state but must not use the World; keep it cheap). A run records the
+// step at which its high-water mark first reached each level
+// (Result.FirstProgress; levels are the value itself up to 8, then four
+// per doubling), a sweep reports the highest value each quantity reached
+// (Report.Progress), and exploration ("progress" in ExploreBy) forks just
+// after a run sets a level, preferring progress to state novelty and both
+// to markers and interleavings (see Explore). Choose quantities a bug is
+// more likely after: a high-water mark that doesn't make failure likelier
+// steers exploration away from it.
+func (h *Harness) Progress(name string, fn func() int64) {
+	h.progress = append(h.progress, named[func() int64]{name, fn})
+}
+
+// Elapsed is the simulated time since the run started. Unlike the World's
+// clock it may be read between steps (in Always, State and Progress).
+func (h *Harness) Elapsed() time.Duration { return h.sim.S.Now() }
+
+// progressLevel buckets a high-water mark: the value itself up to 8, then
+// four levels per doubling, so a quantity measured in milliseconds or in
+// entries has tens of levels, not thousands.
+func progressLevel(v int64) int {
+	if v <= 8 {
+		return int(max(v, 0))
+	}
+	e := bits.Len64(uint64(v)) - 3 // v >> e is 4..7
+	return 8 + 4*(e-1) + int(v>>e) - 4
+}
 
 // Always registers an invariant checked after every scheduling step. It
 // runs on the scheduler, between steps: it may read the system's state but
@@ -1221,6 +1269,11 @@ type Result struct {
 	// FirstStates is the step at which each abstract state (Harness.State)
 	// was first reached in the run, keyed by the state's hash.
 	FirstStates map[uint64]uint64
+	// FirstProgress is the step at which each progress quantity's
+	// high-water mark (Harness.Progress) first reached each level, keyed by
+	// name, NUL, level; ProgressMax is each quantity's highest value.
+	FirstProgress map[string]uint64
+	ProgressMax   map[string]int64
 }
 
 // RunSeed runs one seed and returns its result. logf, if set, receives the
@@ -1266,6 +1319,29 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 			for _, a := range h.always {
 				if err := a.fn(); err != nil {
 					return &InvariantError{Name: a.name, Err: err}
+				}
+			}
+			if len(h.progressTop) != len(h.progress) {
+				h.progressTop = make([]int, len(h.progress))
+				for i := range h.progressTop {
+					h.progressTop[i] = -1
+				}
+			}
+			for i, p := range h.progress {
+				v := p.fn()
+				lv := progressLevel(v)
+				for lv > h.progressTop[i] {
+					h.progressTop[i]++
+					if h.firstProgress == nil {
+						h.firstProgress = map[string]uint64{}
+					}
+					h.firstProgress[p.name+"\x00"+strconv.Itoa(h.progressTop[i])] = h.sim.S.Steps()
+				}
+				if v > h.progressMax[p.name] {
+					if h.progressMax == nil {
+						h.progressMax = map[string]int64{}
+					}
+					h.progressMax[p.name] = v
 				}
 			}
 			if len(h.lastStates) != len(h.states) {
@@ -1327,7 +1403,7 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
 		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features,
 		Path: path, Forked: h.sim.S.ForksApplied(), ForkSteps: h.sim.S.ForkSteps(), FirstMarks: h.sim.S.FirstMarks(), FirstPairs: h.sim.S.FirstPairs(),
-		FirstStates: h.firstStates}
+		FirstStates: h.firstStates, FirstProgress: h.firstProgress, ProgressMax: h.progressMax}
 }
 
 // unfinished reports workload goroutines (and goroutines they started)
@@ -1670,8 +1746,9 @@ type Report struct {
 	Failed           []Result
 	Nondeterministic []Divergence
 	Coverage         map[string]int
-	NeverHappened    []string // Expect-ed behaviours no seed reached
-	States           int      // distinct abstract states the runs reached (Harness.State)
+	NeverHappened    []string         // Expect-ed behaviours no seed reached
+	States           int              // distinct abstract states the runs reached (Harness.State)
+	Progress         map[string]int64 // each progress quantity's highest value in any run (Harness.Progress)
 	SimTime          time.Duration
 	Steps            uint64
 	Wall             time.Duration
@@ -1797,6 +1874,12 @@ func aggregate(opts Options, results []Result, divs []*Divergence) Report {
 		}
 		for k := range r.FirstStates {
 			states[k] = true
+		}
+		for k, v := range r.ProgressMax {
+			if rep.Progress == nil {
+				rep.Progress = map[string]int64{}
+			}
+			rep.Progress[k] = max(rep.Progress[k], v)
 		}
 		if r.Err != nil {
 			rep.Failed = append(rep.Failed, r)

@@ -32,6 +32,9 @@ var (
 //   - "states": an abstract state the test reports (Harness.State), such as
 //     a cluster's roles and configurations. Forks go just after the step a
 //     run first reached it (a step anchor).
+//   - "progress": a level of a progress quantity's high-water mark
+//     (Harness.Progress): a run that pushed a quantity higher than before.
+//     Forks go just after the step it first reached the level.
 //   - "pairs": an interleaving pair (Result.FirstPairs): one goroutine
 //     handing off at one code site and the next resuming at another, an
 //     ordering of the program's goroutines. Forks go just after the step
@@ -41,15 +44,20 @@ var (
 // chosen from the results of the earlier ones only, so an exploration
 // replays from its options alone, whatever the parallelism, and every run
 // in it is a path that replays on its own. A run is a fresh seed with
-// probability ExploreFresh; otherwise a feature is drawn with weight
+// probability ExploreFresh; otherwise a class of feature is drawn, progress
+// first (weight 4), then states (2), then markers, order and pairs (1),
+// among the classes with a feature open (moonpool's priority: progress over
+// state novelty over coverage), and within it a feature with weight
 // 1/(runs that had it), AFLFast's power schedule, among features forked
 // from fewer than ExploreBudget times, and the run forks one of the first
 // few runs that had it after their own last fork, from distinct root
-// seeds. Fault-point firings are coverage only. Forks keep the root seed's
-// fault mix and features, so exploration doesn't dig into one root for
-// long: a root is forked at most ExploreRootBudget times without result,
-// a fork counting against it only if it reached nothing no earlier run had
-// (a root whose forks keep finding new features stays open).
+// seeds (except for progress levels, where a lineage climbing level by
+// level is the point). Fault-point firings are coverage only. Forks keep
+// the root seed's fault mix and features, so exploration doesn't dig into
+// one root for long: a root is forked at most ExploreRootBudget times
+// without result. A fork that reached something no earlier run had
+// refunds its use, and one that climbed a progress level renews the
+// root's budget (a climb may cost several barren forks per level).
 //
 // It runs opts.Explore runs (default opts.Seeds) and reports as Sweep
 // does, Results in run order.
@@ -94,21 +102,34 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 				batch[i] = fresh()
 				continue
 			}
-			// Draw a feature: weight 1/reached, under budget.
-			total := 0.0
+			// Draw a class (by priority, among those with a feature open),
+			// then a feature in it: weight 1/reached, under budget.
+			var classW [3]float64
 			for _, name := range names {
-				if f := feats[name]; open(f) {
-					total += 1 / float64(f.reached)
+				if open(feats[name]) {
+					classW[featureClass(name)] = classWeight[featureClass(name)]
 				}
 			}
-			if total == 0 {
+			cw := classW[0] + classW[1] + classW[2]
+			if cw == 0 {
 				batch[i] = fresh()
 				continue
+			}
+			cls, y := 0, rng.Float64()*cw
+			for cls < 2 && y >= classW[cls] {
+				y -= classW[cls]
+				cls++
+			}
+			total := 0.0
+			for _, name := range names {
+				if f := feats[name]; open(f) && featureClass(name) == cls {
+					total += 1 / float64(f.reached)
+				}
 			}
 			x := rng.Float64() * total
 			for _, name := range names {
 				f := feats[name]
-				if !open(f) {
+				if !open(f) || featureClass(name) != cls {
 					continue
 				}
 				if x -= 1 / float64(f.reached); x < 0 {
@@ -162,16 +183,30 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 				// fork (a fork applies only after the earlier ones) with
 				// forks to spare: forks pick among them, so they don't all
 				// descend from one root.
+				// Carriers from distinct roots, except progress levels: a
+				// lineage climbing level by level is the point of them.
 				if len(f.from) < carriers && at > last && len(r.Path.Forks) < maxForks &&
-					!slices.ContainsFunc(f.from, func(c carrier) bool { return c.path.Seed == r.Path.Seed }) {
+					(featureClass(name) == 0 || !slices.ContainsFunc(f.from, func(c carrier) bool { return c.path.Seed == r.Path.Seed })) {
 					f.from = append(f.from, carrier{r.Path, fk})
 				}
 			}
 			for _, ft := range runFeatures(r, by) {
 				note(ft.name, ft.at, ft.fork)
 			}
-			if novel && len(r.Path.Forks) > 0 {
-				rootUses[r.Path.Seed]-- // the fork found something new: its root stays open
+			// A fork that climbed (a progress level first reached after its
+			// fork point) renews its root's budget: each level of a climb
+			// may cost several barren forks. One that found any other
+			// feature new refunds its own use.
+			climbed := false
+			for _, at := range r.FirstProgress {
+				climbed = climbed || at > last
+			}
+			switch {
+			case len(r.Path.Forks) == 0:
+			case climbed:
+				rootUses[r.Path.Seed] = 0
+			case novel:
+				rootUses[r.Path.Seed]--
 			}
 		}
 		if stop {
@@ -181,6 +216,20 @@ func Explore(opts Options, setup func(h *Harness)) Report {
 	rep := aggregate(opts, results, divs)
 	rep.Wall = time.Since(start)
 	return rep
+}
+
+// Feature classes, in priority order, and their draw weights.
+var classWeight = [3]float64{4, 2, 1}
+
+// featureClass is a feature's class: 0 progress, 1 states, 2 the rest.
+func featureClass(name string) int {
+	switch {
+	case strings.HasPrefix(name, "g:"):
+		return 0
+	case strings.HasPrefix(name, "s:"):
+		return 1
+	}
+	return 2
 }
 
 type runFeature struct {
@@ -212,6 +261,12 @@ func runFeatures(r Result, by map[string]bool) []runFeature {
 		for _, k := range slices.Sorted(maps.Keys(r.FirstStates)) {
 			at := r.FirstStates[k]
 			out = append(out, runFeature{"s:" + strconv.FormatUint(k, 16), at, Fork{Step: at}})
+		}
+	}
+	if by["progress"] {
+		for _, k := range slices.Sorted(maps.Keys(r.FirstProgress)) {
+			at := r.FirstProgress[k]
+			out = append(out, runFeature{"g:" + k, at, Fork{Step: at}})
 		}
 	}
 	if by["pairs"] {
