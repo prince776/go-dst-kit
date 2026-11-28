@@ -53,6 +53,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prince776/go-dst-kit/internal/points"
@@ -172,6 +173,12 @@ type Scheduler struct {
 	queues    map[any][]*Task
 	ids       int
 	stopped   bool
+	// The watchdog (a goroutine per Run) reads these: the task holding the
+	// baton (nil between steps) and a count of steps begun, so a step that
+	// never hands back is noticed without a timer reset on every step.
+	running atomic.Pointer[Task]
+	stepGen atomic.Uint64
+	permBuf []int // Perm's scratch, reused (see Perm)
 }
 
 // Machine is a group of tasks that live and die together: one process.
@@ -320,15 +327,16 @@ type Task struct {
 	Machine *Machine
 	// Parent is the task that spawned this one (nil if spawned from
 	// outside any task).
-	Parent  *Task
-	s       *Scheduler
-	wake    chan struct{}
-	state   state
-	killed  bool
-	blocked string
-	goid    uint64
-	prio    float64 // PCT priority (higher runs first)
-	site    uint64  // where it last handed off, or started (Options.Pairs)
+	Parent     *Task
+	s          *Scheduler
+	wake       chan struct{}
+	state      state
+	killed     bool
+	blocked    string
+	goid       uint64
+	prio       float64       // PCT priority (higher runs first)
+	sleepUntil time.Duration // with blocked == sleeping
+	site       uint64        // where it last handed off, or started (Options.Pairs)
 }
 
 // Sched returns the task's scheduler.
@@ -880,7 +888,8 @@ func (s *Scheduler) Sleep(d time.Duration) {
 		return
 	}
 	s.At(s.now+d, func() { s.Ready(t) })
-	s.Park(fmt.Sprintf("sleep until %v", s.now+d))
+	t.sleepUntil = s.now + d
+	s.Park(sleeping)
 }
 
 // Crash kills every task of m: they never run again, their deferred
@@ -977,8 +986,9 @@ func (s *Scheduler) Resume(m *Machine) {
 // Run runs tasks until done reports true, a task fails, or the run
 // deadlocks. done is checked between steps.
 func (s *Scheduler) Run(done func() bool) error {
-	wd := time.NewTimer(time.Hour)
-	defer wd.Stop()
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go s.watch(stopWatch)
 	s.loopGoid = goid()
 	for !s.failed() && !done() {
 		if s.opts.MaxSteps > 0 && s.steps >= s.opts.MaxSteps {
@@ -1006,25 +1016,25 @@ func (s *Scheduler) Run(done func() bool) error {
 			}
 			t.state = running
 			s.cur = t
+			s.stepGen.Add(1)
+			s.running.Store(t)
 			select {
 			case t.wake <- struct{}{}:
 			case <-s.abort:
+				s.running.Store(nil)
 				s.stopped, s.cur = true, nil
 				return s.Err()
 			}
-			wd.Reset(s.opts.Watchdog)
 			select {
 			case <-s.abort:
+				// A misuse, or the watchdog: the task may still hold the
+				// baton, so Shutdown must not wait for it.
+				s.running.Store(nil)
 				s.stopped, s.cur = true, nil
 				return s.Err()
 			case <-s.handoff:
-			case <-wd.C:
-				s.Fail(fmt.Errorf("goroutine %s kept running for %v of real time without reaching a World operation: it is probably blocked outside the World (a raw channel, sync primitive, time.Sleep, or I/O) or looping forever", t, s.opts.Watchdog))
-				s.stopped = true // it may still hold the baton; Shutdown must not wait for it
-				s.cur = nil
-				return s.Err()
 			}
-			wd.Stop()
+			s.running.Store(nil)
 			s.cur = nil
 			if !s.spinStep {
 				s.wakeSpinners()
@@ -1056,6 +1066,34 @@ func (s *Scheduler) Run(done func() bool) error {
 	return s.Err()
 }
 
+// watch is the watchdog: it fails the run when one step has held the baton
+// for opts.Watchdog of real time (its goroutine is blocked outside the
+// World, or loops without a World operation). It samples every quarter of
+// the limit, so it notices within 1.25 times it.
+func (s *Scheduler) watch(stop <-chan struct{}) {
+	tick := time.NewTicker(s.opts.Watchdog / 4)
+	defer tick.Stop()
+	var gen uint64
+	var since time.Time
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-tick.C:
+			t, g := s.running.Load(), s.stepGen.Load()
+			if t == nil || g != gen {
+				gen, since = g, now
+				continue
+			}
+			if now.Sub(since) >= s.opts.Watchdog {
+				s.Fail(fmt.Errorf("goroutine %s kept running for %v of real time without reaching a World operation: it is probably blocked outside the World (a raw channel, sync primitive, time.Sleep, or I/O) or looping forever", t, s.opts.Watchdog))
+				s.abortOnce.Do(func() { close(s.abort) })
+				return
+			}
+		}
+	}
+}
+
 func (s *Scheduler) afterStep() {
 	if s.opts.AfterStep == nil || s.failed() {
 		return
@@ -1079,7 +1117,7 @@ func (s *Scheduler) deadlock() error {
 	fmt.Fprintf(&b, "deadlock at t=%v: no goroutine can run and no timer is pending", s.now)
 	for _, t := range s.tasks {
 		if t.state != finished && !t.killed {
-			why := t.blocked
+			why := t.why()
 			if t.Machine.paused {
 				why = "paused machine (never resumed)"
 			}
@@ -1156,12 +1194,37 @@ func (t *Task) Done() bool { return t.state == finished }
 func (s *Scheduler) Choose(n int) int { return s.rng.IntN(n) }
 
 // Perm returns a seeded permutation of [0, n).
-func (s *Scheduler) Perm(n int) []int { return s.rng.Perm(n) }
+//
+// It draws exactly what (*rand.Rand).Perm draws, into a slice the
+// scheduler reuses: the result is valid until the next Perm (a caller uses
+// it before its next scheduling point).
+func (s *Scheduler) Perm(n int) []int {
+	if cap(s.permBuf) < n {
+		s.permBuf = make([]int, n)
+	}
+	p := s.permBuf[:n]
+	for i := range p {
+		p[i] = i
+	}
+	s.rng.Shuffle(n, func(i, j int) { p[i], p[j] = p[j], p[i] })
+	return p
+}
 
 // Blocked describes what a parked task waits for ("" if not parked).
 func (t *Task) Blocked() string {
 	if t.state != parked {
 		return ""
+	}
+	return t.why()
+}
+
+// sleeping is Sleep's wait: Blocked formats it with the wake-up time only
+// when asked (deadlock reports), not on every Sleep.
+const sleeping = "sleep until"
+
+func (t *Task) why() string {
+	if t.blocked == sleeping {
+		return fmt.Sprintf("sleep until %v", t.sleepUntil)
 	}
 	return t.blocked
 }
