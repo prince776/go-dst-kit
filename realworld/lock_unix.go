@@ -12,13 +12,13 @@ import (
 )
 
 // LockFile is dst.LockFile: flock(2), LOCK_EX|LOCK_NB, on the file opened
-// in the root; unlock releases it and closes the file.
+// (created if need be) by name; unlock releases it and closes the file.
 func (f *osFS) LockFile(name string) (func() error, error) {
-	r, err := f.r()
+	p, err := f.path("flock", name)
 	if err != nil {
 		return nil, err
 	}
-	file, err := openInRoot(r, name, os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}

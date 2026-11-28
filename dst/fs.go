@@ -6,8 +6,9 @@ import (
 )
 
 // FS is a filesystem with the os package's semantics. The real World's is
-// the operating system's, rooted at a directory; a simulated World's is an
-// in-memory disk with a page cache that loses unsynced data on a crash.
+// the os package itself (rooted at a directory only when the World was
+// made with one); a simulated World's is an in-memory disk, rooted, with
+// a page cache that loses unsynced data on a crash.
 //
 // Durability follows POSIX: written data survives a crash only after the
 // file's Sync, and a created, renamed or removed name only after a Sync of

@@ -6,144 +6,148 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/prince776/go-dst-kit/dst"
 )
 
-// osFS is the operating system's filesystem, confined to a directory with
-// os.Root (names can't escape it).
+// osFS is the operating system's filesystem, through the os package.
+// Unrooted (dir empty, the production World) every name reaches os
+// exactly as the program gave it. Rooted, names are relative to dir and
+// checked as a simulated disk checks them; the check is lexical only, so
+// a symbolic link inside dir can still lead outside it.
 type osFS struct {
-	dir  string
-	once sync.Once
-	root *os.Root
-	err  error
+	dir string // "" for unrooted; else absolute
 }
 
 func newFS(dir string) *osFS {
 	if dir == "" {
-		dir = "."
+		return &osFS{}
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs // a later Chdir doesn't move the root
 	}
 	return &osFS{dir: dir}
 }
 
-func (f *osFS) r() (*os.Root, error) {
-	f.once.Do(func() { f.root, f.err = os.OpenRoot(f.dir) })
-	return f.root, f.err
+// errEscapes is what a rooted FS returns for an absolute name or one
+// that leaves the root, as a simulated disk does.
+var errEscapes = errors.New("path escapes from parent")
+
+// path is the operating system's name for name: name itself when
+// unrooted; under the root, after the simulated disk's check, when
+// rooted.
+func (f *osFS) path(op, name string) (string, error) {
+	if f.dir == "" {
+		return name, nil
+	}
+	if name == "" {
+		return "", &fs.PathError{Op: op, Path: name, Err: fs.ErrNotExist}
+	}
+	c := path.Clean(name)
+	if path.IsAbs(c) || c == ".." || strings.HasPrefix(c, "../") {
+		return "", &fs.PathError{Op: op, Path: name, Err: errEscapes}
+	}
+	return filepath.Join(f.dir, filepath.FromSlash(c)), nil
 }
 
 func (f *osFS) OpenFile(name string, flag int, perm fs.FileMode) (dst.File, error) {
-	r, err := f.r()
+	p, err := f.path("open", name)
 	if err != nil {
 		return nil, err
 	}
-	file, err := openInRoot(r, name, flag, perm)
+	file, err := os.OpenFile(p, flag, perm)
 	if err != nil {
 		return nil, err // not a typed-nil *os.File
 	}
-	return &rootFile{file, name}, nil
-}
-
-// openInRoot is r.OpenFile, retrying a create that fails with ENOENT a
-// few times: a workaround for macOS's kernel ([create-like-os]), to drop
-// once macOS is fixed. os.Root opens with openat(2), and on macOS (26.3
-// at least) concurrent openat creates of one name fail spuriously with
-// ENOENT (hundreds in 2,400 creates by 8 goroutines; open(2), which
-// os.OpenFile uses, never does), so without the retry the real World's
-// FS would fail where the os package doesn't. One retry was always
-// enough; an ENOENT that persists (a missing directory) is returned as
-// it is.
-func openInRoot(r *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
-	file, err := r.OpenFile(name, flag, perm)
-	for try := 0; err != nil && flag&os.O_CREATE != 0 && try < 3 && errors.Is(err, fs.ErrNotExist); try++ {
-		file, err = r.OpenFile(name, flag, perm)
+	if f.dir == "" {
+		return file, nil // the *os.File itself: its Name, its methods
 	}
-	return file, err
+	return &rootedFile{file, name}, nil
 }
 
-// rootFile is a file opened in the root. Its Name is the name it was
-// opened with, as os.File's is (os.Root's files report the root's path
-// joined to it, which the root then rejects as escaping).
-type rootFile struct {
+// rootedFile is a file a rooted FS opened. Its Name is the name it was
+// opened with, as os.File's is, not the path under the root.
+type rootedFile struct {
 	*os.File
 	name string
 }
 
-func (f *rootFile) Name() string { return f.name }
+func (f *rootedFile) Name() string { return f.name }
 
 func (f *osFS) Mkdir(name string, perm fs.FileMode) error {
-	r, err := f.r()
+	p, err := f.path("mkdir", name)
 	if err != nil {
 		return err
 	}
-	return r.Mkdir(name, perm)
+	return os.Mkdir(p, perm)
 }
 
 func (f *osFS) MkdirAll(name string, perm fs.FileMode) error {
-	r, err := f.r()
+	p, err := f.path("mkdir", name)
 	if err != nil {
 		return err
 	}
-	err = r.MkdirAll(name, perm)
-	// A workaround for Go before 1.25.7 ([create-like-os]), to drop once
-	// go.mod requires it: os.Root.MkdirAll failed on a directory on the
-	// way that another goroutine created meanwhile.
-	// Each pass gets at least one directory further, so one per path
-	// element is enough; a file in the way still fails.
-	for try := strings.Count(name, "/"); try >= 0 && errors.Is(err, fs.ErrExist); try-- {
-		err = r.MkdirAll(name, perm)
-	}
-	return err
+	return os.MkdirAll(p, perm)
 }
 
 func (f *osFS) Remove(name string) error {
-	r, err := f.r()
+	p, err := f.path("remove", name)
 	if err != nil {
 		return err
 	}
-	return r.Remove(name)
+	return os.Remove(p)
 }
 
 func (f *osFS) RemoveAll(name string) error {
-	r, err := f.r()
+	p, err := f.path("removeall", name)
 	if err != nil {
 		return err
 	}
-	return r.RemoveAll(name)
+	return os.RemoveAll(p)
 }
 
 func (f *osFS) Rename(oldname, newname string) error {
-	r, err := f.r()
+	o, err := f.path("rename", oldname)
 	if err != nil {
 		return err
 	}
-	return r.Rename(oldname, newname)
+	n, err := f.path("rename", newname)
+	if err != nil {
+		return err
+	}
+	return os.Rename(o, n)
 }
 
-// Link is os.Link inside the root (dst.Linker).
+// Link is os.Link (dst.Linker).
 func (f *osFS) Link(oldname, newname string) error {
-	r, err := f.r()
+	o, err := f.path("link", oldname)
 	if err != nil {
 		return err
 	}
-	return r.Link(oldname, newname)
+	n, err := f.path("link", newname)
+	if err != nil {
+		return err
+	}
+	return os.Link(o, n)
 }
 
 func (f *osFS) Stat(name string) (fs.FileInfo, error) {
-	r, err := f.r()
+	p, err := f.path("stat", name)
 	if err != nil {
 		return nil, err
 	}
-	return r.Stat(name)
+	return os.Stat(p)
 }
 
 func (f *osFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	r, err := f.r()
+	p, err := f.path("open", name)
 	if err != nil {
 		return nil, err
 	}
-	return fs.ReadDir(r.FS(), name)
+	return os.ReadDir(p)
 }
 
 type osNet struct{}

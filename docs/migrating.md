@@ -23,9 +23,17 @@ func NewServer(w *dst.World, cfg Config) *Server { return &Server{w: w} }
 In `main`, the World is real:
 
 ```go
-w := realworld.New(realworld.Options{Dir: *dataDir}) // w.FS() is rooted at dataDir
+w := realworld.New(realworld.Options{}) // w.FS() is the os package: names as the code gives them
 srv := NewServer(w, cfg)
 ```
+
+In production leave `Dir` empty: the World's filesystem is then exactly
+the os package (absolute names, names relative to the working directory,
+`..`), so migrated code opens what it opened before. `Dir` roots the
+filesystem for tests and tools, and then refuses absolute and escaping
+names as a simulated disk does: a simulated machine's disk is its own,
+so code meant for both Worlds uses names relative to a data directory it
+is given.
 
 In tests, `dsttest` gives each simulated machine its own World.
 
