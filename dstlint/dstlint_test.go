@@ -16,3 +16,14 @@ import (
 func TestAnalyzer(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), dstlint.Analyzer, "sim", "plain")
 }
+
+// Verifies: [flags-unset-world], [respects-ok]
+// Fails if: a literal leaving its World unset while one is at hand goes
+// unreported (from a parameter, or a receiver two fields away, or with a
+// method called on it that isn't a setter), or one is reported that sets
+// it (in the literal, unkeyed, by a later assignment or setter, directly
+// or through another setter), has no World at hand but its own variable,
+// is excused with //dst:ok, or is in a _test.go file.
+func TestUnsetWorld(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), dstlint.Analyzer, "unsetworld")
+}

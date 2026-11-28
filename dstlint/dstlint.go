@@ -27,6 +27,14 @@
 //     package: it is the last resort for code no World reaches.
 //   - [respects-ok] A //dst:ok comment on or above a line suppresses its
 //     report.
+//   - [flags-unset-world] In an opted-in package's non-test files, a keyed
+//     literal of a struct with a *dst.World field that leaves it unset is
+//     reported when a World is at hand in the function (from a parameter,
+//     the receiver or a local, by up to three field selections; not the
+//     variable of the literal or of one it is nested in), unless the function sets that variable's
+//     World later, by assignment or through a setter method of the
+//     package. Such a literal falls back to the real World inside a
+//     simulation.
 //
 // Depends on: golang.org/x/tools/go/analysis
 package dstlint
@@ -119,6 +127,10 @@ const dstPath = "github.com/prince776/go-dst-kit/dst"
 
 func run(pass *analysis.Pass) (any, error) {
 	simulated := optedIn(pass.Files)
+	var setters map[types.Object]bool
+	if simulated {
+		setters = worldSetters(pass)
+	}
 	for _, f := range pass.Files {
 		ok := okLines(pass.Fset, f)
 		report := func(pos token.Pos, format string, args ...any) {
@@ -127,6 +139,9 @@ func run(pass *analysis.Pass) (any, error) {
 				return
 			}
 			pass.Reportf(pos, format, args...)
+		}
+		if simulated {
+			unsetWorld(pass, f, setters, report)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, isSel := n.(*ast.SelectorExpr); isSel {
