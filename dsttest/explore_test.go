@@ -118,6 +118,66 @@ func TestExploreByPairsNeedsNoMarkers(t *testing.T) {
 	}
 }
 
+// twoRareHidden is twoRare visible only through an abstract state: no
+// marker, and the goroutine waits at the same line either way, so neither
+// markers nor interleaving pairs can tell a run that had A.
+func twoRareHidden(h *dsttest.Harness) {
+	a := false
+	h.State(func() uint64 {
+		if a {
+			return 1
+		}
+		return 0
+	})
+	h.Go(func(w *dst.World) {
+		for round := range 120 {
+			switch round {
+			case 10:
+				a = w.Rand().IntN(100) == 0
+			case 100:
+				if a && w.Rand().IntN(10) == 0 {
+					h.Fail(errors.New("A, then B"))
+				}
+			}
+			w.Rand().Uint64()
+			w.Sleep(time.Millisecond)
+		}
+	})
+}
+
+// Verifies: [states-explored]
+// With the rare event visible only as an abstract state, exploring by
+// states finds the bug after it several times more often than a sweep, and
+// than exploring by markers and pairs (which see nothing): expected about
+// 10 failing runs against 1. The sweep's report counts the two states.
+// Fails if exploring by states doesn't win that clearly, if a failure
+// isn't a fork at a step, if its path doesn't replay, or if the state
+// count is off.
+func TestExploreByStates(t *testing.T) {
+	o := exploreOpts
+	o.Seeds, o.Explore, o.KeepGoing = 1000, 1000, true
+	sw := dsttest.Sweep(o, twoRareHidden)
+	if sw.States != 2 {
+		t.Errorf("the sweep reached %d distinct states, want 2 (A or not)", sw.States)
+	}
+	o.ExploreBy = "markers,order,pairs"
+	blind := dsttest.Explore(o, twoRareHidden)
+	o.ExploreBy = "states"
+	byStates := dsttest.Explore(o, twoRareHidden)
+	t.Logf("failing runs: by states %d, by markers/order/pairs %d, sweep %d", len(byStates.Failed), len(blind.Failed), len(sw.Failed))
+	if n := len(byStates.Failed); n < 3 || n < 3*len(sw.Failed) || n < 3*len(blind.Failed) {
+		t.Fatalf("by states %d failing runs, by the other signals %d, sweep %d: want several times more by states",
+			n, len(blind.Failed), len(sw.Failed))
+	}
+	f := byStates.Failed[0]
+	if len(f.Path.Forks) == 0 || f.Path.Forks[len(f.Path.Forks)-1].Step == 0 {
+		t.Errorf("the failure %v isn't a fork at a step", f.Path)
+	}
+	if r := dsttest.RunPath(f.Path, o, twoRareHidden, nil); r.Err == nil {
+		t.Errorf("path %v passed on replay", f.Path)
+	}
+}
+
 // An exploration is the same whatever the parallelism: the same paths, in
 // the same order, by markers and by every signal. By markers, each of the
 // two markers is forked from its budget's worth of times. Fails if they

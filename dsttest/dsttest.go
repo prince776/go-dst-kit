@@ -67,6 +67,11 @@
 //   - [fault-classes-independent] Turning on pauses, outages, fault
 //     points, losses or mass restarts leaves the times of each seed's
 //     crashes and partitions as they were.
+//   - [states-explored] Each run records where it first reached each
+//     abstract state (Harness.State), a sweep counts the distinct states
+//     its runs reached, and exploring by states forks from rarely reached
+//     ones: a bug after a rare state no marker or interleaving shows is
+//     found several times more often than by a sweep or the other signals.
 //   - [gray-explores] With Gray faults, across seeds: slow links, lossy
 //     links losing segments, connections reset at a heal, slow machines
 //     stalling, and slow disks all occur; none of the stalls, losses or
@@ -279,8 +284,9 @@ type Options struct {
 	ExploreBatch  int
 	// ExploreBy is what guided runs steer by, a comma-separated set of
 	// "markers" (Sometimes), "order" (pairs of markers in the order runs
-	// first reached them) and "pairs" (interleaving pairs: see
-	// Result.FirstPairs). Default all three (-dst.explore.by).
+	// first reached them), "pairs" (interleaving pairs: see
+	// Result.FirstPairs) and "states" (abstract states: Harness.State).
+	// Default all four (-dst.explore.by).
 	ExploreBy string
 	// recordPairs makes runs record interleaving pairs (set by Explore).
 	recordPairs bool
@@ -356,7 +362,7 @@ func (o *Options) defaults() {
 		o.ExploreBy = *flagExploreBy
 	}
 	if o.ExploreBy == "" {
-		o.ExploreBy = "markers,order,pairs"
+		o.ExploreBy = "markers,order,pairs,states"
 	}
 	if o.Parallel == 0 {
 		o.Parallel = runtime.GOMAXPROCS(0)
@@ -419,13 +425,17 @@ type Harness struct {
 	phase    Phase
 	machines []*Machine
 	always   []named[func() error]
-	final    []named[func(w *dst.World) error]
-	cover    map[string]int
-	points   *points.Registry
-	expect   []string
-	workload []*sched.Task
-	seed     uint64
-	features map[string]bool
+	// states are the abstract-state functions (State); firstStates is the
+	// step at which this run first reached each state.
+	states      []func() uint64
+	firstStates map[uint64]uint64
+	final       []named[func(w *dst.World) error]
+	cover       map[string]int
+	points      *points.Registry
+	expect      []string
+	workload    []*sched.Task
+	seed        uint64
+	features    map[string]bool
 }
 
 type named[T any] struct {
@@ -692,6 +702,23 @@ func (h *Harness) Seed() uint64 { return h.sim.S.Seed() }
 
 // Swarm is the fault mix chosen for this seed.
 func (h *Harness) Swarm() Swarm { return h.swarm }
+
+// State registers an abstract state of the system under test: fn reduces
+// what matters about it now to a hash (for a cluster, say, each node's role
+// and whether its configuration is committed). It runs after every
+// scheduling step, as Always does: it may read the system's state but must
+// not use the World, and it must be cheap. Each run records the step at
+// which it first reached each state (Result.FirstStates), a sweep reports
+// how many distinct states its runs reached (Report.States: a measure of
+// how much of the state space it covers), and exploration steers toward
+// rarely reached states ("states" in ExploreBy), forking just after the
+// step a run first reached one. Choose a state small enough to recur and
+// fine enough to tell situations apart: a hash of every byte never
+// recurs, a single bit tells nothing.
+//
+// Several State functions are kept apart: equal values from two of them
+// are two states.
+func (h *Harness) State(fn func() uint64) { h.states = append(h.states, fn) }
 
 // Always registers an invariant checked after every scheduling step. It
 // runs on the scheduler, between steps: it may read the system's state but
@@ -1180,6 +1207,9 @@ type Result struct {
 	// (recorded only when exploring by pairs): a pair is the code site
 	// where one goroutine handed off and the site where the next resumed.
 	FirstPairs map[uint64]uint64
+	// FirstStates is the step at which each abstract state (Harness.State)
+	// was first reached in the run, keyed by the state's hash.
+	FirstStates map[uint64]uint64
 }
 
 // RunSeed runs one seed and returns its result. logf, if set, receives the
@@ -1227,6 +1257,15 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 					return &InvariantError{Name: a.name, Err: err}
 				}
 			}
+			for i, fn := range h.states {
+				k := (fn() ^ uint64(i)*0x9e3779b97f4a7c15) * 0xbf58476d1ce4e5b9
+				if _, ok := h.firstStates[k]; !ok {
+					if h.firstStates == nil {
+						h.firstStates = map[uint64]uint64{}
+					}
+					h.firstStates[k] = h.sim.S.Steps()
+				}
+			}
 			return nil
 		},
 	})
@@ -1269,7 +1308,8 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 	})
 	return Result{Seed: seed, Err: r.Err, Swarm: swarm, Fingerprint: r.Fingerprint, Checkpoints: r.Checkpoints,
 		Steps: r.Steps, SimTime: r.SimTime, Coverage: h.cover, Expect: h.expect, Features: h.features,
-		Path: path, Forked: h.sim.S.ForksApplied(), ForkSteps: h.sim.S.ForkSteps(), FirstMarks: h.sim.S.FirstMarks(), FirstPairs: h.sim.S.FirstPairs()}
+		Path: path, Forked: h.sim.S.ForksApplied(), ForkSteps: h.sim.S.ForkSteps(), FirstMarks: h.sim.S.FirstMarks(), FirstPairs: h.sim.S.FirstPairs(),
+		FirstStates: h.firstStates}
 }
 
 // unfinished reports workload goroutines (and goroutines they started)
@@ -1613,6 +1653,7 @@ type Report struct {
 	Nondeterministic []Divergence
 	Coverage         map[string]int
 	NeverHappened    []string // Expect-ed behaviours no seed reached
+	States           int      // distinct abstract states the runs reached (Harness.State)
 	SimTime          time.Duration
 	Steps            uint64
 	Wall             time.Duration
@@ -1721,6 +1762,7 @@ func runAll(paths []Path, opts Options, setup func(h *Harness), checks int) ([]R
 func aggregate(opts Options, results []Result, divs []*Divergence) Report {
 	rep := Report{FirstSeed: opts.FirstSeed, Coverage: map[string]int{}}
 	expect := map[string]bool{}
+	states := map[uint64]bool{}
 	for i, r := range results {
 		if r.Seed == 0 {
 			continue // not run (stopped early)
@@ -1735,6 +1777,9 @@ func aggregate(opts Options, results []Result, divs []*Divergence) Report {
 		for _, e := range r.Expect {
 			expect[e] = true
 		}
+		for k := range r.FirstStates {
+			states[k] = true
+		}
 		if r.Err != nil {
 			rep.Failed = append(rep.Failed, r)
 		}
@@ -1742,6 +1787,7 @@ func aggregate(opts Options, results []Result, divs []*Divergence) Report {
 			rep.Nondeterministic = append(rep.Nondeterministic, *divs[i])
 		}
 	}
+	rep.States = len(states)
 	if len(rep.Failed) == 0 {
 		for _, e := range slices.Sorted(maps.Keys(expect)) {
 			if rep.Coverage[e] == 0 {

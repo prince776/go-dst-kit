@@ -29,6 +29,9 @@ var (
 //     hit (a marker anchor: stable as code changes).
 //   - "order": two markers first reached one after the other, a then b.
 //     Forks go just after b's first hit.
+//   - "states": an abstract state the test reports (Harness.State), such as
+//     a cluster's roles and configurations. Forks go just after the step a
+//     run first reached it (a step anchor).
 //   - "pairs": an interleaving pair (Result.FirstPairs): one goroutine
 //     handing off at one code site and the next resuming at another, an
 //     ordering of the program's goroutines. Forks go just after the step
@@ -182,6 +185,12 @@ func runFeatures(r Result, by map[string]bool) []runFeature {
 		for i := 1; i < len(byStep); i++ {
 			a, b := byStep[i-1], byStep[i]
 			out = append(out, runFeature{"o:" + a + "\x00" + b, r.FirstMarks[b], Fork{Marker: b, N: 1}})
+		}
+	}
+	if by["states"] {
+		for _, k := range slices.Sorted(maps.Keys(r.FirstStates)) {
+			at := r.FirstStates[k]
+			out = append(out, runFeature{"s:" + strconv.FormatUint(k, 16), at, Fork{Step: at}})
 		}
 	}
 	if by["pairs"] {
