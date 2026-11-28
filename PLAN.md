@@ -549,6 +549,27 @@ wal, go-diskqueue and LLM-Tor had no affected library go statement;
 memberlist regenerates after its baseline. The lesson for a rewriter:
 test it by running a program before and after the rewrite and comparing.
 
+**Real-World stress tests (2026-11-28, `adopt/hardening`; Prince
+approved the direction):** `internal/worldtest/stress_test.go` drives
+every real-World primitive as production code does (thousands of
+rounds, many goroutines, reuse straight after a wait, unlocks in defers
+during panics, closes racing sends, Stop racing timers), under `-race`,
+each test twice: alone and with a simulation running alongside (the
+real World's slow paths, as in an adopter's test binary). Each test was
+broken by hand once and failed. They found three production-path bugs,
+each fixed with a law: dst's unlocks and `WaitGroup.Done` read their
+primitive after releasing it, so a struct reset or recycled by whoever
+went next raced them under `-race` where sync's are quiet
+([no-touch-after-release]); on macOS, concurrent creates through
+os.Root's openat(2) fail spuriously with ENOENT, and Go 1.25.0's
+`os.Root.MkdirAll` fails on a directory created meanwhile
+([create-like-os]). Also: dstmigrate rewrote `os.Lstat` to the World's
+Stat, which follows symbolic links in production ([lstat-keeps-links]);
+`dst.RWMutex` lacked `TryLock`, `TryRLock` and `RLocker` (code using them
+didn't compile after migration). Lesson: the race detector reports a
+race once per process, so a race under `-count=50` fails one run in
+fifty; count failures over separate processes.
+
 **pebble (started 2026-11-28):** cockroachdb/pebble at 4b082f41, a
 subagent, same method; blind benchmark held outside the agents' reach.
 

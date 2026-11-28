@@ -54,8 +54,11 @@ func (t *Timer) arm(d time.Duration) {
 	})
 }
 
-// Stop is (*time.Timer).Stop. As in Go 1.23+, no stale value is received
-// after Stop returns.
+// Stop is (*time.Timer).Stop. In a simulated World, as in Go 1.23+, no
+// stale value is received after Stop returns. In the real World it is
+// the time package's Stop, with the timer semantics of the main module's
+// go.mod: before go 1.23 (or with GODEBUG asynctimerchan=1) a value sent
+// before Stop may still be received after it.
 func (t *Timer) Stop() bool {
 	if t.real != nil {
 		return t.real.Stop()
