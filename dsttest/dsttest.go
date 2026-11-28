@@ -429,6 +429,7 @@ type Harness struct {
 	// step at which this run first reached each state.
 	states      []func() uint64
 	firstStates map[uint64]uint64
+	lastStates  []uint64 // each State function's value after the last step
 	final       []named[func(w *dst.World) error]
 	cover       map[string]int
 	points      *points.Registry
@@ -1257,8 +1258,15 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 					return &InvariantError{Name: a.name, Err: err}
 				}
 			}
+			if len(h.lastStates) != len(h.states) {
+				h.lastStates = make([]uint64, len(h.states))
+			}
 			for i, fn := range h.states {
 				k := (fn() ^ uint64(i)*0x9e3779b97f4a7c15) * 0xbf58476d1ce4e5b9
+				if k == h.lastStates[i] && h.firstStates != nil {
+					continue // most steps don't change the state
+				}
+				h.lastStates[i] = k
 				if _, ok := h.firstStates[k]; !ok {
 					if h.firstStates == nil {
 						h.firstStates = map[uint64]uint64{}
