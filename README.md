@@ -116,7 +116,7 @@ wal/log.go:42:9: time.Now escapes the World; use w.Now()
 | [`realworld`](realworld) | the production World: plain goroutines, `os`, `net`; `realworld.Default()` for code given none |
 | [`dsttest`](dsttest) | the runner: seeds, machines, faults, phases, invariants, replay; `Plants` shows each check catches its planted bug |
 | [`dstbugs`](dstbugs) | switches for planted bugs and candidate fixes: on only with the `dstbugs` build tag, constant false otherwise |
-| [`check`](check) | oracles: a linearizability checker, a KV model, a history recorder |
+| [`check`](check) | oracles: a linearizability checker, a KV model, a history recorder, a recovered-prefix model and self-identifying values |
 | [`dsthttp`](dsthttp) | `net/http` servers and clients over the World's network |
 | [`dstgrpc`](dstgrpc) | gRPC servers and clients over it (own module: depends on grpc-go) |
 | [`dstlint`](dstlint) | the analyzer (own module: depends on x/tools) |

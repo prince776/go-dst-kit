@@ -266,6 +266,40 @@ survive, every member applied the same sequence, and every member
 catches up once faults stop. Plant a bug for the linearizability check
 on its own (a ReadIndex without the barrier): the others don't see it.
 
+## Checking recovery: a prefix of the writes
+
+A store with a write-ahead log (or any ordered commit log) promises that
+after a crash its state is the state after some first writes, and at
+least the durable ones. `check.Prefix` checks that from outside: record
+each write as the workload makes it, and after each restart ask which
+prefix the recovered state is.
+
+```go
+m := check.NewPrefix(make([]uint32, keys), applyBatch, slices.Equal[[]uint32])
+i := m.Invoke("put k07", batch) // in the order the store commits
+switch err := db.Apply(batch, sync); {
+case err == nil:
+	m.Ack(i, sync) // a synced write makes every write up to it durable
+case refusedBeforeTheLog(err):
+	m.Refused(i)
+}
+// ... a crash, a restart:
+floor := m.Durable() // a power loss; after a kill, m.Acknowledged()
+s, err := m.Recover(readAll(db), floor)
+if err != nil {
+	h.Failf("recovery: %v", err) // *check.LostDurableError or *check.NotPrefixError
+}
+m.Truncate(s, kill)
+```
+
+The order is yours to supply: writes that commit concurrently must be
+invoked in the order the store gave them (by their sequence numbers).
+`m.Now()` stamps a read's start, and `m.Window(since)` is the prefixes it
+may have seen. Make values identify their writes with `check.Value(key,
+id, size)`, and read them back with `check.DecodeValue`: a value from
+another key, cut short, or with a changed byte is an error, not a wrong
+id.
+
 ## Designing the workload
 
 The simulation explores timing: interleavings, crashes, lost replies. It
