@@ -27,3 +27,12 @@ func TestAnalyzer(t *testing.T) {
 func TestUnsetWorld(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), dstlint.Analyzer, "unsetworld")
 }
+
+// Verifies: [flags-shared-primitive], [respects-ok]
+// Fails if: a package-level variable that is or holds a waiting dst
+// primitive (directly, in a var block, through NewCond, in an array or a
+// nested struct) goes unreported, or one is reported that doesn't (a
+// Pool, a pointer to a lock, a type's field), or //dst:ok doesn't excuse.
+func TestSharedPrimitive(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), dstlint.Analyzer, "sharedprim")
+}

@@ -29,11 +29,17 @@ var (
 
 func register(t *Task) {
 	active.Add(1)
+	if t.s != nil {
+		t.s.live.Add(1)
+	}
 	registry.Store(t.goid, t)
 }
 
 func unregister(t *Task) {
 	registry.Delete(t.goid)
+	if t.s != nil {
+		t.s.live.Add(-1)
+	}
 	active.Add(-1)
 }
 

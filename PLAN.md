@@ -338,6 +338,28 @@ a step-back when done.
 | TCP 64 B round trip | 16.6µs | 18.4µs | 3.9µs |
 | HTTP GET | 37.7µs | 37.7µs | 33.3µs |
 
+Real World passthrough (2026-11-28, [real-is-std]; same session for
+both columns, a loaded machine: compare within a row, not with the
+table above; medians of 6):
+
+| Uncontended operation | Bare Go | Real World before | Real World after |
+|---|---|---|---|
+| Mutex Lock+Unlock | 21.5ns | 19.7ns | 22.4ns |
+| RWMutex RLock+RUnlock | 22.3ns | 20.8ns | 22.8ns |
+| WaitGroup Add+Done+Wait | 21.6ns | 32.8ns | 22.0ns |
+| Once.Do (done) | 0.77ns | 3.34ns | 0.86ns |
+| Cond.Signal (no waiter) | 3.9ns | 3.9ns | 6.2ns |
+| Mutex Lock+Unlock, a simulation running in the process | - | - | 40.8ns |
+
+WaitGroup kept a simulation count beside sync's; Once couldn't inline
+its fast path. Cond.Signal now always calls sync.Cond's (before, a Cond
+no real goroutine had waited on skipped it), and can't inline: two call
+sites exceed the inliner's budget, so one frame more than std (about
+2ns). With a simulation running in the same process, each real-World
+call pays the registry lookup that says "not simulated" (about 18ns);
+production never runs one. Allocations equal std's in every case
+(TestRealPathAllocs), alone and alongside a simulation.
+
 Finding (fixed in M11): `dst.Mutex.Lock` on a free mutex wasn't a
 scheduling point, so in simulation two critical sections with no other
 World operation between them were never interleaved, and a lost update

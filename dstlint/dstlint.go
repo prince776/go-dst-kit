@@ -27,6 +27,11 @@
 //     package: it is the last resort for code no World reaches.
 //   - [respects-ok] A //dst:ok comment on or above a line suppresses its
 //     report.
+//   - [flags-shared-primitive] In an opted-in package, a package-level
+//     variable that is, or holds (in a struct or array, at any depth), a
+//     dst.Mutex, RWMutex, WaitGroup, Once or Cond is reported: every
+//     simulation running at once (a sweep's parallel seeds) shares it,
+//     and the World fails them as misuse when they do.
 //   - [flags-unset-world] In an opted-in package's non-test files, a keyed
 //     literal of a struct with a *dst.World field that leaves it unset is
 //     reported when a World is at hand in the function (from a parameter,
@@ -147,6 +152,7 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 		if simulated {
 			unsetWorld(pass, f, setters, report)
+			sharedPrimitives(pass, f, report)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, isSel := n.(*ast.SelectorExpr); isSel {
@@ -250,4 +256,59 @@ func lastElem(path string) string {
 		return path[i+1:]
 	}
 	return path
+}
+
+// waitingPrimitives are the dst types goroutines wait on, which one
+// simulation can't share with another running at once.
+var waitingPrimitives = map[string]bool{"Mutex": true, "RWMutex": true, "WaitGroup": true, "Once": true, "Cond": true}
+
+// sharedPrimitives reports f's package-level variables that are, or
+// hold, a primitive goroutines wait on ([flags-shared-primitive]).
+func sharedPrimitives(pass *analysis.Pass, f *ast.File, report func(token.Pos, string, ...any)) {
+	for _, d := range f.Decls {
+		g, ok := d.(*ast.GenDecl)
+		if !ok || g.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range g.Specs {
+			for _, name := range spec.(*ast.ValueSpec).Names {
+				obj := pass.TypesInfo.Defs[name]
+				if obj == nil || name.Name == "_" {
+					continue
+				}
+				if what := heldPrimitive(obj.Type(), 0); what != "" {
+					report(name.Pos(), "package-level %s (in %s): every simulation running at once (a sweep's parallel seeds) shares it, "+
+						"which fails them as misuse; make it per instance (a field of the system under test)", what, name.Name)
+				}
+			}
+		}
+	}
+}
+
+// heldPrimitive names the waiting dst primitive t is or holds by value
+// (or through a *dst.Cond, as NewCond makes), or "".
+func heldPrimitive(t types.Type, depth int) string {
+	if depth > 8 {
+		return ""
+	}
+	if p, ok := t.(*types.Pointer); ok {
+		if n, ok := p.Elem().(*types.Named); ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == dstPath && n.Obj().Name() == "Cond" {
+			return "dst.Cond"
+		}
+		return ""
+	}
+	if n, ok := t.(*types.Named); ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == dstPath && waitingPrimitives[n.Obj().Name()] {
+		return "dst." + n.Obj().Name()
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if w := heldPrimitive(u.Field(i).Type(), depth+1); w != "" {
+				return w
+			}
+		}
+	case *types.Array:
+		return heldPrimitive(u.Elem(), depth+1)
+	}
+	return ""
 }

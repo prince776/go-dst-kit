@@ -74,7 +74,8 @@ It's a mechanical substitution, and it can be done one package at a time
 | `os.OpenFile`, `os.Rename`, ... | `w.FS().OpenFile`, `w.FS().Rename`, ... |
 | `net.Listen`, `net.Dial` | `w.Net().Listen`, `w.Net().Dial` |
 | `http.Serve`, `http.Client` | `dsthttp.Serve(w, ln, h)`, `dsthttp.Client(w)` |
-| `grpc.NewServer`, `grpc.NewClient` | `dstgrpc.NewServer(w)`, `dstgrpc.NewClient(w, addr)` |
+| `io.Pipe`, `net.Pipe`, `net.DialTimeout` | `dst.Pipe(w)`, `dst.NetPipe(w)`, `dst.DialTimeout(w, ...)` |
+| `grpc.NewServer`, `grpc.NewClient` | `dstgrpc.NewServerExact(w, opts...)`, `dstgrpc.NewClientExact(w, addr, opts...)` |
 
 `dstlint` checks a package that says `//dst:simulated` for anything left
 over:
@@ -180,10 +181,15 @@ both Worlds to keep them honest.
 - **Exploration is random**, not exhaustive: rare interleavings need many
   seeds. Run a long sweep nightly (`-dst.seeds=20000`).
 - **Not modelled yet:** wall-clock jumps, bit rot.
-- **Overhead in production** is small but not zero: a channel round trip
-  costs about 295ns against 266ns raw and an uncontended mutex 14ns. The
-  general `dst.Select` uses reflection (about 250ns against 54ns native);
-  `dst.Select2` and `dst.Select3` are native (about 61ns, no allocation).
+- **Overhead in production** is std plus one branch: each primitive is
+  its std counterpart behind one inlined flag check, allocating what std
+  does (uncontended Mutex, RWMutex, WaitGroup and Once within noise of
+  sync's; a channel round trip about 295ns against 266ns raw). The
+  exceptions are measured and tested: a Timer or Ticker is one small
+  allocation more, Cond.Signal one call frame more (about 2ns), and
+  `dst.Select` uses reflection (about 250ns against 54ns native), where
+  `dst.Select2` and `dst.Select3` are native (about 61ns; a callback
+  that captures variables costs one allocation).
 
 ## Status
 

@@ -4,6 +4,11 @@ package dst
 // In the real World it is a native select statement, about 4x cheaper
 // than Select (which uses reflection); in a simulated World the two are
 // the same. For a select with a default, use Select or TryRecv/TrySend.
+//
+// A function literal that captures variables costs one allocation per
+// call (escape analysis sees the simulated path keep it). A function
+// value made once, outside the hot loop (a top-level function, or a
+// method value such as h.onRecv bound once and reused), costs none.
 func Select2[A, B any](w *World, a Op[A], b Op[B]) {
 	if w.s != nil {
 		Select(w, a, b)
