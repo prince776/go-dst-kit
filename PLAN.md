@@ -795,6 +795,34 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
   quorum-off-by-one under amnesia: 0/100 (the sweep: 1/300, first at
   #118). Prince (2026-11-27): improve the DSTs' fault model first, then
   return to guided exploration; this is the baseline.
+  *Raft phase 4 (2026-11-28, raft DST.md 10c):* abstract states
+  (Harness.State) and root budgets (ExploreRootBudget) widen state
+  coverage 11-16% but find no more bugs than plain in 2000 runs. Forking a
+  failing run 10-50% of the way in fails the same way 30-100% of the time
+  (fresh: 0.1-2%; a fork at step 1: about fresh), so forking works and
+  selection is what fails: rarity marks only 6.18's runs.
+  *What others do (research, 2026-11-28):* Antithesis: boolean sometimes
+  assertions as checkpoints, "a percentage of tests" restart there; advice:
+  assert rare, tricky situations, tune config so rare paths run. moonpool
+  (Rust DST): forks only on discoveries, priority progress (numeric
+  watermark improves, compound frontier: more conditions true at once,
+  bucket quality) over state novelty over code coverage; a productive run
+  expanded once (4 children), barren children die; per-root frontier;
+  later roots get effort only for discoveries no earlier run made. IJON:
+  IJON_MAX annotations (fork on a new maximum). Importance splitting
+  (RESTART): split runs as they cross levels of a score function; works
+  only if the score tracks the probability of the rare event. Go-Explore:
+  coarse cells, archive, return then explore. RL on abstract states
+  (Borgarelli et al. 2024, BonusMaxRL; Coyote's QL; Mallory, CCS 2023):
+  +15-30% unique states over random on etcd and RedisRaft, but BonusMaxRL
+  10 bugs against random's 11 ("randomized exploration is surprisingly
+  effective"); developer waypoints (ordered predicates, e.g. a leader
+  elected, then logs differing by x) 13. ModelFuzz (OOPSLA 2025): TLA+
+  model-state coverage; unique states equal to random on etcd, bugs
+  faster. FoundationDB, TigerBeetle: no guidance; swarm, BUGGIFY, volume
+  and strong oracles. Common thread: coverage alone doesn't buy bugs;
+  progress signals toward a dangerous region (watermarks, compound
+  frontiers, waypoints) do, and they carry protocol knowledge.
 - **F. Shrinking.** Minimize fault events, then fork points, then phase
   lengths (shortlex); measured by trace length on B's failures.
 
