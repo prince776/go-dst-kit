@@ -1188,6 +1188,20 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 			setPos(n, pos)
 			m.changes++
 		}
+		switch {
+		case s.Sel.Name == "NumCPU":
+			n.Fun = sel(m.w(), "NumCPU")
+			setPos(n, pos)
+			m.changes++
+		case s.Sel.Name == "GOMAXPROCS" && len(n.Args) == 1:
+			if tv := m.info.Types[n.Args[0]]; tv.Value != nil && tv.Value.String() == "0" {
+				n.Fun, n.Args = sel(m.w(), "GOMAXPROCS"), nil
+				setPos(n, pos)
+				m.changes++
+			} else {
+				m.warn(n, "runtime.GOMAXPROCS(n) sets the process's count: left as a hint (a simulated World reports its seed's draw; read it with w.GOMAXPROCS())")
+			}
+		}
 	case "crypto/rand":
 		switch s.Sel.Name {
 		case "Read":

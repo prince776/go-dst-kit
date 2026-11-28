@@ -93,7 +93,7 @@ var funcs = map[string]map[string]string{
 	},
 	"io":          {"Pipe": "dst.Pipe(w)"},
 	"sync":        {"NewCond": "dst.NewCond", "OnceFunc": "dst.OnceFunc", "OnceValue": "dst.OnceValue", "OnceValues": "dst.OnceValues"},
-	"runtime":     {"Gosched": "w.Yield"},
+	"runtime":     {"Gosched": "w.Yield", "NumCPU": "w.NumCPU", "GOMAXPROCS": "w.GOMAXPROCS to read it (a set is a hint a simulation ignores: excuse it)"},
 	"crypto/rand": {"Read": "w.Rand().CryptoRead", "Int": "crypto/rand.Int(dst.CryptoReader(w), max)", "Text": "dst.CryptoText(w)"},
 	"os": {
 		"Open": "dst.Open(w.FS(), ...)", "Create": "dst.Create(w.FS(), ...)", "OpenFile": "w.FS().OpenFile",

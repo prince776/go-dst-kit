@@ -39,8 +39,12 @@ func f(ctx context.Context) {
 	net.ListenPacket("udp", ":0") // want `net.ListenPacket escapes the World; use w.Net\(\).ListenPacket`
 	context.WithTimeout(ctx, 1)   // want `context.WithTimeout escapes the World; use dst.WithTimeout`
 	runtime.Gosched()             // want `runtime.Gosched escapes the World; use w.Yield`
+	_ = runtime.NumCPU()          // want `runtime.NumCPU escapes the World; use w.NumCPU`
+	_ = runtime.GOMAXPROCS(0)     // want `runtime.GOMAXPROCS escapes the World; use w.GOMAXPROCS to read it`
 	dst.Current().Yield()         // want `dst.Current is a last resort`
 	_ = time.Second.String()      // methods and constants are fine
+	runtime.GOMAXPROCS(4)         //dst:ok a hint
+	_ = 0
 	_ = context.WithValue(ctx, 1, 2)
 	mu.Lock() //dst:ok checked by hand
 	//dst:ok the line below is fine too

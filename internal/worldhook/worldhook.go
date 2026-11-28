@@ -17,6 +17,9 @@ type Spec struct {
 	Epoch   time.Time // simulated time zero
 	FS      any       // a dst.FS, or nil
 	Net     any       // a dst.Net, or nil
+	// Procs and CPUs are what a simulated World's GOMAXPROCS and NumCPU
+	// report (0: 1, and at least Procs).
+	Procs, CPUs int
 }
 
 // NewWorld returns a *dst.World (as any, to avoid an import cycle).

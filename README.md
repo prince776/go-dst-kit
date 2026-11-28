@@ -80,6 +80,7 @@ too; the flags are in migrating.md):
 | `sync.OnceFunc`, `OnceValue`, `OnceValues` | `dst.OnceFunc`, `OnceValue`, `OnceValues` |
 | `context.WithTimeout`, `WithCancel`, their `Cause` variants, `AfterFunc` | `dst.WithTimeout(w, ctx, d)`, `dst.WithCancel(w, ctx)`, `dst.WithTimeoutCause`, ..., `dst.AfterDone` |
 | `runtime.Gosched` | `w.Yield()` |
+| `runtime.GOMAXPROCS(0)`, `runtime.NumCPU()` | `w.GOMAXPROCS()`, `w.NumCPU()` (drawn per seed in a simulation) |
 | `math/rand/v2`, `math/rand` | `w.Rand()`, `w.MathRand()` (same names; `rand.N` is `dst.N(w.Rand(), n)`) |
 | `crypto/rand.Read`, `Reader`, `Text` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)`, `dst.CryptoText(w)` |
 | `os.OpenFile`, `os.Rename`, ... | `w.FS().OpenFile`, `w.FS().Rename`, ... |

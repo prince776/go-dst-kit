@@ -600,3 +600,18 @@ func TestMigrateWorldThreading(t *testing.T) {
 		}
 	}
 }
+
+// runtime.GOMAXPROCS(0) and runtime.NumCPU() become the World's; a
+// GOMAXPROCS(n) that sets the count stays, with a warning.
+// Fails if a read isn't mapped, or a set is.
+func TestMigrateProcs(t *testing.T) {
+	got, stderr := migrateSample(t, "procs", "cache=$.w")
+	for _, want := range []string{"c.shards = 4 * c.w.GOMAXPROCS()", "cpus := c.w.NumCPU()", "runtime.GOMAXPROCS(n)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(stderr, "runtime.GOMAXPROCS(n) sets the process's count: left as a hint") {
+		t.Errorf("no warning for the set:\n%s", stderr)
+	}
+}

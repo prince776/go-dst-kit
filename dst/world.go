@@ -105,12 +105,15 @@ type World struct {
 	math  *simMathRand // MathRand's, made on first use (simulated Worlds)
 	fs    FS
 	net   Net
+	// procs and cpus are a simulated World's GOMAXPROCS and NumCPU.
+	procs, cpus int
 }
 
 func init() {
 	worldhook.SetCurrentReal = func(w any) { currentReal = w.(*World) }
 	worldhook.NewWorld = func(sp worldhook.Spec) any {
-		w := &World{s: sp.Sched, m: sp.Machine, epoch: sp.Epoch}
+		w := &World{s: sp.Sched, m: sp.Machine, epoch: sp.Epoch, procs: max(sp.Procs, 1)}
+		w.cpus = max(sp.CPUs, w.procs)
 		if w.s != nil {
 			w.rnd = newSimRand("machine/"+w.m.Name+"/rand", w.s.Rand)
 		} else {

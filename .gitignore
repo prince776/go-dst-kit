@@ -2,3 +2,4 @@
 /dstlint/cmd/dstmigrate/dstmigrate
 /dstlint/cmd/dstlint/dstlint
 /cmd/dstbench/dstbench
+.DS_Store

@@ -76,11 +76,16 @@ type Options struct {
 	// PCTDepth and PCTHorizon select PCT scheduling (see sched.Options).
 	PCTDepth   int
 	PCTHorizon uint64
+	// Procs and CPUs are what the machines' Worlds report as GOMAXPROCS
+	// and NumCPU (0: 1, and at least Procs).
+	Procs, CPUs int
 }
 
 // Sim is one simulated run.
 type Sim struct {
 	start    time.Time // what clocks read at the start of the run
+	procs    int       // Options.Procs and CPUs
+	cpus     int
 	S        *sched.Scheduler
 	Net      *simnet.Network
 	machines map[string]*Machine
@@ -120,6 +125,7 @@ func New(opts Options) *Sim {
 		machines: map[string]*Machine{},
 	}
 	s.start = Epoch
+	s.procs, s.cpus = opts.Procs, opts.CPUs
 	if !opts.Start.IsZero() {
 		s.start = opts.Start
 	}
@@ -149,7 +155,7 @@ func (s *Sim) AddMachine(name string, opts MachineOptions) *Machine {
 	m := &Machine{Name: name, M: sm, sim: s}
 	m.Disk = simfs.New(s.S, sm, opts.Disk)
 	m.Host = s.Net.Attach(sm)
-	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: s.start, FS: m.Disk, Net: m.Host}).(*dst.World)
+	m.World = worldhook.NewWorld(worldhook.Spec{Sched: s.S, Machine: sm, Epoch: s.start, FS: m.Disk, Net: m.Host, Procs: s.procs, CPUs: s.cpus}).(*dst.World)
 	s.machines[name] = m
 	s.order = append(s.order, m)
 	return m

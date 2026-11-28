@@ -1,0 +1,18 @@
+package p
+
+import (
+	"runtime"
+)
+
+type cache struct {
+	w      *dst.World
+	shards int
+}
+
+func (c *cache) size(n int) {
+	c.shards = 4 * runtime.GOMAXPROCS(0)
+	if cpus := runtime.NumCPU(); cpus > c.shards {
+		c.shards = cpus
+	}
+	runtime.GOMAXPROCS(n)
+}

@@ -48,6 +48,11 @@ a law in the package that implements it, with a test.
   World operation on amd64 and arm64, where reading the goroutine's
   identity costs a few nanoseconds; on every 256th elsewhere).
 
+- `w.GOMAXPROCS()` and `w.NumCPU()` report the seed's draw: GOMAXPROCS
+  1, 2, 4 or 8, NumCPU the same or twice it, on every machine (in the
+  seed's swarm line). Only what code computes from them is explored
+  (shard counts, pool sizes); goroutines still run one at a time.
+
 ## Machines (`internal/simworld`)
 
 - A machine is a process: its goroutines, timers, disk and network host.

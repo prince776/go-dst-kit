@@ -964,6 +964,10 @@ type Swarm struct {
 	// CrashLatency: with crashes on and fault points off, points still add
 	// latency (never failures), so crashes land between a request's steps.
 	CrashLatency bool
+
+	// GOMAXPROCS and NumCPU are what the machines' Worlds report
+	// (w.GOMAXPROCS, w.NumCPU): 1, 2, 4 or 8, and at least that.
+	GOMAXPROCS, NumCPU int
 }
 
 func (s Swarm) disk() simfs.Options {
@@ -987,7 +991,8 @@ func (s Swarm) String() string {
 		fmt.Sprintf(", gray{slow links %.2f (+%v), lossy links %.2f (%.3f), heal resets %.2f, slow machines %.2f (stall %v every %v), slow disks %.2f (x%.0f), udp blocked %.2f, mild %v}",
 			s.SlowLinkShare, s.SlowLinkMean, s.LossyLinkShare, s.LinkLossProb, s.HealResetProb, s.SlowMachineShare, s.SlowStall, s.SlowStallEvery, s.SlowDiskShare, s.SlowDiskFactor, s.UDPBlockShare, s.MildGray) +
 		fmt.Sprintf(", disk errors{full every ~%v, fsync %.3f, write %.4f, read %.4f}", s.FullEvery, s.SyncErrProb, s.WriteErrProb, s.ReadErrProb) +
-		fmt.Sprintf(", mass restart every ~%v (share %.2f, spread %v, down ~%v)", s.MassRestartEvery, s.MassRestartShare, s.MassRestartSpread, s.MassRestartDown)
+		fmt.Sprintf(", mass restart every ~%v (share %.2f, spread %v, down ~%v)", s.MassRestartEvery, s.MassRestartShare, s.MassRestartSpread, s.MassRestartDown) +
+		fmt.Sprintf(", GOMAXPROCS %d, NumCPU %d", s.GOMAXPROCS, s.NumCPU)
 }
 
 func (s Swarm) sched() string {
@@ -1141,7 +1146,16 @@ func newSwarm(seed uint64, f Faults, runLen time.Duration) Swarm {
 	if !noMassRestart {
 		s = massRestart(s, seed, f)
 	}
+	s.GOMAXPROCS, s.NumCPU = drawProcs(seed)
 	return s
+}
+
+// drawProcs draws a seed's GOMAXPROCS and NumCPU, from a stream of their
+// own so every other draw stays what it was ([procs-drawn-per-seed]).
+func drawProcs(seed uint64) (procs, cpus int) {
+	r := rand.New(rand.NewPCG(seed, 0x70726f6373))
+	procs = 1 << r.IntN(4)
+	return procs, procs << r.IntN(2)
 }
 
 // noMassRestart skips massRestart's draws (tests of [mass-restart]
@@ -1318,6 +1332,8 @@ func runPath(path Path, opts Options, setup func(h *Harness), logf func(format s
 		PCTDepth:   swarm.PCTDepth,
 		PCTHorizon: swarm.PCTHorizon,
 		Start:      swarm.Start,
+		Procs:      swarm.GOMAXPROCS,
+		CPUs:       swarm.NumCPU,
 		Forks:      path.schedForks(),
 		Pairs:      opts.recordPairs,
 		AfterStep: func() error {
