@@ -12,9 +12,13 @@ import (
 	"time"
 )
 
+// bufs is a package-level pool: a field type and a composite literal.
+var bufs = sync.Pool{New: func() any { return new([64]byte) }}
+
 type Pool struct {
 	wd    *dst.World
 	mu    sync.Mutex
+	spare *sync.Pool
 	jobs  chan int
 	done  chan struct{}
 	notes <-chan string

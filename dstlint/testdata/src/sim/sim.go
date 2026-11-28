@@ -20,6 +20,8 @@ var cond = sync.NewCond(nil) // want `sync.NewCond escapes the World; use dst.Ne
 
 var cv sync.Cond // want `sync.Cond escapes the World; use dst.Cond`
 
+var pool = sync.Pool{New: func() any { return new(int) }} // want `sync.Pool escapes the World; use dst.Pool`
+
 func f(ctx context.Context) {
 	go f(ctx)              // want `go statement escapes the World; use w.Go`
 	c := make(chan int, 1) // want `make\(chan\) escapes the World; use dst.MakeChan`

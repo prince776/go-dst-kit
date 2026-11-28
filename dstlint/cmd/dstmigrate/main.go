@@ -16,8 +16,8 @@
 //   - time.Now, Since, Until, Sleep, After, AfterFunc, NewTimer and
 //     NewTicker to the World's methods, *time.Timer and *time.Ticker to
 //     *dst.Timer and *dst.Ticker;
-//   - sync.Mutex, RWMutex, WaitGroup, Once and Cond to their dst types,
-//     sync.NewCond to dst.NewCond;
+//   - sync.Mutex, RWMutex, WaitGroup, Once, Cond and Pool to their dst
+//     types, sync.NewCond to dst.NewCond;
 //   - go statements to w.Go, evaluating the call's arguments first as go
 //     does, and wg.Go(f) on a sync.WaitGroup to wg.Go(w, f);
 //   - runtime.Gosched to w.Yield (a spin loop must let others run);
@@ -575,7 +575,7 @@ func (m *migrator) decl(d ast.Node) {
 			}
 			if id, ok := n.X.(*ast.Ident); ok {
 				switch id.Name + "." + n.Sel.Name {
-				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond", "sync.NewCond":
+				case "sync.Mutex", "sync.RWMutex", "sync.WaitGroup", "sync.Once", "sync.Cond", "sync.NewCond", "sync.Pool":
 					// sync.NewCond(l) is dst.NewCond(l): the Cond fields
 					// become dst.Cond, so their constructor must too.
 					id.Name = "dst"
