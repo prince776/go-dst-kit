@@ -753,6 +753,16 @@ triggered) and Klees et al., CCS 2018 (repeated trials, distributions).
 
 ## Todo (Prince, 2026-11-26; propose each design before building)
 
+- **Wall-clock jumps** (Prince, 2026-11-28, from raft's step 5b): an NTP
+  step or a VM resumed from a snapshot moves the wall clock while Go's
+  monotonic clock (timers, `time.Since`, deadlines) goes on. Go's
+  `time.Time` can't move one without the other, so the World would hand
+  out wall readings without a monotonic part (`t.Round(0)`) and jump
+  those, keeping `Since`/timers on the monotonic clock: code that
+  compares wall readings (leases, TTLs, expiry stamps written to disk)
+  sees the jump, the rest doesn't. Needs a law that each half moves as
+  claimed, a negative test (a lease read on wall time breaks under a
+  backward step), and a per-seed fault. Today: offsets and drift only.
 - **World atomics** (Prince, 2026-11-28). The scheduler switches
   goroutines only at World operations, so code that synchronizes through
   `sync/atomic` (lock-free queues, published flags, spin loops) gets no
