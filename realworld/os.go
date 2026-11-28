@@ -2,9 +2,11 @@ package realworld
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/prince776/go-dst-kit/dst"
@@ -36,11 +38,28 @@ func (f *osFS) OpenFile(name string, flag int, perm fs.FileMode) (dst.File, erro
 	if err != nil {
 		return nil, err
 	}
-	file, err := r.OpenFile(name, flag, perm)
+	file, err := openInRoot(r, name, flag, perm)
 	if err != nil {
 		return nil, err // not a typed-nil *os.File
 	}
 	return &rootFile{file, name}, nil
+}
+
+// openInRoot is r.OpenFile, retrying a create that fails with ENOENT a
+// few times: a workaround for macOS's kernel ([create-like-os]), to drop
+// once macOS is fixed. os.Root opens with openat(2), and on macOS (26.3
+// at least) concurrent openat creates of one name fail spuriously with
+// ENOENT (hundreds in 2,400 creates by 8 goroutines; open(2), which
+// os.OpenFile uses, never does), so without the retry the real World's
+// FS would fail where the os package doesn't. One retry was always
+// enough; an ENOENT that persists (a missing directory) is returned as
+// it is.
+func openInRoot(r *os.Root, name string, flag int, perm fs.FileMode) (*os.File, error) {
+	file, err := r.OpenFile(name, flag, perm)
+	for try := 0; err != nil && flag&os.O_CREATE != 0 && try < 3 && errors.Is(err, fs.ErrNotExist); try++ {
+		file, err = r.OpenFile(name, flag, perm)
+	}
+	return file, err
 }
 
 // rootFile is a file opened in the root. Its Name is the name it was
@@ -66,7 +85,16 @@ func (f *osFS) MkdirAll(name string, perm fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return r.MkdirAll(name, perm)
+	err = r.MkdirAll(name, perm)
+	// A workaround for Go before 1.25.7 ([create-like-os]), to drop once
+	// go.mod requires it: os.Root.MkdirAll failed on a directory on the
+	// way that another goroutine created meanwhile.
+	// Each pass gets at least one directory further, so one per path
+	// element is enough; a file in the way still fails.
+	for try := strings.Count(name, "/"); try >= 0 && errors.Is(err, fs.ErrExist); try-- {
+		err = r.MkdirAll(name, perm)
+	}
+	return err
 }
 
 func (f *osFS) Remove(name string) error {

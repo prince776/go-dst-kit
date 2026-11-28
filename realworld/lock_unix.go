@@ -18,7 +18,7 @@ func (f *osFS) LockFile(name string) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := r.OpenFile(name, os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := openInRoot(r, name, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, err
 	}
