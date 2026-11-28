@@ -36,3 +36,12 @@ func TestUnsetWorld(t *testing.T) {
 func TestSharedPrimitive(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), dstlint.Analyzer, "sharedprim")
 }
+
+// Verifies: [flags-pooled-world-value], [respects-ok]
+// Fails if: a pool whose New makes a value holding a dst.Chan, Timer or
+// Ticker (directly, through a nested struct, a pointer, a recursive
+// type, a .New assignment, a sync.Pool) goes unreported, or one is
+// reported that holds none, or //dst:ok doesn't excuse it.
+func TestPooledWorldValue(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), dstlint.Analyzer, "pooled")
+}

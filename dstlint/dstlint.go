@@ -32,6 +32,11 @@
 //     dst.Mutex, RWMutex, WaitGroup, Once or Cond is reported: every
 //     simulation running at once (a sweep's parallel seeds) shares it,
 //     and the World fails them as misuse when they do.
+//   - [flags-pooled-world-value] In an opted-in package, a pool
+//     (dst.Pool or sync.Pool) whose New makes a value holding a
+//     dst.Chan, Timer or Ticker (through pointers and struct fields, at
+//     any depth) is reported: the pool can hand the value to code in
+//     another World, where its channel would wait outside that World.
 //   - [flags-unset-world] In an opted-in package's non-test files, a keyed
 //     literal of a struct with a *dst.World field that leaves it unset is
 //     reported when a World is at hand in the function (from a parameter,
@@ -153,6 +158,7 @@ func run(pass *analysis.Pass) (any, error) {
 		if simulated {
 			unsetWorld(pass, f, setters, report)
 			sharedPrimitives(pass, f, report)
+			pooledWorldValues(pass, f, report)
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			if sel, isSel := n.(*ast.SelectorExpr); isSel {
@@ -309,6 +315,96 @@ func heldPrimitive(t types.Type, depth int) string {
 		}
 	case *types.Array:
 		return heldPrimitive(u.Elem(), depth+1)
+	}
+	return ""
+}
+
+// pooledWorldValues reports pools whose New makes a value holding a
+// World's channel or timer ([flags-pooled-world-value]).
+func pooledWorldValues(pass *analysis.Pass, f *ast.File, report func(token.Pos, string, ...any)) {
+	isPool := func(t types.Type) bool {
+		if p, ok := t.(*types.Pointer); ok {
+			t = p.Elem()
+		}
+		n, ok := t.(*types.Named)
+		if !ok || n.Obj().Pkg() == nil || n.Obj().Name() != "Pool" {
+			return false
+		}
+		path := n.Obj().Pkg().Path()
+		return path == dstPath || path == "sync"
+	}
+	check := func(fn ast.Expr) {
+		lit, ok := fn.(*ast.FuncLit)
+		if !ok {
+			return
+		}
+		ast.Inspect(lit.Body, func(n ast.Node) bool {
+			if _, nested := n.(*ast.FuncLit); nested {
+				return false
+			}
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok {
+				return true
+			}
+			for _, r := range ret.Results {
+				if what := worldBound(pass.TypesInfo.TypeOf(r), map[types.Type]bool{}); what != "" {
+					report(r.Pos(), "a pooled value holding a %s: the pool can hand it to code in another World, where it would wait outside that World; "+
+						"keep the World in the value and remake the %s when the World changes (docs/migrating.md)", what, what)
+				}
+			}
+			return true
+		})
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CompositeLit:
+			if t := pass.TypesInfo.TypeOf(n); t != nil && isPool(t) {
+				for _, e := range n.Elts {
+					if kv, ok := e.(*ast.KeyValueExpr); ok {
+						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "New" {
+							check(kv.Value)
+						}
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			for i, l := range n.Lhs {
+				if s, ok := l.(*ast.SelectorExpr); ok && s.Sel.Name == "New" && i < len(n.Rhs) {
+					if t := pass.TypesInfo.TypeOf(s.X); t != nil && isPool(t) {
+						check(n.Rhs[i])
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+// worldBound names the World-bound dst value (a Chan, Timer or Ticker)
+// t is or holds, through pointers and struct fields, or "".
+func worldBound(t types.Type, seen map[types.Type]bool) string {
+	if t == nil || seen[t] {
+		return ""
+	}
+	seen[t] = true
+	if p, ok := t.(*types.Pointer); ok {
+		return worldBound(p.Elem(), seen)
+	}
+	if n, ok := t.(*types.Named); ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == dstPath {
+		switch n.Obj().Name() {
+		case "Chan", "Timer", "Ticker":
+			return "dst." + n.Obj().Name()
+		}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if w := worldBound(u.Field(i).Type(), seen); w != "" {
+				return w
+			}
+		}
+	case *types.Array:
+		return worldBound(u.Elem(), seen)
 	}
 	return ""
 }

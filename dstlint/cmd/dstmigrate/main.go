@@ -71,7 +71,13 @@
 // identity, reflection over channels, or channels from other packages
 // needs a person.
 //
-// Usage: dstmigrate [-world MAP] [-n] packages...
+// -gosched names functions whose runtime.Gosched stays w.Gosched (a turn
+// for others in a loop that makes its own progress) instead of w.Yield.
+// -test-world may name its package by import path
+// ('example.com/app/dstworld.Real()'): test files using it import it.
+//
+// Usage: dstmigrate [-world MAP] [-map MAP] [-tests] [-test-world EXPR]
+// [-real-fs PATTERNS] [-gosched FUNCS] [-n] packages...
 //
 // Verified:
 //   - [lstat-keeps-links] os.Lstat is kept and reported, not rewritten to
@@ -107,10 +113,11 @@ import (
 )
 
 const (
-	dstPath     = "github.com/prince776/go-dst-kit/dst"
-	dsthttpPath = "github.com/prince776/go-dst-kit/dsthttp"
-	dstgrpcPath = "github.com/prince776/go-dst-kit/dstgrpc"
-	grpcPath    = "google.golang.org/grpc"
+	dstPath       = "github.com/prince776/go-dst-kit/dst"
+	dsthttpPath   = "github.com/prince776/go-dst-kit/dsthttp"
+	dstgrpcPath   = "github.com/prince776/go-dst-kit/dstgrpc"
+	realworldPath = "github.com/prince776/go-dst-kit/realworld"
+	grpcPath      = "google.golang.org/grpc"
 )
 
 // grpcInterceptors are grpc's interceptor options; each becomes
@@ -256,10 +263,17 @@ func main() {
 	worldFlag := flag.String("world", "", "receiver type -> World expression, $ for the receiver: 'Raft=$.w,Pool=$.world'")
 	dryRun := flag.Bool("n", false, "print the files instead of writing them")
 	tests := flag.Bool("tests", false, "also rewrite the packages' tests (from the package's test build, in the same pass)")
-	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies")
+	testWorld := flag.String("test-world", "__w", "the World expression in test files where no -world mapping applies; a package by import path ('example.com/app/dstworld.Real()') is imported where used")
 	mapFlag := flag.String("map", "", "calls rewritten to a function taking the World first: 'importpath.Func=importpath.Func,(importpath.Type).Method=importpath.Func'")
 	realFS := flag.String("real-fs", "", "files whose os file I/O is left as is, by base name pattern: 'peersjson.go,*_test.go'")
+	goschedFlag := flag.String("gosched", "", "functions whose runtime.Gosched is a turn for others in a loop that makes its own progress, kept as w.Gosched (elsewhere it becomes w.Yield): 'Type.Method,Func'")
 	flag.Parse()
+	gosched := map[string]bool{}
+	for _, name := range strings.Split(*goschedFlag, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			gosched[name] = false // set once a function of that name is met
+		}
+	}
 	worlds := map[string]string{}
 	for _, kv := range strings.Split(*worldFlag, ",") {
 		if k, v, ok := strings.Cut(strings.TrimSpace(kv), "="); ok {
@@ -283,7 +297,8 @@ func main() {
 		if *tests && skipForTests(pkg, pkgs) {
 			continue
 		}
-		m := &migrator{testWorld: *testWorld, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds, maps: callMaps}
+		tw, twPath := worldImport(*testWorld)
+		m := &migrator{testWorld: tw, testWorldPath: twPath, pkg: pkg.Types, fset: pkg.Fset, info: pkg.TypesInfo, worlds: worlds, maps: callMaps, gosched: gosched}
 		for i, f := range pkg.Syntax {
 			name := pkg.CompiledGoFiles[i]
 			if strings.HasSuffix(name, ".go") == false || seen[name] {
@@ -336,6 +351,11 @@ func main() {
 			}
 		}
 	}
+	for _, name := range slices.Sorted(maps.Keys(gosched)) {
+		if !gosched[name] {
+			fmt.Fprintf(os.Stderr, "dstmigrate: -gosched names %s, which no migrated package has\n", name)
+		}
+	}
 }
 
 type migrator struct {
@@ -345,20 +365,28 @@ type migrator struct {
 	keepGRPC  map[ast.Node]bool
 	warned    map[string]bool
 	testWorld string
-	inTest    bool
-	realFS    bool // the file's os file I/O is left as is (-real-fs)
-	pkg       *types.Package
-	fset      *token.FileSet
-	info      *types.Info
-	worlds    map[string]string
-	maps      map[string]mapping // -map: calls rewritten to a function taking the World
-	imports   map[string]bool    // packages the file's rewrites need
-	changes   int
-	needRecv  bool
-	world     string       // the World expression in the current function
-	plans     []selectPlan // the file's selects, in source order, for the text pass
-	selN      int
-	mutated   map[types.Object]bool // the file's variables that change (mutatedIn)
+	// gosched names the functions (Type.Method, Func) whose
+	// runtime.Gosched stays w.Gosched; a value is set once one is met.
+	gosched map[string]bool
+	// funcName is the function being rewritten, as gosched names it.
+	funcName string
+	// testWorldPath is the package testWorld's expression uses, imported
+	// where it is used ("" for none).
+	testWorldPath string
+	inTest        bool
+	realFS        bool // the file's os file I/O is left as is (-real-fs)
+	pkg           *types.Package
+	fset          *token.FileSet
+	info          *types.Info
+	worlds        map[string]string
+	maps          map[string]mapping // -map: calls rewritten to a function taking the World
+	imports       map[string]bool    // packages the file's rewrites need
+	changes       int
+	needRecv      bool
+	world         string       // the World expression in the current function
+	plans         []selectPlan // the file's selects, in source order, for the text pass
+	selN          int
+	mutated       map[types.Object]bool // the file's variables that change (mutatedIn)
 }
 
 // isChan reports whether e is a channel this migration converts: one of
@@ -458,7 +486,29 @@ func expr(src string) ast.Expr {
 	return e
 }
 
-func (m *migrator) w() ast.Expr { return expr(m.world) }
+func (m *migrator) w() ast.Expr {
+	if m.testWorldPath != "" && m.world == m.testWorld {
+		m.need(m.testWorldPath)
+	}
+	return expr(m.world)
+}
+
+// worldImport splits a World expression naming its package by import
+// path ("example.com/app/dstworld.Real()") into the expression as code
+// writes it ("dstworld.Real()") and the path to import. go-dst-kit's
+// realworld is known by its name alone ("realworld.New(...)").
+func worldImport(e string) (expr, path string) {
+	if i := strings.LastIndex(e[:max(strings.IndexAny(e, "(["), 0)], "/"); strings.IndexAny(e, "([") > 0 && i > 0 {
+		rest := e[i+1:]
+		if dot := strings.Index(rest, "."); dot > 0 {
+			return rest, e[:i+1] + rest[:dot]
+		}
+	}
+	if strings.HasPrefix(e, "realworld.") {
+		return e, realworldPath
+	}
+	return e, ""
+}
 
 // file rewrites f; it reports whether anything changed.
 func (m *migrator) file(f *ast.File) bool {
@@ -469,6 +519,16 @@ func (m *migrator) file(f *ast.File) bool {
 		m.world = "__w"
 		if m.inTest {
 			m.world = m.testWorld
+		}
+		m.funcName = ""
+		if ok {
+			m.funcName = fd.Name.Name
+			if fd.Recv != nil && len(fd.Recv.List) == 1 {
+				m.funcName = recvType(fd.Recv.List[0].Type) + "." + fd.Name.Name
+			}
+			if _, listed := m.gosched[m.funcName]; listed {
+				m.gosched[m.funcName] = true
+			}
 		}
 		if ok && fd.Recv != nil && len(fd.Recv.List) == 1 {
 			tname := recvType(fd.Recv.List[0].Type)
@@ -1068,8 +1128,14 @@ func (m *migrator) callExpr(c *astutil.Cursor, n *ast.CallExpr) {
 	case "runtime":
 		if s.Sel.Name == "Gosched" {
 			// A spin waiting for another goroutine: in a simulation only
-			// World.Yield lets that goroutine run.
-			n.Fun = sel(m.w(), "Yield")
+			// World.Yield lets that goroutine run. Unless -gosched names
+			// the function: a turn for others in a loop that makes its own
+			// progress, where Yield would wait for a step no one owes.
+			fn := "Yield"
+			if m.gosched[m.funcName] {
+				fn = "Gosched"
+			}
+			n.Fun = sel(m.w(), fn)
 			setPos(n, pos)
 			m.changes++
 		}

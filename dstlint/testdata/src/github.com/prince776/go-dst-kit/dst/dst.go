@@ -22,4 +22,16 @@ type Cond struct{ s int }
 
 func NewCond(any) *Cond { return &Cond{} }
 
-type Pool struct{ s int }
+type Pool struct {
+	New func() any
+}
+
+func (p *Pool) Get() any { return nil }
+
+type Chan[T any] struct{ c chan T }
+
+func MakeChan[T any](w *World, n int) Chan[T] { return Chan[T]{} }
+
+type Timer struct{ C Chan[int] }
+
+type Ticker struct{ C Chan[int] }

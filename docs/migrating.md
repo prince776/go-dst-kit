@@ -67,7 +67,7 @@ and why no World reaches it.
 | `context.WithCancelCause`, `WithTimeoutCause`, `WithDeadlineCause` | `dst.WithCancelCause(w, ctx)`, ... | `context.Cause` works on them as on std's |
 | `context.AfterFunc` | `dst.AfterDone(ctx, f)` | f runs in its own goroutine, as with context.AfterFunc |
 | `runtime.Gosched` (a spin waiting for another goroutine) | `w.Yield()` | in simulation it returns once another goroutine has made progress or time has advanced; a spin no one can end is a deadlock |
-| `runtime.Gosched` (a turn for others, in a loop that makes its own progress) | `w.Gosched()` | a plain scheduling point: the goroutine stays runnable. dstmigrate writes `w.Yield()` for every Gosched (the safe default for spins); switch these by hand. The wrong choice shows as simulated time jumping to the next timer, and as a liveness hang when that timer is the end of the run. Rule: if the loop's exit condition depends on another goroutine, it is a spin (Yield); if the loop ends by its own work, Gosched |
+| `runtime.Gosched` (a turn for others, in a loop that makes its own progress) | `w.Gosched()` | a plain scheduling point: the goroutine stays runnable. dstmigrate writes `w.Yield()` for every Gosched (the safe default for spins); switch these with `-gosched`. The wrong choice shows as simulated time jumping to the next timer, and as a liveness hang when that timer is the end of the run. Rule: if the loop's exit condition depends on another goroutine, it is a spin (Yield); if the loop ends by its own work, Gosched |
 | `math/rand/v2` (`rand.N`) | `w.Rand()`, same names (`dst.N(w.Rand(), n)`) | seeded per machine in simulation |
 | `math/rand` (v1) | `w.MathRand()`, same names | math/rand itself in the real World: `Seed` and the GODEBUGs keep their meaning |
 | `crypto/rand.Read`, `Reader`, `Text` | `w.Rand().CryptoRead`, `dst.CryptoReader(w)`, `dst.CryptoText(w)` | crypto/rand in the real World; seeded in simulation (key generation in the crypto packages doesn't replay whatever reader it gets: give simulated machines fixed keys) |
@@ -148,6 +148,35 @@ dst.Select2(w,
   stack, rather than hanging.
 - **A leftover `go` statement** whose goroutine uses the World is reported
   as a misuse, with that goroutine's stack.
+- **Finalizers and cleanups** (`runtime.SetFinalizer`, `runtime.AddCleanup`)
+  run on the runtime's own goroutine, outside any World, when the
+  collector decides: they can't be simulated. Keep them out of anything
+  a run's outcome depends on. A finalizer that asserts an object was
+  closed (and exits the process if not) misfires in simulation, where a
+  crash abandons a machine's objects open: don't register it for objects
+  made in a simulated World (`w.Simulated()` at construction), and check
+  for leaks with the runner instead (goroutines left at the end of a
+  run, or a `h.Final` that counts what is still open).
+- **Pooled objects holding a World's channels or timers.** A `dst.Chan`,
+  `Timer` or `Ticker` belongs to the World it was made in. An object
+  kept in a pool (`dst.Pool`, a free list) that holds one can be taken
+  by code in another World, another seed's or the real one, and its
+  channel would then wait outside that World. Keep the World in the
+  object, and remake the channel when the object is taken by another:
+
+  ```go
+  t := pool.Get().(*task)
+  if t.w != w { // made, or last used, in another World
+  	t.w, t.done = w, dst.MakeChan[error](w, 1)
+  }
+  ```
+
+  dstlint reports a pool whose New makes a value holding one.
+- **Package-level primitives** (a global `dst.Mutex`, `Once` or `Cond`)
+  are shared by every simulation running at once, a sweep's parallel
+  seeds: one simulation can't wake another's goroutines, and the seeds
+  would depend on each other. The World fails such a run as misuse,
+  naming the primitive; dstlint reports them. Make them per instance.
 
 ## dstmigrate
 
@@ -165,6 +194,25 @@ of a function taking the World first, then the receiver for a method:
 
 turns `clock.Now()` into `dstclock.Now(w)` and `m.Elapsed()` into
 `dstclock.Elapsed(w, m)`, importing `dstclock`.
+
+The other flags:
+
+- `-tests` rewrites the packages' `_test.go` files too, in the same
+  pass. Tests usually run on the real World: `-test-world` gives their
+  World expression (`'realworld.New(realworld.Options{})'`, or a
+  helper of yours named by import path,
+  `'example.com/app/internal/dstworld.Real()'`, which is then imported
+  in each test file that uses it).
+- `-real-fs 'peersjson.go,*_test.go'` leaves the os file I/O of the
+  files it names (base-name patterns) as it is: tests' temporary
+  directories, operator tools.
+- `-gosched 'shard.evict,drain'` names the functions (`Type.Method` or
+  `Func`) whose `runtime.Gosched` is a turn for others in a loop that
+  makes its own progress: they keep `w.Gosched()`. Every other Gosched
+  becomes `w.Yield()`, the safe choice for a spin that waits for another
+  goroutine (see the table above). A name that matches no function is
+  reported.
+- `-n` prints the rewritten files instead of writing them.
 
 ## 4. Do it a package at a time
 

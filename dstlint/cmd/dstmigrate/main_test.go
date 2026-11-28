@@ -484,3 +484,74 @@ func TestMigrateMap(t *testing.T) {
 		t.Errorf("a mapped call or the placeholder World survived:\n%s", got)
 	}
 }
+
+// -test-world naming its package by import path imports exactly that
+// package into the test files that use it, so the migrated tests build
+// without hand edits (pebble's manual.py added the import by hand):
+// goimports, which dstmigrate runs after, can't know which of two
+// packages of that name is meant. realworld is known by name alone.
+// Fails if a migrated test file imports another package of the name (or
+// none, and doesn't build), or a file that doesn't use the World gets
+// the import.
+func TestMigrateTestWorldImports(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	kit := filepath.Join(filepath.Dir(here), "..", "..", "..")
+	bin := filepath.Join(t.TempDir(), "dstmigrate")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = filepath.Dir(here)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	for _, tw := range []string{"example.com/twi/zz/deep/dstworld.Real()", "realworld.New(realworld.Options{})"} {
+		dir := t.TempDir()
+		files := map[string]string{
+			"go.mod":                       "module example.com/twi\n\ngo 1.25.0\n\nrequire github.com/prince776/go-dst-kit v0.0.0\n\nreplace github.com/prince776/go-dst-kit => " + kit + "\n",
+			"zz/deep/dstworld/dstworld.go": "package dstworld\n\nimport (\n\t\"github.com/prince776/go-dst-kit/dst\"\n\t\"github.com/prince776/go-dst-kit/realworld\"\n)\n\nfunc Real() *dst.World { return realworld.New(realworld.Options{}) }\n",
+			// A decoy of the same name, where goimports would look first.
+			"dstworld/dstworld.go": "package dstworld\n\nimport \"github.com/prince776/go-dst-kit/dst\"\n\nfunc Real() *dst.World { return nil }\n",
+			"p.go":                 "package twi\n\nfunc Add(a, b int) int { return a + b }\n",
+			"p_test.go":            "package twi\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\nfunc TestAdd(t *testing.T) {\n\ttime.Sleep(time.Millisecond)\n\t_ = Add(1, 2)\n}\n",
+			"q_test.go":            "package twi\n\nimport \"testing\"\n\nfunc TestPlain(t *testing.T) {}\n",
+		}
+		for name, body := range files {
+			os.MkdirAll(filepath.Join(dir, filepath.Dir(name)), 0o755)
+			os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
+		}
+		cmd := exec.Command(bin, "-tests", "-test-world", tw, ".")
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: dstmigrate: %v\n%s", tw, err, out)
+		}
+		vet := exec.Command("go", "vet", "./...")
+		vet.Dir = dir
+		if out, err := vet.CombinedOutput(); err != nil {
+			got, _ := os.ReadFile(filepath.Join(dir, "p_test.go"))
+			t.Fatalf("%s: the migrated tests don't build: %v\n%s\n%s", tw, err, out, got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(dir, "p_test.go")); strings.Contains(tw, "dstworld") && !strings.Contains(string(got), `"example.com/twi/zz/deep/dstworld"`) {
+			t.Errorf("%s: p_test.go doesn't import the package the flag names:\n%s", tw, got)
+		}
+		if q, _ := os.ReadFile(filepath.Join(dir, "q_test.go")); strings.Contains(string(q), "dstworld") || strings.Contains(string(q), "realworld") {
+			t.Errorf("%s: a test file that doesn't use the World got the import:\n%s", tw, q)
+		}
+	}
+}
+
+// -gosched keeps a named function's runtime.Gosched as w.Gosched (a
+// turn for others in a loop that makes its own progress); every other
+// Gosched still becomes w.Yield; a name that matches no function is
+// reported.
+// Fails if the named method's Gosched becomes Yield, another's becomes
+// Gosched, or a typo goes unreported.
+func TestMigrateGosched(t *testing.T) {
+	got, stderr := migrateSample(t, "gosched", "shard=$.w", "-gosched", "shard.evict,shard.evcit")
+	if !regexp.MustCompile(`func \(s \*shard\) evict\(\) \{\n\tfor s\.left\.Add\(-1\) > 0 \{\n\t\ts\.w\.Gosched\(\)`).MatchString(got) {
+		t.Errorf("evict's Gosched didn't stay a Gosched:\n%s", got)
+	}
+	if !regexp.MustCompile(`for !s\.done\.Load\(\) \{\n\t\ts\.w\.Yield\(\)`).MatchString(got) {
+		t.Errorf("wait's Gosched didn't become Yield:\n%s", got)
+	}
+	if !strings.Contains(stderr, "-gosched names shard.evcit, which no migrated package has") {
+		t.Errorf("the typo wasn't reported; stderr:\n%s", stderr)
+	}
+}

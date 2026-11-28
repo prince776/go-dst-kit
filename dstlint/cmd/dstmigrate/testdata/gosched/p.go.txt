@@ -1,0 +1,26 @@
+package p
+
+import (
+	"runtime"
+	"sync/atomic"
+)
+
+type shard struct {
+	w    *dst.World
+	left atomic.Int64
+	done atomic.Bool
+}
+
+// evict makes its own progress: Gosched is a turn for others.
+func (s *shard) evict() {
+	for s.left.Add(-1) > 0 {
+		runtime.Gosched()
+	}
+}
+
+// wait spins until another goroutine sets done: Gosched is a spin.
+func (s *shard) wait() {
+	for !s.done.Load() {
+		runtime.Gosched()
+	}
+}

@@ -214,6 +214,58 @@ default: // timeout: it may or may not have happened
 Getting the third case right matters: a timed-out write may still take
 effect later, and the checker allows exactly that.
 
+### A key-value service on a consensus library
+
+To check a replicated log (Raft, Paxos) for linearizability, put a small
+key-value service on it, as an application would, and record its
+clients' history. The service:
+
+- **The state machine** applies commands `{ID, Key, Value, Get}` to a
+  map. A command whose ID it has already applied (a client's retry,
+  appended to the log again) is answered from its first application and
+  not applied again, as Raft's client sessions do. So retries can't show
+  as a write applied twice, and the state machine checks the log itself:
+  it must see each log index once, in increasing order (`h.Always`).
+- **Writes** go through the log (Apply) and wait for the result.
+- **Reads** go through the log too, or by ReadIndex (Raft paper §6.4):
+  once per term commit an entry of the term (a barrier), so the commit
+  index is current; then per read take the commit index, confirm
+  leadership with a quorum, wait until the state machine has applied
+  that far, and read locally. Both read paths are worth recording:
+  ReadIndex is where stale reads hide.
+
+Each operation ends one of three ways, and the history must say which:
+
+```go
+call := hist.Invoke(client, in)
+res, err := apply(cmd) // through the log, with a timeout
+switch {
+case err == nil:
+	call.Return(check.KVOutput{Value: res.Value, Found: res.Found})
+case errors.Is(err, raft.ErrNotLeader), errors.Is(err, raft.ErrEnqueueTimeout):
+	call.Fail() // never entered the log: no effect
+case in.Op == check.KVGet:
+	call.Fail() // a read with no answer changes nothing
+default:
+	call.Abandon() // a write that may still commit
+}
+```
+
+Failing a read that got no answer instead of abandoning it keeps the
+verdict and spares the checker an operation it must try at every point,
+which matters when leadership changes make such reads common. Then:
+
+```go
+h.Final("the clients' history is linearizable", func(w *dst.World) error {
+	return check.Linearizable(check.KVModel(), hist.Ops(), check.Options{}).Err()
+})
+```
+
+with the checks that don't need a history beside it: acknowledged writes
+survive, every member applied the same sequence, and every member
+catches up once faults stop. Plant a bug for the linearizability check
+on its own (a ReadIndex without the barrier): the others don't see it.
+
 ## Designing the workload
 
 The simulation explores timing: interleavings, crashes, lost replies. It
