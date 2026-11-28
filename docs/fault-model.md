@@ -77,7 +77,11 @@ a law in the package that implements it, with a test.
   `Faults.Crash`, and with both, kills by the seed's kill share. Ordinary
   crashes pick as though the machines a mass restart took were up, so
   turning mass restarts on moves no ordinary crash; the draws come from
-  streams of their own. It isn't in `AllFaults`, so existing sweeps keep
+  streams of their own. That covers when crashes and partitions happen
+  and which machine a crash takes, not the other classes' picks: pauses
+  (and slow machines' stalls) pick among the machines that are up, so a
+  mass restart changes which machine a pause takes, as ordinary crashes
+  already do. It isn't in `AllFaults`, so existing sweeps keep
   their seeds. A machine already down when its turn comes counts as taken.
 - A machine can also lose power inside an I/O call (below).
 - **Pause** stops a machine without crashing it, like SIGSTOP, a long GC
